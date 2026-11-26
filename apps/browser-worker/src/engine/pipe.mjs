@@ -75,7 +75,7 @@ export function connectPipe(writer, reader, { onEvent, onFailure, commandMs = CO
   writer.on('error', () => stop('BROWSER_DISCONNECTED'));
 
   return {
-    send(method, params = {}, sessionId = null) {
+    send(method, params = {}, sessionId = null, timeoutMs = commandMs) {
       if (terminal) return Promise.reject(terminal);
       if (pending.size >= MAX_PENDING) {
         stop('BROWSER_PROTOCOL_LIMIT');
@@ -85,7 +85,7 @@ export function connectPipe(writer, reader, { onEvent, onFailure, commandMs = CO
       const encoded = Buffer.from(`${JSON.stringify({ id, method, params, ...(sessionId ? { sessionId } : {}) })}\0`);
       if (encoded.length > MAX_OUTGOING) return Promise.reject(fail('BROWSER_PROTOCOL_LIMIT'));
       return new Promise((resolve, reject) => {
-        const timer = setTimeout(() => stop('BROWSER_TIMEOUT', method), commandMs);
+        const timer = setTimeout(() => stop('BROWSER_TIMEOUT', method), timeoutMs);
         pending.set(id, { resolve, reject, sessionId, timer, method });
         try { writer.write(encoded, (error) => { if (error) stop('BROWSER_DISCONNECTED'); }); }
         catch { stop('BROWSER_DISCONNECTED'); }

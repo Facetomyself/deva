@@ -3,7 +3,8 @@ import { constants } from 'node:fs';
 import { access, chmod, mkdir, mkdtemp, readdir, readFile, realpath, rm } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
-import { configPolicy, EngineError, fail, VIEWPORT } from './policy.mjs';
+import { BOOTSTRAP_URL, configPolicy, EngineError, fail, VIEWPORT } from './policy.mjs';
+import { classifyStartupStderr } from './launch-diagnostics.mjs';
 import { startChromiumSession } from './session.mjs';
 
 export { EngineError };
@@ -12,10 +13,11 @@ const PROFILE_ROOT = '/tmp';
 const PROFILE_PREFIX = 'deva-browser-';
 const SANDBOX_MS = 2_500;
 const STARTUP_MS = 25_000;
+const HANDSHAKE_MS = 12_000;
 
 function browserFlags(profile, proxyUrl) {
   return [
-    '--headless', '--remote-debugging-pipe', '--no-startup-window',
+    '--headless', '--remote-debugging-pipe',
     `--user-data-dir=${profile}`, `--window-size=${VIEWPORT.width},${VIEWPORT.height}`,
     `--proxy-server=${proxyUrl}`, '--proxy-bypass-list=<-loopback>',
     '--host-resolver-rules=MAP * ~NOTFOUND', '--disable-quic',
@@ -24,7 +26,7 @@ function browserFlags(profile, proxyUrl) {
     '--no-first-run', '--no-default-browser-check', '--disable-background-networking',
     '--disable-component-update', '--disable-extensions', '--disable-sync',
     '--disable-breakpad', '--disable-crash-reporter', '--disable-crashpad-for-testing',
-    '--password-store=basic',
+    '--password-store=basic', BOOTSTRAP_URL,
   ];
 }
 
@@ -156,14 +158,16 @@ function processControl(child, profile) {
     cleanup = (async () => {
       child.stdio[3]?.destroy();
       child.stdio[4]?.destroy();
-      if (!(await awaitEmpty(500))) {
-        await signalBrowser('SIGTERM');
-        if (!(await awaitEmpty(350))) {
-          await signalBrowser('SIGKILL');
-          if (!(await awaitEmpty(1_500))) throw fail('BROWSER_CLEANUP_FAILED');
+      try {
+        if (!(await awaitEmpty(500))) {
+          await signalBrowser('SIGTERM');
+          if (!(await awaitEmpty(350))) {
+            await signalBrowser('SIGKILL');
+            if (!(await awaitEmpty(1_500))) throw fail('BROWSER_CLEANUP_FAILED');
+          }
         }
-      }
-      try { await safeRemove(profile); } catch { throw fail('BROWSER_CLEANUP_FAILED'); }
+        try { await safeRemove(profile); } catch { throw fail('BROWSER_CLEANUP_FAILED'); }
+      } finally { child.stderr?.destroy(); }
     })();
     return cleanup;
   };
@@ -179,7 +183,7 @@ async function launch(policy, probeOnly, signal) {
   if (process.platform !== 'linux' || typeof process.getuid !== 'function' || process.getuid() === 0 || process.geteuid() === 0) {
     throw fail('BROWSER_SANDBOX_REQUIRED');
   }
-  let executable, profile, shutdown;
+  let executable, profile, shutdown, stderr;
   try {
     executable = await realpath(policy.executablePath);
     await access(executable, constants.X_OK);
@@ -191,18 +195,23 @@ async function launch(policy, probeOnly, signal) {
     const env = await runtimeEnv(profile);
     checkStartup();
     const child = spawn(executable, browserFlags(profile, policy.proxyUrl), {
-      cwd: profile, detached: true, env, stdio: ['ignore', 'ignore', 'ignore', 'pipe', 'pipe'],
+      cwd: profile, detached: true, env, stdio: ['ignore', 'ignore', 'pipe', 'pipe', 'pipe'],
     });
+    stderr = classifyStartupStderr(child.stderr);
     shutdown = processControl(child, profile);
     return await startChromiumSession({ writer: child.stdio[3], reader: child.stdio[4], policy, shutdown, probeOnly,
-      signal: startup, abortCode, verifySandbox: () => verifyRendererSandbox(child.pid, process.getuid(), startup) });
+      signal: startup, abortCode, handshakeMs: HANDSHAKE_MS, async verifySandbox() {
+        await verifyRendererSandbox(child.pid, process.getuid(), startup);
+        stderr.finish();
+      } });
   } catch (error) {
     try {
       if (shutdown) await shutdown();
       else if (profile) await safeRemove(profile);
     } catch { throw fail('BROWSER_CLEANUP_FAILED'); }
-    throw error instanceof EngineError ? error : fail('BROWSER_START_FAILED');
-  }
+    const code = error instanceof EngineError ? error.code : 'BROWSER_START_FAILED';
+    throw fail(code, { ...error?.diagnostic, launchHint: stderr?.hint() });
+  } finally { stderr?.finish(); }
 }
 
 /** A single supervised Chromium page. The caller owns lease/auth and the network namespace. */

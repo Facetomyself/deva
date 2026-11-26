@@ -1,7 +1,11 @@
 import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
+import { once } from 'node:events';
 import { PassThrough } from 'node:stream';
 import test from 'node:test';
 import { createChromiumEngine, EngineError, probeChromium } from '../src/engine/chromium.mjs';
+import { classifyStartupStderr } from '../src/engine/launch-diagnostics.mjs';
+import { connectPipe } from '../src/engine/pipe.mjs';
 import { configPolicy, publicPageInfo, VIEWPORT } from '../src/engine/policy.mjs';
 import { startChromiumSession } from '../src/engine/session.mjs';
 
@@ -21,7 +25,7 @@ Buffer.from('0000000049454e44ae426082', 'hex').copy(png, 33);
 const FRAME = png.toString('base64');
 
 function protocolFixture({ probeOnly, verifySandbox = async () => {}, navigationMs = 400, commandMs = 350, signal,
-  pauseRenderer = false, initiallyHeld = [] } = {}) {
+  pauseRenderer = false, initiallyHeld = [], launchTargets = [] } = {}) {
   const writer = new PassThrough();
   const reader = new PassThrough();
   const commands = [];
@@ -59,6 +63,14 @@ function protocolFixture({ probeOnly, verifySandbox = async () => {}, navigation
     }
     switch (method) {
       case 'Browser.getVersion': return respond(request, { product: 'Chrome/140.0.0.0' });
+      case 'Target.getTargets': return respond(request, { targetInfos: launchTargets });
+      case 'Target.setAutoAttach': {
+        if (!request.sessionId) for (const initial of launchTargets) {
+          emit('Target.attachedToTarget', { sessionId: 'initial-session', targetInfo: initial, waitingForDebugger: false }, null);
+        }
+        return respond(request);
+      }
+      case 'Target.closeTarget': return respond(request, { success: true });
       case 'Target.createBrowserContext': return respond(request, { browserContextId: context });
       case 'Target.createTarget':
         emit('Target.attachedToTarget', { sessionId: session, targetInfo: { ...info }, waitingForDebugger: !resumed }, null);
@@ -98,6 +110,63 @@ function protocolFixture({ probeOnly, verifySandbox = async () => {}, navigation
     get closed() { return closed; },
   };
 }
+
+test('Node child fd 3 reads requests and fd 4 writes responses on the private pipe', async (t) => {
+  const child = spawn(process.execPath, ['--input-type=module', '--eval', `
+    import { createReadStream, writeSync } from 'node:fs';
+    const request = createReadStream(null, { fd: 3, autoClose: false });
+    let buffered = '';
+    for await (const bytes of request) {
+      buffered += bytes.toString('utf8');
+      const end = buffered.indexOf('\\0');
+      if (end === -1) continue;
+      const frame = JSON.parse(buffered.slice(0, end));
+      if (frame.method !== 'Browser.getVersion') process.exit(2);
+      writeSync(4, JSON.stringify({ id: frame.id, result: { product: 'Chromium/140.0.0.0' } }) + '\\0');
+      break;
+    }
+  `], { stdio: ['ignore', 'ignore', 'pipe', 'pipe', 'pipe'] });
+  const exited = once(child, 'exit');
+  t.after(() => child.kill());
+  child.stderr.resume();
+  const pipe = connectPipe(child.stdio[3], child.stdio[4], { onEvent() {}, onFailure() {} });
+  assert.deepEqual(await pipe.send('Browser.getVersion'), { product: 'Chromium/140.0.0.0' });
+  pipe.stop();
+  child.stdio[3].destroy();
+  child.stdio[4].destroy();
+  assert.deepEqual(await exited, [0, null]);
+});
+
+test('launcher stderr exposes an enum only and stops classifying before site use', () => {
+  const stream = new PassThrough();
+  const diagnostic = classifyStartupStderr(stream);
+  assert.equal(diagnostic.hint(), 'silent');
+  stream.write(Buffer.from('test local path /private/path and session '));
+  assert.equal(diagnostic.hint(), 'unclassified');
+  stream.write(Buffer.from('remote debugging pipe file descr'));
+  stream.write(Buffer.from('iptors are not open'));
+  assert.equal(diagnostic.hint(), 'debug-pipe');
+  diagnostic.finish();
+  stream.write(Buffer.from('error while loading shared libraries: /private/path'));
+  assert.equal(diagnostic.hint(), 'debug-pipe');
+  assert.equal(new EngineError('BROWSER_START_FAILED', { launchHint: '/private/path' }).diagnostic, undefined);
+  stream.end();
+});
+
+test('only the known initial blank may coexist until the isolated target replaces it', async (t) => {
+  const initial = { targetId: 'original-blank', type: 'page', url: 'about:blank', attached: false };
+  const fixture = protocolFixture({ launchTargets: [initial] });
+  const engine = await fixture.engine;
+  t.after(() => engine.close());
+  const closed = fixture.commands.findIndex(({ method }) => method === 'Target.closeTarget');
+  assert.ok(closed > fixture.commands.findIndex(({ method }) => method === 'Runtime.runIfWaitingForDebugger'));
+  assert.deepEqual(fixture.commands[closed].params, { targetId: 'original-blank' });
+  assert.ok(closed < fixture.commands.findIndex(({ method }) => method === 'Page.navigate'));
+  const unexpected = protocolFixture({ launchTargets: [{ ...initial, url: OTHER }] });
+  await assert.rejects(unexpected.engine, { code: 'BROWSER_TARGET_LOST', diagnostic: { stage: 'discover-bootstrap' } });
+  assert.equal(unexpected.closed, 1);
+  assert.ok(!unexpected.commands.some(({ method }) => method === 'Page.navigate'));
+});
 
 test('startup resumes a paused blank renderer before renderer controls and still secures it before the site', async (t) => {
   let attested = false;

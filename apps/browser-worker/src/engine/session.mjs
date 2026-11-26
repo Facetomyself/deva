@@ -15,8 +15,8 @@ const cloneFrame = (frame) => ({ ...frame, bytes: Buffer.from(frame.bytes) });
 // Internal controller, with the process/transport boundary explicit for deterministic tests.
 // The exported production facade has only the fixed methods returned at the bottom.
 export async function startChromiumSession({ writer, reader, policy, verifySandbox, shutdown, probeOnly = false,
-  commandMs, navigationMs = NAVIGATION_MS, signal, abortCode = () => 'BROWSER_ABORTED' }) {
-  let contextId, targetId, sessionId, frameId;
+  commandMs, handshakeMs, navigationMs = NAVIGATION_MS, signal, abortCode = () => 'BROWSER_ABORTED' }) {
+  let contextId, targetId, sessionId, frameId, startupBlankId;
   let startupStage = 'version';
   let opening = false;
   const attached = new Map();
@@ -146,6 +146,10 @@ export async function startChromiumSession({ writer, reader, policy, verifySandb
     if (method === 'Target.attachedToTarget') {
       const target = p.targetInfo;
       if (!target || typeof target.targetId !== 'string' || typeof p.sessionId !== 'string') return fatal('BROWSER_PROTOCOL_INVALID');
+      if (id === null && startupBlankId && target.targetId === startupBlankId) {
+        if (target.type !== 'page' || target.url !== BOOTSTRAP_URL || target.openerId) fatal('BROWSER_TARGET_LOST');
+        return; // This exact pre-existing blank is never resumed or exposed.
+      }
       if (id === null && opening && target.type === 'page' && target.browserContextId === contextId) {
         if (attached.size) return fatal('BROWSER_TARGET_LOST');
         attached.set(target.targetId, p.sessionId);
@@ -313,8 +317,17 @@ export async function startChromiumSession({ writer, reader, policy, verifySandb
   }
 
   async function setup() {
-    const version = await root('Browser.getVersion');
+    const version = await pipe.send('Browser.getVersion', {}, null, handshakeMs);
     if (!/^(?:Chromium|Chrome|HeadlessChrome)\/[\d.]+$/u.test(version.product ?? '')) throw fail('BROWSER_START_FAILED');
+    startupStage = 'discover-bootstrap';
+    const { targetInfos } = await root('Target.getTargets', { filter: PAGE_TARGETS });
+    if (!Array.isArray(targetInfos) || targetInfos.length > 1) throw fail('BROWSER_TARGET_LOST');
+    if (targetInfos.length === 1) {
+      const [initial] = targetInfos;
+      if (initial?.type !== 'page' || initial.url !== BOOTSTRAP_URL || initial.openerId || initial.attached ||
+          typeof initial.targetId !== 'string' || !initial.targetId) throw fail('BROWSER_TARGET_LOST');
+      startupBlankId = initial.targetId;
+    }
     startupStage = 'context';
     const context = await root('Target.createBrowserContext', { disposeOnDetach: true });
     if (typeof context.browserContextId !== 'string') throw fail('BROWSER_START_FAILED');
@@ -337,6 +350,12 @@ export async function startChromiumSession({ writer, reader, policy, verifySandb
     // Its download guard is already active and no site is navigated until all guards and attestation pass.
     startupStage = 'resume-bootstrap';
     await page('Runtime.runIfWaitingForDebugger');
+    if (startupBlankId) {
+      startupStage = 'close-startup-blank';
+      const { success } = await root('Target.closeTarget', { targetId: startupBlankId });
+      if (success !== true) throw fail('BROWSER_TARGET_LOST');
+      startupBlankId = undefined;
+    }
     startupStage = 'page-controls';
     await page('Target.setAutoAttach', { ...AUTO_ATTACH, filter: SUBTARGETS });
     await page('Page.enable');

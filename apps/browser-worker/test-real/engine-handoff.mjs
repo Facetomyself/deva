@@ -18,9 +18,10 @@ const ENTRY_HASH = 'fixture-local-fragment';
 let verificationPhase = 'preflight';
 
 async function executable() {
-  const chosen = process.argv[2] || process.env.CHROMIUM_PATH || process.env.CHROME_PATH;
-  const paths = chosen ? [chosen] : (process.env.PATH ?? '').split(':').filter(isAbsolute)
-    .flatMap((dir) => ['chromium', 'chromium-browser', 'google-chrome', 'google-chrome-stable', 'chrome'].map((name) => join(dir, name)))
+  const chosen = process.argv[2] || process.env.CHROMIUM_PATH || process.env.CHROME_BIN || process.env.CHROME_PATH;
+  const dirs = (process.env.PATH ?? '').split(':').filter(isAbsolute);
+  const paths = chosen ? [chosen] : ['google-chrome', 'google-chrome-stable', 'chromium', 'chrome', 'chromium-browser']
+    .flatMap((name) => dirs.map((dir) => join(dir, name)))
     .concat('/opt/google/chrome/chrome', '/usr/lib/chromium/chromium');
   for (const path of paths) {
     if (!isAbsolute(path)) continue;
@@ -260,7 +261,7 @@ run().catch((error) => {
   const diagnostic = error instanceof EngineError ? error.diagnostic : undefined;
   const code = /^BROWSER_[A-Z_]+$/u.test(error?.code) ? error.code : 'FIXTURE_FAILURE';
   const labels = [`phase=${verificationPhase}`, diagnostic?.stage && `stage=${diagnostic.stage}`,
-    diagnostic?.command && `command=${diagnostic.command}`].filter(Boolean);
+    diagnostic?.command && `command=${diagnostic.command}`, diagnostic?.launchHint && `launch=${diagnostic.launchHint}`].filter(Boolean);
   console.error(`FAIL ${code} [${labels.join(' ')}]`);
   process.exitCode = 1;
 });

@@ -1,12 +1,12 @@
 import { isAbsolute } from 'node:path';
 
 const DIAGNOSTIC_STAGES = new Set([
-  'version', 'context', 'download-guard', 'root-auto-attach', 'create-target', 'wait-target', 'resume-bootstrap',
-  'page-controls', 'bootstrap-png', 'sandbox-attest', 'entry-navigation',
+  'version', 'discover-bootstrap', 'context', 'download-guard', 'root-auto-attach', 'create-target', 'wait-target',
+  'resume-bootstrap', 'close-startup-blank', 'page-controls', 'bootstrap-png', 'sandbox-attest', 'entry-navigation',
 ]);
 const DIAGNOSTIC_COMMANDS = new Set([
   'Browser.getVersion', 'Browser.setDownloadBehavior', 'Browser.close', 'Target.createBrowserContext',
-  'Target.createTarget', 'Target.setAutoAttach', 'Target.getTargetInfo', 'Target.closeTarget',
+  'Target.createTarget', 'Target.setAutoAttach', 'Target.getTargetInfo', 'Target.getTargets', 'Target.closeTarget',
   'Runtime.runIfWaitingForDebugger', 'Page.enable', 'Page.setLifecycleEventsEnabled', 'Page.setInterceptFileChooserDialog',
   'Network.setCacheDisabled', 'Network.setBypassServiceWorker', 'Emulation.setDeviceMetricsOverride', 'Page.getFrameTree',
   'Fetch.enable', 'Fetch.continueRequest', 'Fetch.continueResponse', 'Fetch.failRequest', 'Fetch.continueWithAuth',
@@ -14,14 +14,18 @@ const DIAGNOSTIC_COMMANDS = new Set([
   'Page.handleJavaScriptDialog', 'Input.insertText', 'Input.dispatchKeyEvent', 'Input.dispatchMouseEvent',
 ]);
 
+const LAUNCH_HINTS = new Set(['silent', 'unclassified', 'missing-library', 'sandbox-denied', 'debug-pipe',
+  'profile-lock', 'snap-wrapper', 'startup-fatal']);
+
 export class EngineError extends Error {
-  constructor(code, { stage, command } = {}) {
+  constructor(code, { stage, command, launchHint } = {}) {
     super(code);
     this.name = 'EngineError';
     this.code = code;
     const safe = {};
     if (DIAGNOSTIC_STAGES.has(stage)) safe.stage = stage;
     if (DIAGNOSTIC_COMMANDS.has(command)) safe.command = command;
+    if (LAUNCH_HINTS.has(launchHint)) safe.launchHint = launchHint;
     if (Object.keys(safe).length) this.diagnostic = Object.freeze(safe);
   }
 }
