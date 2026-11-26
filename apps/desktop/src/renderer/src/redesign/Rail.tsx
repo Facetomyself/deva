@@ -1,5 +1,5 @@
 /**
- * 左侧图标栏与对话列表（搜索、筛选、分组、行菜单、新建对话 / 角色）。
+ * 左侧对话列表（搜索、筛选、分组、行菜单、新建对话 / 角色）。
  */
 import { useEffect, useMemo, useRef, useState } from 'react'
 import {
@@ -9,7 +9,6 @@ import {
   ArrowLeft,
   ArrowUpToLine,
   ChevronRight,
-  Cog,
   Folder,
   FolderMinus,
   Globe,
@@ -20,9 +19,7 @@ import {
   Pencil,
   Plus,
   Search,
-  Smartphone,
   Trash2,
-  Users,
   X
 } from 'lucide-react'
 import type { Persona } from '../mock/extensions'
@@ -36,7 +33,6 @@ import {
 } from '../store/chat'
 import { useI18n } from '../i18n/i18n'
 import { PersonaFace, parseAvatarSpec } from '../components/humation'
-import { ProfilePanel } from './ProfilePanel'
 import {
   basename,
   DragBar,
@@ -50,6 +46,8 @@ import { type CtxEntry, ContextMenu } from './ContextMenu'
 import { ThreadSelectBar, useThreadBatch, useThreadSelect } from './ThreadSelect'
 import { memberPersona } from './MemberBar'
 import { useDraftPreview } from './Composer'
+
+export { IconRail, type RailTab } from './IconRail'
 
 /**
  * 花名册手动排序不再按名称（角色可改名 → 名称排序会跳位）：改由用户拖拽 / 置顶决定，顺序以 id 列表
@@ -67,120 +65,6 @@ function reorderIds(
   if (ti < 0) return ids
   without.splice(place === 'before' ? ti : ti + 1, 0, dragId)
   return without
-}
-
-/** 图标栏的 tab：对话 / 角色 / 定时任务 / 机器人。 */
-export type RailTab = 'chats' | 'roster' | 'tasks' | 'bots'
-
-/* ============================ 最左：图标导航栏（微信式） ============================ */
-/**
- * 窄图标栏：顶部当前用户头像，中部「对话 / 角色」切换（点击切左栏列表列），底部设置入口。
- * 把原先挤在列表列顶部的文字 tab 与底部的用户/设置脚移到这里，列表列因而只承载列表本身。
- */
-export function IconRail({
-  tab,
-  onTab,
-  listCollapsed,
-  onChatsHover,
-  onChatsLeave,
-  onOpenSettings,
-  chatAlert,
-  unavailable,
-  library
-}: {
-  tab: RailTab
-  /** 点亮着的「对话」图标也回调（由调用方切换会话列表的收起 / 展开）。 */
-  onTab: (t: RailTab) => void
-  /** 对话页的会话列表已收起：「对话」图标的提示改为「展开会话列表」，红点也显示在它上面。 */
-  listCollapsed: boolean
-  /** 悬停 / 离开「对话」图标（收起时据此浮出列表）。 */
-  onChatsHover?: () => void
-  onChatsLeave?: () => void
-  onOpenSettings: () => void
-  /** 其他对话有新消息或待你处理 → 按钮上显示红点。 */
-  chatAlert: boolean
-  /** Explanation for features that this host does not expose. Omitted on desktop. */
-  unavailable?: string
-  library?: { openProfile: () => void; openRoster: () => void }
-}): React.JSX.Element {
-  const { t } = useI18n()
-  const [profileOpen, setProfileOpen] = useState(false)
-  // 亮着的「对话」图标点了是收起 / 展开，提示写明，免得点了以为列表丢了。
-  const chatsLabel =
-    tab !== 'chats' ? t('cf.tabChats') : listCollapsed ? t('cf.expandList') : t('cf.collapseList')
-  return (
-    <nav className="cf-iconrail">
-      <button
-        type="button"
-        className="cf-iconrail__me"
-        title={library ? t('cf.profile.open') : unavailable ?? t('cf.profile.open')}
-        disabled={!!unavailable && !library}
-        data-testid={library ? 'workbench-profile' : undefined}
-        aria-label={t('cf.profile.open')}
-        onClick={library?.openProfile ?? (() => setProfileOpen(true))}
-      >
-        <Avatar user size={34} />
-      </button>
-      {profileOpen && !unavailable && <ProfilePanel onClose={() => setProfileOpen(false)} />}
-      <button
-        className={`cf-navbtn${tab === 'chats' ? ' is-active' : ''}`}
-        title={chatsLabel}
-        aria-label={chatsLabel}
-        aria-current={tab === 'chats'}
-        aria-expanded={tab === 'chats' ? !listCollapsed : undefined}
-        onClick={() => onTab('chats')}
-        onMouseEnter={onChatsHover}
-        onMouseLeave={onChatsLeave}
-      >
-        <MessageCircle size={20} />
-        {/* 看不到会话列表时（不在对话页，或列表已收起），在导航按钮上提示其他对话的动静。 */}
-        {(tab !== 'chats' || listCollapsed) && chatAlert && (
-          <span className="cf-navbtn__dot" aria-hidden="true" />
-        )}
-      </button>
-      <button
-        className={`cf-navbtn${tab === 'roster' ? ' is-active' : ''}`}
-        title={library ? t('cf.tabRoster') : unavailable ?? t('cf.tabRoster')}
-        disabled={!!unavailable && !library}
-        data-testid={library ? 'workbench-roster' : undefined}
-        aria-label={t('cf.tabRoster')}
-        aria-current={tab === 'roster'}
-        onClick={library?.openRoster ?? (() => onTab('roster'))}
-      >
-        <Users size={20} />
-      </button>
-      <button
-        className={`cf-navbtn${tab === 'tasks' ? ' is-active' : ''}`}
-        title={unavailable ?? t('cf.tabTasks')}
-        disabled={!!unavailable}
-        aria-label={t('cf.tabTasks')}
-        aria-current={tab === 'tasks'}
-        onClick={() => onTab('tasks')}
-      >
-        <AlarmClock size={20} />
-      </button>
-      <div className="cf-spacer" />
-      <button
-        className={`cf-navbtn${tab === 'bots' ? ' is-active' : ''}`}
-        title={unavailable ?? t('bots.title')}
-        disabled={!!unavailable}
-        aria-label={t('bots.title')}
-        aria-current={tab === 'bots'}
-        onClick={() => onTab('bots')}
-      >
-        <Smartphone size={20} />
-      </button>
-      <button
-        className="cf-navbtn"
-        title={t('cf.settings')}
-        aria-label={t('cf.settings')}
-        data-testid={unavailable ? "workbench-settings" : undefined}
-        onClick={onOpenSettings}
-      >
-        <Cog size={20} />
-      </button>
-    </nav>
-  )
 }
 
 /** 列表行右键菜单：光标处（视口坐标）+ 目标（对话或角色）。 */
