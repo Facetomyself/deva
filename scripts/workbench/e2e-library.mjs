@@ -63,12 +63,14 @@ function avatarPng() {
 // form values, cookies, CSRF, storage details, screenshots, or avatar bytes.
 function controls(browser, signal, readOnlyNavigation = false) {
   // The restored panel can replace a DOM node between a W3C element lookup and click.
-  // Re-resolve a stale reference once in the readback phase ONLY. Never replay writes or a chat launch.
-  async function clickResolved(lookup) {
+  // Re-resolve only a read-side navigation/selection. Never replay a write or a chat launch.
+  async function clickResolved(lookup, description, navigation = false) {
     try { await browser.click(await lookup()) }
     catch (error) {
-      if (!readOnlyNavigation || !(error instanceof WebDriverError) || error.detail !== 'stale element reference') throw error
-      await browser.click(await lookup())
+      if (!(error instanceof WebDriverError)) throw error
+      if ((!readOnlyNavigation && !navigation) || error.detail !== 'stale element reference') throw new WebDriverError(description, error.detail)
+      try { await browser.click(await lookup()) }
+      catch (retry) { if (retry instanceof WebDriverError) throw new WebDriverError(description, retry.detail); throw retry }
     }
   }
   const until = (predicate, description) => waitFor(predicate, description, { signal })
@@ -85,7 +87,8 @@ function controls(browser, signal, readOnlyNavigation = false) {
   }, description)
   return {
     element, until,
-    click: (...args) => clickResolved(() => element(...args)),
+    click: (...args) => clickResolved(() => element(...args), args[1]),
+    navigate: (...args) => clickResolved(() => element(...args), args[1], true),
     gone: (selector, description) => until(() => browser.execute('return !document.querySelector(arguments[0]);', selector), description),
     async fill(selector, value, replace = false) {
       const field = await element(selector, 'editable form field')
@@ -95,7 +98,7 @@ function controls(browser, signal, readOnlyNavigation = false) {
       await clickResolved(() => until(() => browser.execute(`
         const select = document.querySelector(arguments[0]);
         return select && !select.disabled && select.getClientRects().length ? [...select.options].find(node => !node.disabled && node.textContent.trim() === arguments[1]) ?? null : null;
-      `, selector, name), 'catalogued workspace option'))
+      `, selector, name), 'catalogued workspace option'), 'select a registered memory scope', true)
       await until(() => browser.execute('return document.querySelector(arguments[0])?.selectedOptions[0]?.textContent.trim() === arguments[1];', selector, name),
         'selected workspace option')
     }
@@ -278,8 +281,8 @@ async function createRoleAndMemory(ui, browser) {
 }
 
 async function openProjectMemory(ui) {
-  await ui.click(hook('profile'), 'open personal profile for project memory')
-  await ui.click(hook('project-open'), 'open the project memory panel')
+  await ui.navigate(hook('profile'), 'open personal profile for project memory')
+  await ui.navigate(hook('project-open'), 'open the project memory panel')
   await ui.choose(hook('project-select'), projectName)
 }
 
