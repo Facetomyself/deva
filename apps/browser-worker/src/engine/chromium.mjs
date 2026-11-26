@@ -5,6 +5,7 @@ import { basename, dirname, join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { configPolicy, EngineError, fail } from './policy.mjs';
 import { classifyStartupStderr } from './launch-diagnostics.mjs';
+import { observeNetworkRestarts } from './network-startup.mjs';
 import { browserFlags } from './launch-flags.mjs';
 import { procIdentity, verifyRendererSandbox } from './sandbox.mjs';
 import { startChromiumSession } from './session.mjs';
@@ -166,7 +167,7 @@ async function launch(policy, probeOnly, signal) {
   if (process.platform !== 'linux' || typeof process.getuid !== 'function' || process.getuid() === 0 || process.geteuid() === 0) {
     throw fail('BROWSER_SANDBOX_REQUIRED');
   }
-  let executable, profile, shutdown, stderr;
+  let executable, profile, shutdown, stderr, networking;
   try {
     executable = await realpath(policy.executablePath);
     await access(executable, constants.X_OK);
@@ -182,10 +183,11 @@ async function launch(policy, probeOnly, signal) {
       cwd: profile, detached: true, env, stdio: ['ignore', 'ignore', 'pipe', 'pipe', 'pipe'],
     });
     stderr = classifyStartupStderr(child.stderr);
+    networking = observeNetworkRestarts(child.stderr);
     const control = processControl(child, profile);
     shutdown = control.shutdown;
     return await startChromiumSession({ writer: child.stdio[3], reader: child.stdio[4], policy, shutdown, probeOnly,
-      signal: startup, abortCode, handshakeMs: HANDSHAKE_MS, async verifySandbox(getProcessInfo) {
+      signal: startup, abortCode, handshakeMs: HANDSHAKE_MS, sealStartup: () => networking.stop(), async verifySandbox(getProcessInfo) {
         await verifyRendererSandbox({ pid: child.pid, uid: process.getuid(), profile, signal: startup, getProcessInfo,
           trustedBrowserInventory: true, observeOwned: control.observeOwned });
         stderr.finish();
@@ -196,8 +198,8 @@ async function launch(policy, probeOnly, signal) {
       else if (profile) await safeRemove(profile);
     } catch { throw fail('BROWSER_CLEANUP_FAILED'); }
     const code = error instanceof EngineError ? error.code : 'BROWSER_START_FAILED';
-    throw fail(code, { ...error?.diagnostic, launchHint: stderr?.hint() });
-  } finally { stderr?.finish(); }
+    throw fail(code, { ...error?.diagnostic, launchHint: stderr?.hint(), networkRestarts: networking?.stop() });
+  } finally { networking?.stop(); stderr?.finish(); }
 }
 
 /** A single supervised Chromium page. The caller owns lease/auth and the network namespace. */

@@ -344,7 +344,20 @@ async function openSite(browser, screen, fixture, sid) {
   `, selector, option, siteLabel, fixture.origin), 'REGISTERED_SITE_MISSING')
   await browser.click(actualOption)
   await screen.click(panel('open-site'), 'REGISTERED_SITE_OPEN_MISSING')
-  await screen.status(['open'], 30_000)
+  // Distinguish an actual typed denial/unavailability from a missing React transition.
+  // Only status/HTTP/counts leave the client, never a URL, response body or login proof.
+  const opened = await screen.status(['open','request-failed','sandbox-startup-failure','worker-unavailable','egress-unavailable','binary-missing'], 30_000)
+  if (opened !== 'open') {
+    const observed = await browser.execute(`
+      const path=arguments[0]; const rows=performance.getEntriesByType('resource').filter(row=> {
+        const u=new URL(row.name);return u.origin===location.origin && u.pathname===path && !u.search && !u.hash;
+      });const status=rows.at(-1)?.responseStatus;
+      return Number.isInteger(status) && status>=0 && status<=599 ? status : 0;
+    `, `${browserScope(sid)}/open`)
+    const fixed=new Set(['request-failed','sandbox-startup-failure','worker-unavailable','egress-unavailable','binary-missing'])
+    const count=Math.max(0,Math.min(8,fixture.documents.length-oldDocs))
+    throw new Failure(`SITE_OPEN_${fixed.has(opened)?opened:'unknown'}_HTTP_${Number.isInteger(observed)?observed:0}_DOCUMENTS_${count}`)
+  }
   await screen.absent(panel('frame'), 'FRAME_BEFORE_CLAIM')
   check(fixture.documents.length === oldDocs + 1, fixture.failure ?? 'EXPECTED_ONE_FIXTURE_DOCUMENT')
   return { tabId: await tabIn(browser, sid, 'open'), nonce: fixture.documents[oldDocs] }

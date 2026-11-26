@@ -26,7 +26,7 @@ const FRAME = png.toString('base64');
 
 function protocolFixture({ probeOnly, verifySandbox = async () => {}, navigationMs = 400, commandMs = 350, signal,
   initiallyHeld = [], launchTargets, discoveryTargets, unexpectedDiscovered, duringDownload, omitAttachedContext = false,
-  fetchNavigation = false, holdNavigationCommit = false } = {}) {
+  fetchNavigation = false, holdNavigationCommit = false, initialNavigationFailure } = {}) {
   const writer = new PassThrough();
   const reader = new PassThrough();
   const commands = [];
@@ -80,6 +80,12 @@ function protocolFixture({ probeOnly, verifySandbox = async () => {}, navigation
       case 'Target.getTargetInfo': return respond(request, { targetInfo: { ...info } });
       case 'Page.getFrameTree': return respond(request, { frameTree: { frame: { url: info.url, id: main } } });
       case 'Page.navigate': {
+        if (initialNavigationFailure) {
+          emit('Page.frameStartedNavigating', { frameId: main, url: params.url });
+          emit('Page.frameStartedLoading', { frameId: main });
+          emit('Page.frameStartedLoading', { frameId: 'unrelated' });
+          return respond(request, initialNavigationFailure);
+        }
         if (fetchNavigation) {
           pausedNavigation = request;
           return emit('Fetch.requestPaused', fetchEvent());
@@ -297,6 +303,31 @@ test('startup timeout reports only a predefined phase and CDP command', async ()
   });
   assert.equal(fixture.closed, 1);
   assert.equal(new EngineError('BROWSER_START_FAILED', { stage: '/private/path', command: START }).diagnostic, undefined);
+});
+
+test('entry diagnostics distinguish an early rejection from a missing ACK and never echo page-controlled strings', async () => {
+  for (const [result, expected] of [
+    [{ frameId: 'main-frame', errorText:'net::ERR_ABORTED' }, {error:'aborted',frame:'main',download:false}],
+    [{ frameId: START, errorText:'net::ERR_PROXY_CONNECTION_FAILED' }, {error:'proxy',frame:'other',download:false}],
+    [{ errorText: START }, {error:'other',frame:'missing',download:false}],
+    [{ frameId:'main-frame', isDownload:true }, {error:'none',frame:'main',download:true}],
+  ]) {
+    const f=protocolFixture({initialNavigationFailure: result});
+    await assert.rejects(f.engine,e=>{
+      assert.equal(e.code,result.isDownload?'BROWSER_DOWNLOAD_UNSUPPORTED':'BROWSER_NAVIGATION_FAILED');
+      assert.deepEqual(e.diagnostic.entryReceipt,expected);
+      assert.equal(e.diagnostic.entryNavigation.navigateAck,1);
+      assert.equal(e.diagnostic.entryNavigation.mainFrameStartedNavigating,1);
+      assert.equal(e.diagnostic.entryNavigation.mainFrameStartedLoading,1);
+      assert.equal(e.diagnostic.entryNavigation.requestPaused,0);
+      assert.ok(!JSON.stringify(e.diagnostic).includes(START));
+      return true;
+    });
+    assert.equal(f.closed,1);
+  }
+  assert.equal(new EngineError('BROWSER_START_FAILED',{entryReceipt:{error:START,frame:'main',download:false}}).diagnostic,undefined);
+  const f=protocolFixture({ commandMs:60, initiallyHeld:['Page.navigate'] });
+  await assert.rejects(f.engine,e=>e.code==='BROWSER_TIMEOUT' && e.diagnostic.entryNavigation.navigateAck===0 && !Object.hasOwn(e.diagnostic,'entryReceipt'));
 });
 
 test('entry interleaves Fetch request and response continuations with a waiting Page.navigate', async (t) => {
