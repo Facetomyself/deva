@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from 'react'
 import { Archive, ArrowLeft, Globe, Plus, Search } from 'lucide-react'
 import { useI18n } from '../renderer/src/i18n/i18n'
 import { findActive, useModels } from '../renderer/src/store/models'
@@ -17,6 +17,9 @@ import { ManualBrowserDialog } from './browser-panel'
 import { createBrowserTransport, type BrowserTransport } from './browser-transport'
 import { chatCopy, turnLabel, type ChatCopy } from './chat-copy'
 import { createChatTransport, inputBytes, MAX_TEXT_INPUT, type ChatState } from './chat-transport'
+import { eligibleDeliveryReplies } from './deliveries-controller'
+import { createDeliveriesTransport, type DeliveriesTransport, type DeliveryGroup, type DeliveryLocation } from './deliveries-transport'
+import { BrowserDeliveryCard, DeliveryFeedback, DeliveryHistory, ReplyDeliveryActions, useDeliveries } from './deliveries-ui'
 import { createLibrary, type Roster } from './library-transport'
 import { LibraryWorkspace, type LibraryPanel } from './library-workspace'
 import { createPreferenceTransport, matchesPreferences, projectSession } from './session-preferences'
@@ -77,6 +80,16 @@ export default function TextWorkbench({ transport, bootstrap, beforeWrite, onExp
   const workspaceLabel = locale === 'zh-CN' ? '工作区文件' : 'Workspace files'
   const openFiles = files ? () => { setFilesOpen(true); void files.loadProjects() } : undefined
   const sid = wk.selected
+  const deliveryEnabled = bootstrap.capabilities?.deliveries === true
+  const deliveryApi = useMemo(() => deliveryEnabled ? createDeliveriesTransport(transport, bootstrap.csrf) : undefined,
+    [deliveryEnabled, transport, bootstrap.csrf])
+  const [locatedFilesSid, setLocatedFilesSid] = useState<string>()
+  useLayoutEffect(() => { setLocatedFilesSid(undefined) }, [sid, locked])
+  const openInWorkspace = useCallback(async ({ workspaceId, path }: DeliveryLocation, signal: AbortSignal): Promise<boolean> => {
+    if (!sid || !files || signal.aborted || !await files.reveal(workspaceId, path, signal) || signal.aborted) return false
+    setLocatedFilesSid(sid)
+    return true
+  }, [files, sid])
   const selectedEntry = wk.sessions.find((s) => s.id === sid)
   const preferenceEntry = sid ? preferences?.get(sid) : undefined
   const projectedEntry = selectedEntry ? projectSession(selectedEntry, preferenceEntry?.pending) : undefined
@@ -216,7 +229,9 @@ export default function TextWorkbench({ transport, bootstrap, beforeWrite, onExp
               if (!preferenceControlsDisabled && model !== preferenceEntry?.confirmed?.preferences.model) void preferences.write(sid, { model })
             }
           } : undefined}
-          openSettings={openSettings} openFiles={openFiles} workspaceLabel={workspaceLabel} />
+          openSettings={openSettings} openFiles={openFiles} workspaceLabel={workspaceLabel}
+           deliveryApi={deliveryApi} locale={locale} beforeWrite={beforeWrite} onExpired={onExpired}
+           openInWorkspace={files ? openInWorkspace : undefined} />
           : <div className="wb-chat__empty cf-empty">
             {wk.listLoading ? <span role="status">{c.loading}</span> : <>
               <span>{wk.listIssue ? c[wk.listIssue] : c.empty}</span>
@@ -230,7 +245,8 @@ export default function TextWorkbench({ transport, bootstrap, beforeWrite, onExp
     </div>
     {settingsOpen && renderSettings(() => setSettingsOpen(false))}
     {browserOpen && browserVisible && <ManualBrowserDialog api={browserOpen.panel} dismiss={() => setBrowserOpen(undefined)} />}
-    {files && <WorkspaceFilesPanel open={filesOpen} close={() => setFilesOpen(false)} controller={files} />}
+    {files && <WorkspaceFilesPanel open={filesOpen || (!!sid && locatedFilesSid === sid && !locked)}
+      close={() => { setFilesOpen(false); setLocatedFilesSid(undefined) }} controller={files} />}
     {renameSid && renameSid === sid && preferences && preferenceEntry && <SessionRenameDialog key={sid} sid={sid} entry={preferenceEntry}
       store={preferences} disabled={preferenceLocked} close={() => setRenameSid(undefined)} reload={reloadPreferences} />}
   </ChatSurface>
@@ -244,9 +260,11 @@ export default function TextWorkbench({ transport, bootstrap, beforeWrite, onExp
 
 type ManagedModel = { pinned: string | null | undefined; disabled: boolean; choose: (model: string | null) => void }
 
-function TextThread({ sid, wk, c, locked, preferred, onPick, managedModel, openSettings, openFiles, workspaceLabel }: {
+function TextThread({ sid, wk, c, locked, preferred, onPick, managedModel, openSettings, openFiles, workspaceLabel,
+  deliveryApi, locale, beforeWrite, onExpired, openInWorkspace }: {
   sid: string; wk: Workspace; c: ChatCopy; locked: boolean; preferred: string | null; onPick: (id: string) => void; openSettings: () => void
-  openFiles?: () => void; workspaceLabel: string; managedModel?: ManagedModel
+  openFiles?: () => void; workspaceLabel: string; managedModel?: ManagedModel; deliveryApi?: DeliveriesTransport; locale: string
+  beforeWrite: () => Promise<void>; onExpired: () => void; openInWorkspace?: (where: DeliveryLocation, signal: AbortSignal) => Promise<boolean>
 }): React.JSX.Element {
   const state = wk.projection?.snapshot?.state
   const link = wk.projection?.status ?? 'loading'
@@ -262,6 +280,43 @@ function TextThread({ sid, wk, c, locked, preferred, onPick, managedModel, openS
   const following = useRef(true)
   const [atBottom, setAtBottom] = useState(true)
   const anchor = useRef<number>()
+  // Deltas only change active.text. Read deliveries on confirmed snapshot/turn changes, never on deltas.
+  const authority = link === 'ready' && state ? [wk.projection?.snapshot?.cursor.generation, state.compatibility,
+    state.messages?.length ?? 'history', active?.turnId ?? '', last?.turnId ?? '', last?.status ?? '', last?.reason ?? ''].join(':') : undefined
+  const { controller: deliveries, view: deliveryView } = useDeliveries(deliveryApi, sid, !locked && link !== 'missing', authority,
+    { beforeWrite, expired: onExpired, openWorkspace: openInWorkspace })
+  const start = Math.max(0, messages.length - windowSize)
+  const eligible = eligibleDeliveryReplies(state, !!wk.pending, authority, deliveryView)
+  const messageIndexFor = (group: DeliveryGroup): number | undefined => {
+    const i = group.messageIndex
+    return group.origin === 'reply' && group.turnId && i !== undefined && state?.compatibility === 'text' &&
+      messages[i]?.role === 'assistant' && messages[i].content.trim() ? i : undefined
+  }
+  const attached = new Map<number, DeliveryGroup[]>()
+  const history = deliveryView.groups.filter((group) => {
+    const i = messageIndexFor(group)
+    if (i === undefined || i < start) return true
+    const groups = attached.get(i) ?? []
+    groups.push(group)
+    attached.set(i, groups)
+    return false
+  })
+  const requestedReveal = useRef<number>()
+  const focusSource = (selector: string): void => {
+    const element = scroll.current?.querySelector<HTMLElement>(selector)
+    if (!element) return
+    following.current = false
+    element.focus({ preventScroll: true })
+    element.scrollIntoView({ block: 'nearest' })
+  }
+  const reveal = (group: DeliveryGroup): void => {
+    const i = messageIndexFor(group)
+    if (i === undefined) return focusSource(`[data-delivery-group-id="${group.id}"]`)
+    if (i >= start) return focusSource(`[data-delivery-message-index="${i}"]`)
+    requestedReveal.current = i
+    following.current = false
+    setWindowSize((n) => Math.max(n, messages.length - i))
+  }
   const jump = (): void => {
     const el = scroll.current
     if (!el) return
@@ -274,6 +329,10 @@ function TextThread({ sid, wk, c, locked, preferred, onPick, managedModel, openS
       scroll.current.scrollTop = scroll.current.scrollHeight - anchor.current
       anchor.current = undefined
     } else if (following.current) jump()
+    if (requestedReveal.current !== undefined) {
+      focusSource(`[data-delivery-message-index="${requestedReveal.current}"]`)
+      requestedReveal.current = undefined
+    }
   }, [messages, active, windowSize, attachmentDraft])
   const older = (): void => {
     const el = scroll.current
@@ -281,7 +340,6 @@ function TextThread({ sid, wk, c, locked, preferred, onPick, managedModel, openS
     following.current = false
     setWindowSize((n) => n + PAGE)
   }
-  const start = Math.max(0, messages.length - windowSize)
   const visibleMessages = useMemo(() => messages.slice(start).map((message) => ({ message,
     cards: uploads ? message.attachments?.map((entry) => attachmentCard(sid, entry)) : undefined
   })), [messages, start, uploads, sid])
@@ -299,8 +357,22 @@ function TextThread({ sid, wk, c, locked, preferred, onPick, managedModel, openS
         {writeBanner && <p className="cf-empty wb-chat__notice" role="status">{writeBanner}</p>}
         {link === 'missing' && <p className="cf-empty wb-chat__notice" role="alert">{c.missing}</p>}
         {!messages.length && !writeBanner && link === 'ready' && <div className="cf-empty">{c.empty}</div>}
-        {visibleMessages.map(({ message, cards }, index) => <TextConversationMessage key={start + index} role={message.role}
-          text={message.content} attachments={cards} />)}
+        {visibleMessages.map(({ message, cards }, index) => {
+          const at = start + index
+          const candidate = eligible.get(at)
+          const groups = attached.get(at) ?? []
+          const bubble = <TextConversationMessage key={at} role={message.role} text={message.content} attachments={cards} />
+          return deliveries && (candidate || groups.length) ? <div key={at} className="wb-deliveries__message"
+            data-delivery-message-index={at} tabIndex={-1}>
+            {bubble}
+            <div className="wb-deliveries__reply">
+              {candidate && authority && <ReplyDeliveryActions candidate={candidate} authority={authority} state={deliveryView}
+                controller={deliveries} locale={locale} />}
+              {groups.map((group) => <BrowserDeliveryCard key={group.id} group={group} state={deliveryView}
+                controller={deliveries} locale={locale} source workspace={false} reveal={() => reveal(group)} />)}
+            </div>
+          </div> : bubble
+        })}
         {active?.text && <TextConversationMessage key={active.turnId} role="assistant" text={active.text} streaming />}
         {link !== 'ready' && link !== 'missing' && <p className="cf-empty wb-chat__notice" role="status">{c[link === 'reconnecting' ? 'reconnecting' : 'loading']}</p>}
         {active && <p className="cf-empty wb-chat__notice" role="status">{active.text ? c.running : c.reading}</p>}
@@ -308,8 +380,11 @@ function TextThread({ sid, wk, c, locked, preferred, onPick, managedModel, openS
           data-testid="workbench-turn-status" data-status={last.status}>{turnLabel(c, last)}</p>}
         {wk.pending === 'send' && !active && <p className="cf-empty wb-chat__notice" role="status">{c.sent}</p>}
         {wk.turnIssue && <p className="cf-empty wb-chat__notice" role="alert">{c[wk.turnIssue]}</p>}
+        {deliveries && <DeliveryHistory groups={history} state={deliveryView} authority={authority} controller={deliveries} locale={locale}
+          workspace={!!openInWorkspace} hasSource={(group) => messageIndexFor(group) !== undefined} reveal={reveal} />}
       </ConversationScroller>
     </div>
+    {deliveries && <DeliveryFeedback state={deliveryView} authority={authority} controller={deliveries} locale={locale} />}
     {uploads && <AttachmentIssues draft={attachmentDraft} dismiss={() => uploads.dismiss(sid)} />}
     {(state?.writable || active) && <TextComposer sid={sid} model={(preferred ?? '')} onPick={onPick} managedModel={managedModel} openSettings={openSettings}
       draft={wk.drafts} writeLocked={locked || link !== 'ready' || !state?.writable || !!wk.pending}

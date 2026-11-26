@@ -225,17 +225,17 @@
       "host": "apps/desktop/src/main/services/clipboard.ts",
       "methods": [
         {"name":"readText","kind":"invoke","channel":"clipboard:read-text","desktop":{"surface":"bridge-only","use":"主进程纯文本剪贴板读取桥"},"web":{"status":"pending","target":"client","semantic":"若需粘贴，浏览器用户手势或 paste 事件读取客户端剪贴板，宿主不代读。"}},
-        {"name":"writeText","kind":"invoke","channel":"clipboard:write-text","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/redesign/Conversation.tsx","use":"文本复制交给 Electron 原生剪贴板"},"web":{"status":"pending","target":"client","semantic":"用浏览器剪贴板写入当前客户端，区分权限失败和实际写入成功。"}}
+        {"name":"writeText","kind":"invoke","channel":"clipboard:write-text","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/redesign/Conversation.tsx","use":"文本复制交给 Electron 原生剪贴板"},"web":{"status":"pending","target":"client","semantic":"用浏览器剪贴板写入当前客户端，区分权限失败和实际写入成功。","partial":{"scope":"用户在交付卡点击复制时写入自己浏览器的剪贴板；成功和权限失败有不同反馈。","remaining":"其他桌面对话区域与快捷菜单的复制行为。","handler":"apps/desktop/src/workbench/deliveries-ui.tsx","test":"scripts/workbench/deliveries-ui.test.mjs"}}}
       ]
     },
     {
       "name": "deliverables",
       "host": "apps/desktop/src/main/services/deliverables.ts",
       "methods": [
-        {"name":"inspect","kind":"invoke","channel":"deliverables:inspect","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/features/chat/DeliverablesCard.tsx","use":"交付卡用会话和工具使用 ID 查询实际交付项"},"web":{"status":"pending","target":"rpc","semantic":"从授权历史定位文件，投影名称和可打开性；绝不接收任意文件路径。"}},
-        {"name":"thumbnail","kind":"invoke","channel":"deliverables:thumbnail","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/features/chat/DeliverablesCard.tsx","use":"交付卡请求缩略图或系统文件图标"},"web":{"status":"pending","target":"download","semantic":"以受权的交付项索引取缩略图，缺图用 Web 图标，避免透露宿主绝对路径。"}},
-        {"name":"open","kind":"invoke","channel":"deliverables:open","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/features/chat/DeliverablesCard.tsx","use":"交付卡用宿主默认应用打开成品文件"},"web":{"status":"pending","target":"download","semantic":"Web 提供同一授权条目的预览或下载；保护不安全文件类型，不远程唤起桌面应用。"}},
-        {"name":"reveal","kind":"invoke","channel":"deliverables:reveal","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/features/chat/DeliverablesCard.tsx","use":"交付卡在系统文件管理器选中成品"},"web":{"status":"pending","target":"client","semantic":"在授权工作区树定位并选择交付项；工作区外的交付回到该对话交付卡。"}}
+        {"name":"inspect","kind":"invoke","channel":"deliverables:inspect","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/features/chat/DeliverablesCard.tsx","use":"交付卡用会话和工具使用 ID 查询实际交付项"},"web":{"status":"implemented","target":"rpc","semantic":"从授权历史定位文件，投影名称和可打开性；绝不接收任意文件路径。","implementation":{"handler":"apps/headless/src/deliveries/service.mjs","test":"apps/headless/test/delivery-http.test.mjs"}}},
+        {"name":"thumbnail","kind":"invoke","channel":"deliverables:thumbnail","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/features/chat/DeliverablesCard.tsx","use":"交付卡请求缩略图或系统文件图标"},"web":{"status":"pending","target":"download","semantic":"以受权的交付项索引取缩略图，缺图用 Web 图标，避免透露宿主绝对路径。","partial":{"scope":"有权限的静态栅格图可在卡片内预览，其余格式提供文件图标。","remaining":"独立缩略图传输及桌面系统生成的 Office、视频等缩略图。","handler":"apps/headless/src/files/delivery-files.mjs","test":"apps/headless/test/delivery-files.test.mjs"}}},
+        {"name":"open","kind":"invoke","channel":"deliverables:open","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/features/chat/DeliverablesCard.tsx","use":"交付卡用宿主默认应用打开成品文件"},"web":{"status":"pending","target":"download","semantic":"Web 提供同一授权条目的预览或下载；保护不安全文件类型，不远程唤起桌面应用。","partial":{"scope":"在当前浏览器下载已有权限、格式受支持且版本一致的交付项；由所有者显式导出已完成回复。","remaining":"桌面能交付的其他文档、存档、音视频等格式仍未全部覆盖。","handler":"apps/headless/src/deliveries/routes.mjs","test":"apps/headless/test/delivery-http.test.mjs"}}},
+        {"name":"reveal","kind":"invoke","channel":"deliverables:reveal","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/features/chat/DeliverablesCard.tsx","use":"交付卡在系统文件管理器选中成品"},"web":{"status":"implemented","target":"client","semantic":"在授权工作区树定位并选择交付项；工作区外的交付回到该对话交付卡。","implementation":{"handler":"apps/desktop/src/workbench/deliveries-ui.tsx","test":"scripts/workbench/e2e-deliveries.mjs"}}}
       ]
     },
     {

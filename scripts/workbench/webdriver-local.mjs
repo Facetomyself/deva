@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process'
+import { lstat, realpath } from 'node:fs/promises'
 import { request } from 'node:http'
-import { join } from 'node:path'
+import { isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { createInterface } from 'node:readline'
 import { setTimeout as delay } from 'node:timers/promises'
 
@@ -80,7 +81,28 @@ function driverPort(child, signal) {
   })
 }
 
-function chromeOptions(profile, binary) {
+// Used only by tests opting into downloads. The caller owns the private mkdtemp root;
+// require it and every component below it to be canonical, private and already present.
+async function privateDownloads(root, directory) {
+  try {
+    if (typeof directory !== 'string' || !isAbsolute(root) || !isAbsolute(directory) ||
+        resolve(root) !== root || resolve(directory) !== directory) throw new Error()
+    const rel = relative(root, directory)
+    if (!rel || isAbsolute(rel) || rel === '..' || rel.startsWith(`..${sep}`)) throw new Error()
+    if (await realpath(root) !== root || await realpath(directory) !== directory) throw new Error()
+    let entry = root
+    for (const part of ['', ...rel.split(sep)]) {
+      entry = join(entry, part)
+      const stat = await lstat(entry)
+      if (!stat.isDirectory() || stat.uid !== process.geteuid() || (stat.mode & 0o777) !== 0o700) throw new Error()
+    }
+    return directory
+  } catch {
+    throw new WebDriverError('configure Chrome downloads', 'use an existing private directory inside the test root')
+  }
+}
+
+function chromeOptions(profile, binary, downloadsDir) {
   return {
     ...(binary ? { binary } : {}),
     args: [
@@ -92,7 +114,11 @@ function chromeOptions(profile, binary) {
     prefs: {
       'intl.accept_languages': 'en-US,en',
       'credentials_enable_service': false,
-      'profile.password_manager_enabled': false
+      'profile.password_manager_enabled': false,
+      ...(downloadsDir === undefined ? {} : {
+        'download.default_directory': downloadsDir,
+        'download.prompt_for_download': false
+      })
     }
   }
 }
@@ -121,11 +147,12 @@ function sessionClient(port, sessionId, origin, signal, shutdown) {
 }
 
 /** Start one local-only ChromeDriver (default loopback binding) and one sandboxed Chrome session. */
-export async function startLocalWebDriver({ root, profile, origin, signal }) {
+export async function startLocalWebDriver({ root, profile, origin, signal, downloadsDir }) {
   if (process.platform !== 'linux' || !process.getuid?.() || !process.geteuid?.()) {
     throw new WebDriverError('start ChromeDriver', 'run on Linux as a non-root user')
   }
   if (!/^http:\/\/127\.0\.0\.1:\d+$/.test(origin)) throw new WebDriverError('start ChromeDriver', 'invalid workbench origin')
+  if (downloadsDir !== undefined) await privateDownloads(root, downloadsDir)
   const driver = process.env.CHROMEDRIVER_BIN || (process.env.CHROMEWEBDRIVER
     ? join(process.env.CHROMEWEBDRIVER, 'chromedriver') : 'chromedriver')
   const child = spawn(driver, ['--port=0'], {
@@ -168,7 +195,7 @@ export async function startLocalWebDriver({ root, profile, origin, signal }) {
     const created = await command(port, 'start Chrome', 'POST', '/session', {
       capabilities: { alwaysMatch: {
         browserName: 'chrome', pageLoadStrategy: 'eager', timeouts: { implicit: 0, pageLoad: 18_000, script: 6_000 },
-        'goog:chromeOptions': chromeOptions(profile, process.env.CHROME_BIN)
+        'goog:chromeOptions': chromeOptions(profile, process.env.CHROME_BIN, downloadsDir)
       } }
     }, 45_000, signal)
     if (typeof created?.sessionId !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(created.sessionId)) {

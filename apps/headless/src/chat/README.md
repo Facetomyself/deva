@@ -15,6 +15,9 @@
 | `POST /api/v1/chats/:sid/attachments` | 当前所有者把文件字节作为 `application/octet-stream` 上传；`x-deva-file-name` 是 UTF-8 文件名的无填充 base64url，`x-deva-file-type` 是所选内容类型。返回不透明附件 ID 和显示元数据，不触发模型请求。|
 | `DELETE /api/v1/chats/:sid/attachments/:id` | 幂等撤回未发送的草稿；已经确认的会话历史独立保存。|
 | `GET /api/v1/chats/:sid/attachments/:id/preview` | 仅为本会话授权的静态图片返回经校验的原始字节；登录过期或异会话不提供内容。|
+| `GET /api/v1/chats/:sid/deliveries` | 返回允许导出的已完成回复、确认的交付组和分页游标。只传元数据，组内序号是原条目的序号；不会广播文件内容或宿主绝对路径。|
+| `POST /api/v1/chats/:sid/deliveries/reply` | `{turnId,format}`，格式为 `md` 或 `txt`。在当前会话的已确认回复中定位，不接收浏览器提供的文件名、路径或正文。同轮同格式重复调用返回同一组。|
+| `GET /api/v1/chats/:sid/deliveries/:gid/items/:index/download` | 按交付记录和 `If-Match` 版本下载，响应使用 `Content-Disposition: attachment`。`preview` 同样验版本且仅返回经校验的静态图片；`POST …/locate` 提供当前受权项目的相对定位。|
 | `WS /api/v1/chats/:sid/stream` | 只读、同源、按登录会话校验。首次订阅取快照；刷新可用最后实际应用的游标衔接，旧游标转为新快照。退出、会话过期、消费超时或服务关闭时释放连接。|
 
 写入需要工作台登录 Cookie、匹配的 Origin 与 CSRF。通过反代访问时，对 WS 路径一并保留 Host、Origin、HTTP/1.1 Upgrade 和 Connection。不要把聊天数据、访问凭据或控制命令放入 WS URL；可选的 `cursor` 只是进度，不授予访问权。
