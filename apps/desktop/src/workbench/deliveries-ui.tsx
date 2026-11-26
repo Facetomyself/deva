@@ -2,6 +2,7 @@ import { useLayoutEffect, useMemo, useSyncExternalStore } from 'react'
 import { DeliverablesView, formatDeliverableSize, type DeliverableViewRow } from '../renderer/src/features/chat/DeliverablesView'
 import { createDeliveriesController, emptyDeliveries, type DeliveriesController, type DeliveriesState } from './deliveries-controller'
 import type { DeliveriesTransport, DeliveryCandidate, DeliveryGroup, DeliveryLocation } from './deliveries-transport'
+import { writeClientText } from './client-clipboard'
 import './deliveries.css'
 
 const copy = {
@@ -62,7 +63,7 @@ export function useDeliveries(api: DeliveriesTransport | undefined, sid: string,
       document.body.append(link)
       try { link.click() } finally { link.remove() }
     },
-    copyName: (name) => navigator.clipboard.writeText(name)
+    copyName: writeClientText
   }), [api, beforeWrite, expired, openWorkspace])
   const view = useSyncExternalStore(controller?.subscribe ?? noSubscribe, controller?.snapshot ?? emptySnapshot)
   useLayoutEffect(() => {

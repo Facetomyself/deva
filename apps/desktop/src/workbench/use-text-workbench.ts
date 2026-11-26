@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { attachmentTurnIssue, createAttachmentDrafts, readyAttachmentIds, type BrowserFiles } from './attachment-drafts'
 import { createChatStream, type ChatProjection } from './chat-stream'
 import { sameTurnDraft, type ChatSummary, type ChatTransport, type TurnRequest } from './chat-transport'
+import { composedDraft, createQuoteDrafts, exceedsDraftLimit } from './quote-draft'
 import { createListRefresh, sessionAfterRefresh } from './session-list'
 import { createSessionPreferences, type createPreferenceTransport } from './session-preferences'
 import { createSessionsStream } from './sessions-stream'
@@ -25,6 +26,7 @@ export function useTextWorkbench(api: ChatTransport, beforeWrite: () => Promise<
   const [sessions, setSessions] = useState<ChatSummary[]>([])
   const [selected, setSelected] = useState<string | null>(null)
   const selectedRef = useRef<string | null>(null)
+  const selectionGeneration = useRef(0)
   const [listIssue, setListIssue] = useState<ListIssue>()
   const [listLoading, setListLoading] = useState(true)
   const list = useRef<ReturnType<typeof createListRefresh<ChatSummary[]>>>()
@@ -35,7 +37,14 @@ export function useTextWorkbench(api: ChatTransport, beforeWrite: () => Promise<
   const live = useRef<{ sid: string; stream: ReturnType<typeof createChatStream> }>()
   const [pending, setPending] = useState<Record<string, 'send' | 'stop'>>({})
   const operations = useRef(new Map<string, 'send' | 'stop'>())
-  const drafts = useRef(new Map<string, string>()).current
+  const [drafts] = useState(createQuoteDrafts)
+  const ownerMounted = useRef(false)
+  useLayoutEffect(() => {
+    ownerMounted.current = true
+    return () => { ownerMounted.current = false }
+  }, [])
+  const isSelected = (sid: string): boolean => ownerMounted.current && selectedRef.current === sid
+  const selectionStamp = (sid: string): number | undefined => isSelected(sid) ? selectionGeneration.current : undefined
   const retrySend = useRef(new Map<string, TurnRequest>()).current
   const [turnIssues, setTurnIssues] = useState<Record<string, TurnIssue | undefined>>({})
   const attachments = useMemo(() => uploadsEnabled ? createAttachmentDrafts(api, onExpired, beforeWrite) : undefined,
@@ -44,6 +53,7 @@ export function useTextWorkbench(api: ChatTransport, beforeWrite: () => Promise<
   const select = useCallback((id: string | null) => {
     if (selectedRef.current === id) return
     selectedRef.current = id
+    selectionGeneration.current++
     remember(id)
     setSelected(id)
   }, [])
@@ -149,28 +159,41 @@ export function useTextWorkbench(api: ChatTransport, beforeWrite: () => Promise<
     }
     attachments.add(sid, files)
   }
-  async function send(sid: string, text: string, model: string | null): Promise<boolean> {
+  function setDraftQuote(sid: string, quote: string): boolean {
     const projection = current(sid)?.current()
-    if (projection?.status !== 'ready' || !projection.snapshot?.state.writable || projection.snapshot.state.active) return false
+    const state = projection?.snapshot?.state
+    if (!isSelected(sid) || projection?.status !== 'ready' || state?.compatibility !== 'text' || !state.writable) return false
+    drafts.setQuote(sid, quote)
+    return true
+  }
+  async function send(sid: string, body: string, model: string | null): Promise<boolean> {
+    const projection = current(sid)?.current()
+    const state = projection?.snapshot?.state
+    if (!isSelected(sid) || projection?.status !== 'ready' || state?.compatibility !== 'text' || !state.writable || state.active || operations.current.has(sid)) return false
     const preference = preferences?.get(sid)
     if (preference && (preference.pending || preference.reading || preference.needsRead || preference.confirmed?.preferences.model !== model)) return false
+    const sentDraft = drafts.setBody(sid, body)
+    const text = composedDraft(sentDraft)
     const ids = attachments ? readyAttachmentIds(attachments.get(sid)) : []
-    if (!ids || (!text && !ids.length) || !begin(sid, 'send')) return false
+    if (!ids || (!text && !ids.length) || exceedsDraftLimit(sentDraft) || !begin(sid, 'send')) return false
     const previous = retrySend.get(sid)
     const draft = { text, model, ...(ids.length ? { attachments: ids } : {}) }
     const request = previous && sameTurnDraft(previous, draft) ? previous : { clientRequestId: crypto.randomUUID(), ...draft }
     try {
       await beforeWrite()
+      if (!ownerMounted.current) return false
       retrySend.set(sid, request)
       const ack = await api.send(sid, request)
+      if (!ownerMounted.current) return false
       retrySend.delete(sid)
       if (ids.length) attachments?.committed(sid, ids)
-      if (drafts.get(sid)?.trim() === text) drafts.delete(sid)
+      drafts.commit(sid, sentDraft)
       const stream = current(sid)
       const state = stream?.current().snapshot?.state
       if (state?.active?.turnId !== ack.turnId && state?.lastTurn?.turnId !== ack.turnId) void stream?.refresh()
       return true
     } catch (e) {
+      if (!ownerMounted.current) return false
       if (e instanceof HttpFailure && e.status === 401) onExpired()
       else {
         const code = e instanceof HttpFailure ? e.code : undefined
@@ -186,7 +209,7 @@ export function useTextWorkbench(api: ChatTransport, beforeWrite: () => Promise<
         if (stream?.current().status === 'ready') void stream.refresh()
       }
       return false
-    } finally { end(sid) }
+    } finally { if (ownerMounted.current) end(sid) }
   }
   async function stop(sid: string, turnId: string): Promise<void> {
     const projection = current(sid)?.current()
@@ -202,6 +225,7 @@ export function useTextWorkbench(api: ChatTransport, beforeWrite: () => Promise<
     }
   }
   return { sessions, selected, select, projection: view?.sid === selected ? view?.projection : undefined, listIssue, listLoading,
-    refreshList, preferences, create, createPending, pending: selected ? pending[selected] : undefined, drafts, attachments, addAttachments, send, stop,
+    refreshList, preferences, create, createPending, pending: selected ? pending[selected] : undefined, drafts, setDraftQuote, selectionStamp,
+    attachments, addAttachments, send, stop,
     turnIssue: selected ? turnIssues[selected] : undefined }
 }

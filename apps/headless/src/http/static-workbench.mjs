@@ -179,7 +179,10 @@ export async function openStaticWorkbench(webDir) {
             const size = Number(info.size)
             res.writeHead(200, {
               ...responseHeaders,
-              ...(name === HTML ? { 'content-security-policy': HTML_POLICY } : {}),
+              // Human Copy is same-origin and Paste consumes the browser's native paste
+              // event only. No page needs asynchronous clipboard reading or embedded fullscreen.
+              ...(name === HTML ? { 'content-security-policy': HTML_POLICY,
+                'permissions-policy': 'clipboard-read=(), clipboard-write=(self), fullscreen=(self)' } : {}),
               'cross-origin-resource-policy': 'same-origin',
               'content-type': MIME.get(extname(name)),
               'content-length': size

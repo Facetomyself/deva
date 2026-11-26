@@ -1,9 +1,10 @@
-import { memo, useRef, useState, type ReactNode } from 'react'
+import { memo, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
 import ReactMarkdown, { type Components, type Options } from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import rehypeHighlight from 'rehype-highlight'
 import { Copy, Check } from 'lucide-react'
 import { useI18n } from '../../i18n/i18n'
+import { useCodeClipboard, type CodeClipboard } from './CodeClipboard'
 
 /**
  * 助手消息的 Markdown 渲染（GFM + 代码高亮），对齐 DeepSeek/Codex 观感。
@@ -27,6 +28,35 @@ function isBlockCode(className: string, children: ReactNode): boolean {
 
 /** 代码块表头的「复制」按钮：复制成功后 1.5 秒内显示「已复制」。时间轴上展开的命令框同用。 */
 export function CopyButton({ getText }: { getText: () => string }): React.JSX.Element {
+  const client = useCodeClipboard()
+  return client ? <WorkbenchCodeCopy getText={getText} client={client} /> : <DesktopCodeCopy getText={getText} />
+}
+
+function WorkbenchCodeCopy({ getText, client }: {getText: () => string; client: CodeClipboard}): React.JSX.Element {
+  const { t, locale } = useI18n()
+  const [status, setStatus] = useState<'idle'|'copied'|'failed'>('idle')
+  const generation = useRef(0), timer = useRef<ReturnType<typeof setTimeout>>()
+  useLayoutEffect(() => {
+    generation.current++; setStatus('idle')
+    return () => { generation.current++; clearTimeout(timer.current) }
+  }, [client])
+  const copy = (event: React.MouseEvent): void => {
+    if (client.locked || !event.nativeEvent.isTrusted) return
+    const text = getText()
+    if (!text) return
+    const current = ++generation.current
+    clearTimeout(timer.current)
+    void client.writeText(text).then(() => {
+      if (generation.current !== current) return
+      setStatus('copied'); timer.current = setTimeout(() => { if (generation.current === current) setStatus('idle') }, 1500)
+    }, () => { if (generation.current === current) setStatus('failed') })
+  }
+  const label = status === 'failed' ? (locale === 'zh-CN' ? '复制失败' : 'Copy failed') : t(status === 'copied' ? 'chat.md.copied' : 'chat.md.copy')
+  return <button type="button" className="md-code__copy" data-testid="workbench-code-copy" data-status={status}
+    aria-live="polite" disabled={client.locked} onClick={copy}>{status === 'copied' ? <Check size={12} /> : <Copy size={12} />}{label}</button>
+}
+
+function DesktopCodeCopy({ getText }: { getText: () => string }): React.JSX.Element {
   const { t } = useI18n()
   const [copied, setCopied] = useState(false)
 

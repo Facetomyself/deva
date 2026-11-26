@@ -8,6 +8,7 @@ import { IconRail, type RailTab } from '../renderer/src/redesign/IconRail'
 import { ThreadRow } from '../renderer/src/redesign/Rail'
 import { TextConversationMessage } from '../renderer/src/redesign/ConvMessage'
 import { ComposerDraftInput, ComposerJump, ComposerSendButton, ComposerWorkspaceButton } from '../renderer/src/redesign/ComposerControls'
+import { ComposerQuoteBar } from '../renderer/src/redesign/ComposerQuoteBar'
 import { useComposerEditor } from '../renderer/src/redesign/composer-editor'
 import { modelGroups, ModelSelectButton } from '../renderer/src/redesign/ModelMenu'
 import { clampComposer, clampSidebar, COMPOSER_DEFAULT, ICONRAIL_W, ResizeHandle, SIDEBAR_DEFAULT, useViewport } from '../renderer/src/redesign/resizable'
@@ -17,7 +18,8 @@ import { createManualBrowserPanel, type ManualBrowserPanel } from './browser-man
 import { ManualBrowserDialog } from './browser-panel'
 import { createBrowserTransport, type BrowserTransport } from './browser-transport'
 import { chatCopy, turnLabel, type ChatCopy } from './chat-copy'
-import { createChatTransport, inputBytes, MAX_TEXT_INPUT, type ChatState } from './chat-transport'
+import { createChatTransport, type ChatState } from './chat-transport'
+import { ConversationSelectionStatus, useConversationSelection } from './conversation-selection-ui'
 import { eligibleDeliveryReplies } from './deliveries-controller'
 import { createDeliveriesTransport, type DeliveriesTransport, type DeliveryGroup, type DeliveryLocation } from './deliveries-transport'
 import { BrowserDeliveryCard, DeliveryFeedback, DeliveryHistory, ReplyDeliveryActions, useDeliveries } from './deliveries-ui'
@@ -26,6 +28,7 @@ import { createGitViewTransport } from './git-view-transport'
 import { ProjectMemoryDialog } from './library-memory'
 import { createLibrary, type Roster } from './library-transport'
 import { LibraryWorkspace, type LibraryPanel } from './library-workspace'
+import { exceedsDraftLimit } from './quote-draft'
 import { createPreferenceTransport, matchesPreferences, projectSession } from './session-preferences'
 import { SessionHeaderActions, SessionModelPicker, SessionPreferenceStatus, SessionRenameDialog } from './session-preference-ui'
 import { createSessionWorkspaceTransport } from './session-workspace-transport'
@@ -35,6 +38,10 @@ import { createTaskInspectionTransport } from './task-inspection-transport'
 import { TaskInspectionPanel } from './task-inspection-ui'
 import type { Bootstrap, LibraryQueue, Transport } from './transport'
 import { useTextWorkbench } from './use-text-workbench'
+import { ClientFullscreenButton, useClientShell } from './client-shell-ui'
+import { pasteClientText, writeClientText } from './client-clipboard'
+import { ClientPasteFeedback, useClientPasteNotice } from './client-paste-feedback'
+import { CodeClipboardProvider } from '../renderer/src/features/chat/CodeClipboard'
 import { WorkspaceFilesPanel } from './workspace-dialog'
 import { createWorkspaceFiles, openWorkspaceProject } from './workspace-files'
 import { createWorkspaceTransport } from './workspace-transport'
@@ -210,10 +217,17 @@ export default function TextWorkbench({ transport, bootstrap, beforeWrite, onExp
       else void tasks.open()
     }
   }
-  const surface = <ChatSurface className={`wb-chat${preferences ? ' wb-chat--session-prefs' : ''}`} data-testid="workbench-chat">
-    <div className={`cf-body${tasksVisible ? ' wb-chat__body--tasks' : ''}`} style={{ '--cf-side': `${compact ? 0 : sidebar}px` } as React.CSSProperties}>
+  const shortcutScope = useRef<HTMLDivElement>(null)
+  const clientShell = useClientShell({ shortcutScope,
+    shortcutActive: !locked && !tasksVisible && !settingsOpen && !panel && !(renameSid && renameSid === sid) &&
+      !browserVisible && !filesOpen && !(sid && locatedFilesSid === sid) && !approvedProject,
+    onToggleSidebar: () => setCompact(value => !value) })
+  const surface = <CodeClipboardProvider writeText={writeClientText} locked={locked}><ChatSurface className={`wb-chat${preferences ? ' wb-chat--session-prefs' : ''}`} data-testid="workbench-chat">
+    <div ref={shortcutScope} className={`cf-body${tasksVisible ? ' wb-chat__body--tasks' : ''}`} style={{ '--cf-side': `${compact ? 0 : sidebar}px` } as React.CSSProperties}>
       <IconRail tab={tasksVisible ? 'tasks' : 'chats'} onTab={selectRailTab} listCollapsed={compact}
         onOpenSettings={openSettings} chatAlert={false} unavailable={c.unavailable}
+        chatShortcut={clientShell.chatShortcut}
+        webFullscreen={<ClientFullscreenButton fullscreen={clientShell.fullscreen} locked={taskEntryDisabled || !!browserVisible || filesOpen || !!approvedProject} />}
         taskInspection={tasks ? { panelId: tasksPanelId, disabled: taskEntryDisabled, buttonRef: tasksButton } : undefined}
         library={library ? { openProfile: () => { tasks?.close(); setPanel('profile') }, openRoster: () => { tasks?.close(); setPanel('roster') } } : undefined} />
       {tasks && tasksVisible ? <main className="wb-tasks__main">
@@ -317,7 +331,7 @@ export default function TextWorkbench({ transport, bootstrap, beforeWrite, onExp
       lockedProject={{ ...approvedProject.workspace, signal: approvedProject.signal }} onClose={() => binding?.closeProject()} />}
     {renameSid && renameSid === sid && preferences && preferenceEntry && <SessionRenameDialog key={sid} sid={sid} entry={preferenceEntry}
       store={preferences} disabled={preferenceLocked} close={() => setRenameSid(undefined)} reload={reloadPreferences} />}
-  </ChatSurface>
+  </ChatSurface></CodeClipboardProvider>
   return library ? <LibraryWorkspace api={library} panel={panel} locked={locked} notice={notice} onRoster={setRoster}
     close={() => setPanel(undefined)} openProjects={() => setPanel('projects')} createChat={async (role) => {
       const created = await wk.create(role.id)
@@ -345,6 +359,11 @@ function TextThread({ sid, wk, c, locked, preferred, onPick, managedModel, openS
   const remove = uploads && !locked && !wk.pending ? (key: string) => void uploads.remove(sid, key) : undefined
   const [windowSize, setWindowSize] = useState(PAGE)
   const scroll = useRef<HTMLDivElement>(null)
+  const focusComposer = useRef<() => void>()
+  const canQuote = !locked && link === 'ready' && state?.compatibility === 'text' && state.writable
+  const selection = useConversationSelection(scroll, !locked, () => wk.selectionStamp(sid), canQuote ? (quote) => {
+    if (wk.setDraftQuote(sid, quote)) focusComposer.current?.()
+  } : undefined)
   const following = useRef(true)
   const [atBottom, setAtBottom] = useState(true)
   const anchor = useRef<number>()
@@ -416,7 +435,7 @@ function TextThread({ sid, wk, c, locked, preferred, onPick, managedModel, openS
       : state?.writeBlockReason === 'session_turn_limit' ? c.limit : state && !state.writable ? c.locked : undefined
   return <>
     <div className="cf-convmid">
-      <ConversationScroller scrollRef={scroll} onScroll={(event) => {
+      <ConversationScroller scrollRef={scroll} onContextMenu={selection.onContextMenu} onKeyDown={selection.onKeyDown} onScroll={(event) => {
         const el = event.currentTarget
         following.current = el.scrollHeight - el.scrollTop - el.clientHeight <= 64
         setAtBottom(following.current)
@@ -429,7 +448,7 @@ function TextThread({ sid, wk, c, locked, preferred, onPick, managedModel, openS
           const at = start + index
           const candidate = eligible.get(at)
           const groups = attached.get(at) ?? []
-          const bubble = <TextConversationMessage key={at} role={message.role} text={message.content} attachments={cards} />
+          const bubble = <TextConversationMessage key={at} role={message.role} text={message.content} attachments={cards} selectable={!locked} />
           return deliveries && (candidate || groups.length) ? <div key={at} className="wb-deliveries__message"
             data-delivery-message-index={at} tabIndex={-1}>
             {bubble}
@@ -441,7 +460,7 @@ function TextThread({ sid, wk, c, locked, preferred, onPick, managedModel, openS
             </div>
           </div> : bubble
         })}
-        {active?.text && <TextConversationMessage key={active.turnId} role="assistant" text={active.text} streaming />}
+        {active?.text && <TextConversationMessage key={active.turnId} role="assistant" text={active.text} streaming selectable={!locked} />}
         {link !== 'ready' && link !== 'missing' && <p className="cf-empty wb-chat__notice" role="status">{c[link === 'reconnecting' ? 'reconnecting' : 'loading']}</p>}
         {active && <p className="cf-empty wb-chat__notice" role="status">{active.text ? c.running : c.reading}</p>}
         {last && !active && last.status !== 'running' && <p className="cf-empty wb-chat__notice" role="status"
@@ -452,10 +471,13 @@ function TextThread({ sid, wk, c, locked, preferred, onPick, managedModel, openS
           workspace={!!openInWorkspace} hasSource={(group) => messageIndexFor(group) !== undefined} reveal={reveal} />}
       </ConversationScroller>
     </div>
+    {selection.menu}
+    <ConversationSelectionStatus status={selection.status} locale={locale} />
     {deliveries && <DeliveryFeedback state={deliveryView} authority={authority} controller={deliveries} locale={locale} />}
     {uploads && <AttachmentIssues draft={attachmentDraft} dismiss={() => uploads.dismiss(sid)} />}
     {(state?.writable || active) && <TextComposer sid={sid} model={(preferred ?? '')} onPick={onPick} managedModel={managedModel} openSettings={openSettings}
-      draft={wk.drafts} writeLocked={locked || link !== 'ready' || !state?.writable || !!wk.pending}
+      drafts={wk.drafts} focusComposer={focusComposer} clipboardLocked={locked}
+      writeLocked={!canQuote || !!wk.pending}
       stopping={link !== 'ready' || !!wk.pending} active={active} send={wk.send} stop={wk.stop} c={c}
       jump={!atBottom ? jump : undefined} openFiles={openFiles} workspaceLabel={workspaceLabel}
       attachmentDraft={attachmentDraft} add={add} remove={remove} />}
@@ -463,9 +485,10 @@ function TextThread({ sid, wk, c, locked, preferred, onPick, managedModel, openS
   </>
 }
 
-function TextComposer({ sid, draft, model, onPick, managedModel, openSettings, writeLocked, stopping, active, send, stop, c, jump, openFiles, workspaceLabel,
+function TextComposer({ sid, drafts, focusComposer, clipboardLocked, model, onPick, managedModel, openSettings, writeLocked, stopping, active, send, stop, c, jump, openFiles, workspaceLabel,
   attachmentDraft, add, remove }: {
-  sid: string; draft: Map<string, string>; model: string; onPick: (id: string) => void; managedModel?: ManagedModel; openSettings: () => void
+  sid: string; drafts: Workspace['drafts']; focusComposer: React.MutableRefObject<(() => void) | undefined>; clipboardLocked: boolean
+  model: string; onPick: (id: string) => void; managedModel?: ManagedModel; openSettings: () => void
   writeLocked: boolean; stopping: boolean; active: ChatState['active'] | undefined; send: Workspace['send']; stop: Workspace['stop']; c: ChatCopy; jump?: () => void
   openFiles?: () => void; workspaceLabel: string; attachmentDraft: AttachmentDraft; add?: (files: BrowserFiles) => void; remove?: (key: string) => void
 }): React.JSX.Element {
@@ -473,38 +496,34 @@ function TextComposer({ sid, draft, model, onPick, managedModel, openSettings, w
   const { ready, providers, activeModelId } = useModels()
   const viewport = useViewport()
   const [height, setHeight] = useState(COMPOSER_DEFAULT)
-  const [text, setText] = useState(() => draft.get(sid) ?? '')
+  const readDraft = useCallback(() => drafts.read(sid), [drafts, sid])
+  const draft = useSyncExternalStore(drafts.subscribe, readDraft, readDraft)
+  const editorBody = useRef('')
   const [open, setOpen] = useState(false)
   const groups = modelGroups(providers)
   const picked = findActive(groups.map((g) => ({ ...g.p, models: g.models })), managedModel ? managedModel.pinned ?? null : model || activeModelId)
   const sendModel = managedModel?.pinned === null ? null : picked ? `${picked.provider.id}:${picked.model.id}` : undefined
   const canSend = !writeLocked && !managedModel?.disabled && !active && ready && sendModel !== undefined &&
     (sendModel !== null || groups.length > 0)
-  const over = inputBytes(text) > MAX_TEXT_INPUT
+  const over = exceedsDraftLimit(draft)
   const ids = readyAttachmentIds(attachmentDraft)
-  const mounted = useRef(false)
   const submit = (): void => {
-    if (!canSend) return
-    const sent = editor.getText().trim()
-    if (!ids || (!sent && !ids.length) || inputBytes(sent) > MAX_TEXT_INPUT) return
-    void send(sid, sent, sendModel).then((ok) => {
-      if (ok && mounted.current && editor.getText().trim() === sent) {
-        editor.setText('')
-        editor.clearHistory()
-      }
-    })
+    if (canSend) void send(sid, editor.getText(), sendModel)
   }
+  const pasteNotice = useClientPasteNotice()
   const editor = useComposerEditor({
-    onChange: (value) => { setText(value); if (value) draft.set(sid, value); else draft.delete(sid) },
+    onChange: (value) => { editorBody.current = value; drafts.setBody(sid, value) },
     mentionNames: [],
-    onPaste: add ? (event) => {
-      if (!event.clipboardData) return false
+    onPaste: (event) => {
+      if (clipboardLocked) { event.preventDefault(); pasteNotice.report('locked'); return true }
+      if (!add || !event.clipboardData) return false
       const files = browserFiles(event.clipboardData)
       if (!files.files.length && !files.issues.length) return false
       event.preventDefault()
       add(files)
       return true
-    } : undefined,
+    },
+    onClientTextPaste: (event, insert) => pasteClientText(event, insert, pasteNotice.report),
     onKey: (key, e) => {
       if (key !== 'enter' || e.shiftKey || e.ctrlKey || e.altKey) return false
       e.preventDefault()
@@ -513,10 +532,15 @@ function TextComposer({ sid, draft, model, onPick, managedModel, openSettings, w
     }
   })
   useLayoutEffect(() => {
-    mounted.current = true
-    editor.setText(draft.get(sid) ?? '')
-    return () => { mounted.current = false }
-  }, [sid])
+    focusComposer.current = editor.focusEnd
+    return () => { focusComposer.current = undefined }
+  }, [editor.focusEnd, focusComposer])
+  useLayoutEffect(() => {
+    if (draft.body === editorBody.current) return
+    editorBody.current = draft.body
+    editor.setText(draft.body)
+    if (!draft.body) editor.clearHistory()
+  }, [draft.body, editor.setText, editor.clearHistory])
   useEffect(() => {
     if (managedModel?.disabled) setOpen(false)
   }, [managedModel?.disabled])
@@ -534,11 +558,14 @@ function TextComposer({ sid, draft, model, onPick, managedModel, openSettings, w
           <button className="cf-empty__action" type="button" onClick={openSettings}>{t('settings.models')}</button>
         </div>}
       {over && <p className="wb-chat__model" role="alert">{c.inputLimit}</p>}
+      <ClientPasteFeedback state={pasteNotice.state} />
       <div className="cf-box">
         <ResizeHandle axis="y" className="cf-resizer--box" value={clampComposer(height, viewport.h)} title={t('cf.resizeComposer')}
           onChange={(value) => setHeight(clampComposer(value, viewport.h))} onCommit={() => setHeight((v) => clampComposer(v, viewport.h))}
           onReset={() => setHeight(COMPOSER_DEFAULT)} />
         {add && <AttachmentDraftCards sid={sid} draft={attachmentDraft} remove={remove} />}
+        {draft.quote && <ComposerQuoteBar quote={draft.quote} testId="workbench-quote-draft" removeTestId="workbench-quote-remove"
+          onRemove={() => { drafts.setQuote(sid, ''); editor.focusEnd() }} />}
         <ComposerDraftInput editor={editor} height={clampComposer(height, viewport.h)} placeholder={c.input} />
         <div className="cf-box__bar">
           {add && <AttachmentPicker add={add} disabled={writeLocked || !!active} />}
@@ -553,7 +580,7 @@ function TextComposer({ sid, draft, model, onPick, managedModel, openSettings, w
                 onToggle={() => setOpen((value) => !value)} onPick={(pid, mid) => { onPick(`${pid}:${mid}`); setOpen(false) }} />}</div>
           </div>
           {active ? <ComposerSendButton stop disabled={stopping} onClick={() => void stop(sid, active.turnId)} />
-            : <ComposerSendButton disabled={!canSend || !ids || (!text.trim() && !ids.length) || over} onClick={submit} />}
+            : <ComposerSendButton disabled={!canSend || !ids || (!draft.quote && !draft.body.trim() && !ids.length) || over} onClick={submit} />}
         </div>
       </div>
       {add && <AttachmentHint />}

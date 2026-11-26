@@ -51,6 +51,7 @@ import {
 import { samePath, DEFAULT_PERSONA_ID, fill, AvatarStack, Avatar } from './shell-common'
 import { GitWidget, WorkspaceMenu } from './GitWidget'
 import { leadingQuote, withQuote, quotePlain } from './ConvMessage'
+import { ComposerQuoteBar } from './ComposerQuoteBar'
 import { ModelPanel } from './ModelPanel'
 import { ComposerAttachmentButton, ComposerDraftInput, ComposerJump, ComposerSendButton, ComposerWorkspaceButton } from './ComposerControls'
 
@@ -882,23 +883,10 @@ export const Composer = memo(function Composer({
           {/* 引用条（右键「引用」，同 TG 的回复）：在附件之后、文字之前；左竖线 + 灰字一行，悬停看全文；
               ✕ 取消引用，焦点回到输入框。 */}
           {quote && (
-            <div className="cf-quotebar">
-              <span className="cf-quotebar__text" title={quotePlain(quote, true)}>
-                {quotePlain(quote)}
-              </span>
-              <button
-                type="button"
-                className="cf-quotebar__x"
-                title={t('cf.quoteRemove')}
-                aria-label={t('cf.quoteRemove')}
-                onClick={() => {
-                  setQuote('')
-                  composer.focusEnd()
-                }}
-              >
-                <X size={13} />
-              </button>
-            </div>
+            <ComposerQuoteBar quote={quote} onRemove={() => {
+              setQuote('')
+              composer.focusEnd()
+            }} />
           )}
           {/* 输入区：Lexical 接管的 contentEditable（子节点归编辑器管，React 不渲染内容）；占位提示叠在其上。 */}
           <ComposerDraftInput editor={composer} height={boxH} placeholder={placeholder}

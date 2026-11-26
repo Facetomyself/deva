@@ -10,8 +10,8 @@
         {"name":"minimize","kind":"invoke","channel":"window:minimize","desktop":{"surface":"bridge-only","use":"主进程最小化 Electron 主窗口"},"web":{"status":"desktop-only","target":"desktop","semantic":"Web 页签由浏览器控制，服务端无最小化入口。"}},
         {"name":"toggleMaximize","kind":"invoke","channel":"window:toggle-maximize","desktop":{"surface":"bridge-only","use":"主进程切换 Electron 主窗口的最大化"},"web":{"status":"desktop-only","target":"desktop","semantic":"保留宿主窗口行为；浏览器全屏与窗口最大化是两种不同状态。"}},
         {"name":"close","kind":"invoke","channel":"window:close","desktop":{"surface":"bridge-only","use":"主进程关闭 Electron 主窗口"},"web":{"status":"desktop-only","target":"desktop","semantic":"关闭 Web 页签与关停宿主分离，用户离开页面时只清理自身连接。"}},
-        {"name":"isFullScreen","kind":"invoke","channel":"window:is-fullscreen","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/redesign/ChatFirstShell.tsx","use":"聊天外壳查询原生全屏以调整 macOS 红绿灯留白"},"web":{"status":"pending","target":"client","semantic":"Web 用 document.fullscreenElement 初始化当前页面全屏状态，布局独立于 Electron 主窗口。"}},
-        {"name":"onFullScreen","kind":"subscription","channel":"window:fullscreen","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/redesign/ChatFirstShell.tsx","use":"聊天外壳随 Electron 全屏进出更新标题栏留白"},"web":{"status":"pending","target":"client","semantic":"以 fullscreenchange 同步当前页面自己的全屏状态，离开组件时移除监听。"}},
+        {"name":"isFullScreen","kind":"invoke","channel":"window:is-fullscreen","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/redesign/ChatFirstShell.tsx","use":"聊天外壳查询原生全屏以调整 macOS 红绿灯留白"},"web":{"status":"implemented","target":"client","semantic":"Web 用 document.fullscreenElement 初始化当前页面全屏状态，布局独立于 Electron 主窗口。","implementation":{"handler":"apps/desktop/src/workbench/client-shell.ts","test":"scripts/workbench/client-shell-ui.test.mjs"}}},
+        {"name":"onFullScreen","kind":"subscription","channel":"window:fullscreen","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/redesign/ChatFirstShell.tsx","use":"聊天外壳随 Electron 全屏进出更新标题栏留白"},"web":{"status":"implemented","target":"client","semantic":"以 fullscreenchange 同步当前页面自己的全屏状态，离开组件时移除监听。","implementation":{"handler":"apps/desktop/src/workbench/client-shell.ts","test":"scripts/workbench/container-client-interactions-browser.mjs"}}},
         {"name":"setOverlaySymbolColor","kind":"invoke","channel":"window:set-overlay","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/theme/ThemeContext.tsx","use":"主题同步 Electron 标题栏原生控件配色"},"web":{"status":"desktop-only","target":"desktop","semantic":"页面主题影响 CSS，浏览器自带窗口控件由用户代理绘制。"}}
       ]
     },
@@ -224,8 +224,8 @@
       "name": "clipboard",
       "host": "apps/desktop/src/main/services/clipboard.ts",
       "methods": [
-        {"name":"readText","kind":"invoke","channel":"clipboard:read-text","desktop":{"surface":"bridge-only","use":"主进程纯文本剪贴板读取桥"},"web":{"status":"pending","target":"client","semantic":"若需粘贴，浏览器用户手势或 paste 事件读取客户端剪贴板，宿主不代读。"}},
-        {"name":"writeText","kind":"invoke","channel":"clipboard:write-text","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/redesign/Conversation.tsx","use":"文本复制交给 Electron 原生剪贴板"},"web":{"status":"pending","target":"client","semantic":"用浏览器剪贴板写入当前客户端，区分权限失败和实际写入成功。","partial":{"scope":"用户在交付卡点击复制时写入自己浏览器的剪贴板；成功和权限失败有不同反馈。","remaining":"其他桌面对话区域与快捷菜单的复制行为。","handler":"apps/desktop/src/workbench/deliveries-ui.tsx","test":"scripts/workbench/deliveries-ui.test.mjs"}}}
+        {"name":"readText","kind":"invoke","channel":"clipboard:read-text","desktop":{"surface":"bridge-only","use":"主进程纯文本剪贴板读取桥"},"web":{"status":"implemented","target":"client","semantic":"若需粘贴，浏览器用户手势或 paste 事件读取客户端剪贴板，宿主不代读。","implementation":{"handler":"apps/desktop/src/workbench/client-clipboard.ts","test":"scripts/workbench/client-clipboard.test.mjs"}}},
+        {"name":"writeText","kind":"invoke","channel":"clipboard:write-text","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/redesign/Conversation.tsx","use":"文本复制交给 Electron 原生剪贴板"},"web":{"status":"implemented","target":"client","semantic":"用浏览器剪贴板写入当前客户端，区分权限失败和实际写入成功。","implementation":{"handler":"apps/desktop/src/workbench/client-clipboard.ts","test":"scripts/workbench/e2e-client-interactions.mjs"}}}
       ]
     },
     {
@@ -317,7 +317,7 @@
     }
   ],
   "values": [
-    {"name":"platform","expression":"process.platform","desktop":{"surface":"ui","host":"apps/desktop/src/preload/index.ts","entry":"apps/desktop/src/renderer/src/redesign/shell-common.tsx","use":"聊天外壳以宿主平台决定 macOS 控件留白与 Windows 路径比较。"},"web":{"status":"pending","target":"bootstrap","semantic":"启动投影显式给出实际宿主平台（容器部署为 Linux），供工作区路径与宿主 shell 语义使用；显示和快捷键独立采用客户端语义。"}}
+    {"name":"platform","expression":"process.platform","desktop":{"surface":"ui","host":"apps/desktop/src/preload/index.ts","entry":"apps/desktop/src/renderer/src/redesign/shell-common.tsx","use":"聊天外壳以宿主平台决定 macOS 控件留白与 Windows 路径比较。"},"web":{"status":"implemented","target":"bootstrap","semantic":"启动投影显式给出实际宿主平台（容器部署为 Linux），供工作区路径与宿主 shell 语义使用；显示和快捷键独立采用客户端语义。","implementation":{"handler":"apps/headless/src/http/session-routes.mjs","test":"scripts/workbench/container-client-interactions.mjs"}}}
   ],
   "flows": [
     {"id":"bootstrap","methods":["config.getSync","profile.get","personas.list","chat.listSessions","tasks.list"],"precedent":"apps/desktop/src/main/services/remote/web/adapter.ts","expectation":"新连接先建立身份及协议版本，再返回当前授权范围的初始状态；首帧主题无闪烁，启动投影的宿主平台独立于客户端显示和快捷键。"},

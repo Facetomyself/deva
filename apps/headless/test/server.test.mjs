@@ -89,6 +89,7 @@ test('serves only the same-origin verified Vite bundle; routes API and probes in
   assert.equal(page.text, index)
   assert.match(page.headers['content-security-policy'], /script-src 'self';/)
   assert.equal(page.headers['referrer-policy'], 'no-referrer')
+  assert.equal(page.headers['permissions-policy'], 'clipboard-read=(), clipboard-write=(self), fullscreen=(self)')
   assert.equal((await http(svc, '/index.html')).text, index)
   const js = await http(svc, '/workbench.js?build=test')
   assert.equal(js.text, entry)

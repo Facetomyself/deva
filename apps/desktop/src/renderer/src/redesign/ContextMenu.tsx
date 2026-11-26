@@ -1,7 +1,7 @@
 /**
  * 右键菜单（对话列表、Git、工作区、对话流共用）。
  */
-import { useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react'
 
 /** 菜单条目：普通项点击即执行并关闭菜单；separator=分隔线；section=不可点的分组标题；filter=过滤框（按 label 过滤普通项）。 */
 interface CtxItem {
@@ -11,6 +11,7 @@ interface CtxItem {
   /** 禁用项：灰显 + 悬停说明（title），不可点（如系统默认角色的删除项）。 */
   disabled?: boolean
   title?: string
+  testId?: string
   onClick: () => void
 }
 
@@ -31,7 +32,9 @@ export function ContextMenu({
   y,
   items,
   onClose,
-  openUp = false
+  openUp = false,
+  keyboard = false,
+  testId
 }: {
   x: number
   y: number
@@ -39,6 +42,9 @@ export function ContextMenu({
   onClose: () => void
   /** 向上浮出：y 视作菜单底边锚点，菜单朝上生长（默认向下）。 */
   openUp?: boolean
+  /** Optional keyboard navigation for menus opened from a focusable surface. */
+  keyboard?: boolean
+  testId?: string
 }): React.JSX.Element {
   const ref = useRef<HTMLDivElement>(null)
   const [pos, setPos] = useState({ left: x, top: y })
@@ -64,6 +70,25 @@ export function ContextMenu({
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
   }, [onClose])
+  useLayoutEffect(() => {
+    if (keyboard) ref.current?.querySelector<HTMLElement>('[role="menuitem"]:not(:disabled)')?.focus({ preventScroll: true })
+  }, [keyboard, x, y, items.length])
+  const navigate = (event: ReactKeyboardEvent<HTMLDivElement>): void => {
+    if (event.key === 'Escape' || event.key === 'Tab') {
+      event.preventDefault()
+      event.stopPropagation()
+      onClose()
+      return
+    }
+    if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return
+    const options = Array.from(event.currentTarget.querySelectorAll<HTMLElement>('[role="menuitem"]:not(:disabled)'))
+    if (!options.length) return
+    event.preventDefault()
+    const index = options.indexOf(event.target as HTMLElement)
+    const next = event.key === 'Home' ? 0 : event.key === 'End' ? options.length - 1
+      : event.key === 'ArrowDown' ? (index + 1) % options.length : (Math.max(index, 0) + options.length - 1) % options.length
+    options[next].focus({ preventScroll: true })
+  }
   return (
     <>
       <div
@@ -74,7 +99,8 @@ export function ContextMenu({
           onClose()
         }}
       />
-      <div ref={ref} className="cf-ctx" style={{ left: pos.left, top: pos.top }} role="menu">
+      <div ref={ref} className="cf-ctx" style={{ left: pos.left, top: pos.top }} role="menu"
+        data-testid={testId} onKeyDown={keyboard ? navigate : undefined}>
         {items.map((it, i) => {
           if ('kind' in it) {
             if (it.kind === 'separator') return q ? null : <div key={i} className="cf-ctx__sep" role="separator" />
@@ -96,6 +122,8 @@ export function ContextMenu({
               key={i}
               type="button"
               role="menuitem"
+              tabIndex={keyboard ? -1 : undefined}
+              data-testid={it.testId}
               className={`cf-ctx__item${it.danger ? ' is-danger' : ''}`}
               disabled={it.disabled}
               title={it.title}
