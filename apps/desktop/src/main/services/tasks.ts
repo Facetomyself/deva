@@ -5,7 +5,8 @@ import { randomUUID } from 'crypto'
 import { getDevaHome } from './config'
 import { publishSessionsChanged } from './chat-bus'
 import { listSessions, rebindSessionPersona, syncSessionBinding } from './chat-store'
-import { nextRun, parseCron, isValidTimeZone, describeSchedule, parseWallIso } from './schedule'
+import { nextRun, parseCron, isValidTimeZone } from './schedule'
+import { previewSchedule, type PreviewScheduleResult } from './schedule-preview'
 import {
   ERROR_PAUSE_THRESHOLD,
   MAX_RUNS_PER_TASK,
@@ -431,46 +432,7 @@ export function applyRunResult(
   return { task: t, autoPausedError }
 }
 
-// ── 日程预览（确认名片实时校验 + 人读摘要 + 下次触发）──────────────────────
-
-/** 预览结果：成功带人读摘要与下次触发（epoch ms，null=无更多触发）；失败带与 createTask 一致的错误码。 */
-export type PreviewScheduleResult =
-  | { ok: true; description: string; nextRunAt: number | null }
-  | { ok: false; error: 'invalid-input' | 'invalid-tz' | 'invalid-cron' | 'invalid-once' }
-
-/**
- * 校验一份日程并返回人读摘要 + 下次触发，供确认名片实时预览（与 createTask 校验同源，所见即所得）。
- * 纯读、不落盘、不建任务——名片编辑期的只读推演。
- *
- * `allowPast`（默认 false）：名片编辑态用默认——一次性时间已过视为错误（invalid-once），供用户改后重建。
- * 任务列表/详情为**已创建任务的只读展示**（如已完成的一次性任务其墙钟必然已过），传 true——
- * 一次性时间虽已过但日程本身合法时回落人读摘要（nextRunAt=null），避免把「已执行完毕」误标为「日程无效」。
- */
-export function previewSchedule(
-  schedule: TaskSchedule,
-  locale: 'zh-CN' | 'en' = 'zh-CN',
-  allowPast = false
-): PreviewScheduleResult {
-  if (!schedule || typeof schedule !== 'object') return { ok: false, error: 'invalid-input' }
-  if (!isValidTimeZone(schedule.tz)) return { ok: false, error: 'invalid-tz' }
-  if (schedule.kind === 'recurring') {
-    if (!parseCron(schedule.cron ?? '')) return { ok: false, error: 'invalid-cron' }
-    const next = nextRun(schedule, Date.now())
-    if (next == null) return { ok: false, error: 'invalid-cron' } // 病态但语法合法（如 2/30）
-    return { ok: true, description: describeSchedule(schedule, locale), nextRunAt: next }
-  }
-  if (schedule.kind === 'once') {
-    const next = nextRun(schedule, Date.now())
-    if (next == null) {
-      // 时间已过：仅当墙钟本身可解析（即合法但过期，非畸形）且允许过去时，回落人读摘要。
-      if (allowPast && parseWallIso(schedule.at ?? ''))
-        return { ok: true, description: describeSchedule(schedule, locale), nextRunAt: null }
-      return { ok: false, error: 'invalid-once' } // 非法或（编辑态下）已过期
-    }
-    return { ok: true, description: describeSchedule(schedule, locale), nextRunAt: next }
-  }
-  return { ok: false, error: 'invalid-input' }
-}
+export { previewSchedule, type PreviewScheduleResult }
 
 // ── 可注入运行器（scheduler 装载后接管 run-now / 触发）──────────────────────
 
