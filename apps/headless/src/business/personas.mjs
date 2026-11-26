@@ -10,6 +10,7 @@ import { assertWritable, fail, publishCheckedFile, readCheckedText, removeChecke
   verifyFile, withChildDirectory } from './personas-files.mjs'
 import { assertNoReferences } from './personas-references.mjs'
 import { personaImagesIn } from './persona-images.mjs'
+import { skillRoleChoiceVerifier } from './skill-role-choice-stamps.mjs'
 import { avatarDirectoryAccess, checkedAvatarUpload } from './profile.mjs'
 
 export { PersonaError } from './personas-files.mjs'
@@ -399,6 +400,26 @@ export async function openPersonas(options) {
   }
   return Object.freeze({
     list: () => access(index => publicRoster(workspaceCatalog, index)),
+    // Internal, short-lived metadata proof used by the saved skill role selector only.
+    // Reading choices does not resolve persona default folders or return prompts/images.
+    listSkillRoleChoices() {
+      return access(async index => {
+        const parent = await index.root.stat({bigint:true}), directory = await index.directory.stat({bigint:true})
+        const ranks = new Map(index.config.order.map((id, rank) => [id,rank]))
+        const roles = [], files = []
+        for (const id of index.ids) {
+          const binding = await readRole(index.directory,id)
+          if (!binding) fail('CONFLICT')
+          roles.push({id,name:binding.parsed.name,enabled:index.config.enabled[id] === true})
+          files.push({id,info:binding.info})
+        }
+        await index.verifyUnchanged()
+        const verify = skillRoleChoiceVerifier(path,parent,directory,files)
+        verify()
+        roles.sort((a,b)=>(ranks.get(a.id)??Number.MAX_SAFE_INTEGER)-(ranks.get(b.id)??Number.MAX_SAFE_INTEGER) || a.name.localeCompare(b.name) || a.id.localeCompare(b.id))
+        return {roles,verify}
+      })
+    },
     async getAvatarImage(id) {
       requireId(id)
       return access(index => withRole(index, id, undefined, async binding => {

@@ -5,7 +5,6 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   Brain,
   ChevronLeft,
-  ChevronRight,
   Cog,
   Info,
   Lock,
@@ -31,6 +30,7 @@ import { PersonaFace, parseAvatarSpec } from '../components/humation'
 import { useTheme } from '../theme/ThemeContext'
 import { readChatFontSize, saveChatFontSize, type ChatFontSize } from '../theme/chatFontSize'
 import { SettingsFrame } from './SettingsFrame'
+import { ExtensionSettingsRow, SkillSettingsDetail } from './SkillSettingsParts'
 import { ModelSettings } from '../features/settings/ModelSettings'
 import { clipName, IS_MAC, AvatarStack, Segmented, Toggle } from './shell-common'
 
@@ -224,37 +224,18 @@ function ExtensionsPane({
         <div className="cf-empty">{t('cf.extEmpty')}</div>
       ) : (
         <div className="cf-rows">
-          {items.map((x) => {
-            const name = (
-              <span className="cf-setrow__name">
-                <span className="cf-setrow__label" title={x.name}>
-                  {x.name}
-                </span>
-                <span className="cf-badge">{x.badge}</span>
-                {x.note && (
-                  <span className={`cf-setrow__note${x.noteWarn ? ' cf-setrow__note--warn' : ''}`}>
-                    {x.note}
-                  </span>
-                )}
-              </span>
-            )
-            return (
-              <div key={`${x.kind}:${x.id}`} className="cf-setrow">
-                {x.locked ? (
-                  // 内置技能不展示详情：只读一行，开关禁用。
-                  <div className="cf-setrow__main">{name}</div>
-                ) : (
-                  // 主区做按钮（点开详情），开关作兄弟节点独立触发（互不干扰）。
-                  <button className="cf-setrow__open" onClick={() => setOpen({ kind: x.kind, id: x.id })}>
-                    {name}
-                    {x.roles !== undefined && <RolesBadge roles={x.roles} />}
-                    <ChevronRight className="cf-setrow__chevron" size={15} />
-                  </button>
-                )}
-                <Toggle on={x.enabled} disabled={x.locked} onChange={() => toggle(x.kind, x.id)} />
-              </div>
-            )
-          })}
+          {items.map((x) => (
+            <ExtensionSettingsRow
+              key={`${x.kind}:${x.id}`}
+              name={x.name}
+              badge={x.badge}
+              note={x.note}
+              noteWarn={x.noteWarn}
+              onOpen={x.locked ? undefined : () => setOpen({ kind: x.kind, id: x.id })}
+              accessory={x.roles !== undefined && <RolesBadge roles={x.roles} />}
+              toggle={<Toggle on={x.enabled} disabled={x.locked} onChange={() => toggle(x.kind, x.id)} />}
+            />
+          ))}
         </div>
       )}
     </>
@@ -409,26 +390,15 @@ function SkillDetail({ item, onBack }: { item: Skill; onBack: () => void }): Rea
   }
 
   return (
-    <section className="provider-detail provider-detail--fill" key={item.id}>
-      <div className="provider-detail__topbar">
-        <button className="provider-detail__back" onClick={onBack}>
-          <ChevronLeft size={16} />
-          {t('common.back')}
-        </button>
-        <div className="provider-detail__spacer" />
+    <SkillSettingsDetail key={item.id} name={item.name} backLabel={t('common.back')} onBack={onBack} controls={
+      <>
         <button className="icon-btn provider-detail__del" title={t('extensions.remove')} onClick={onDelete}>
           <Trash2 size={15} />
         </button>
         <span className="provider-detail__enable">{t('extensions.enable')}</span>
         <Toggle on={item.enabled} onChange={() => toggle('skill', item.id)} />
-      </div>
-      <header className="provider-detail__head">
-        <span className="ext-detail__icon">
-          <Puzzle size={18} />
-        </span>
-        <h2 className="ext-detail__name ext-detail__name--mono">{item.name}</h2>
-      </header>
-
+      </>
+    }>
       <RolesPicker kind="skill" id={item.id} roles={item.roles} />
 
       <div className="ext-field ext-field--grow">
@@ -441,7 +411,7 @@ function SkillDetail({ item, onBack }: { item: Skill; onBack: () => void }): Rea
           <span className="ext-detail__muted">{t('extensions.instructionsEmpty')}</span>
         )}
       </div>
-    </section>
+    </SkillSettingsDetail>
   )
 }
 

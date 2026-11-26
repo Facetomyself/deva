@@ -1,20 +1,20 @@
 import { createHash, randomBytes } from 'node:crypto'
-import { constants, promises as fs } from 'node:fs'
+import { constants, fstatSync, lstatSync, promises as fs } from 'node:fs'
 import { TextDecoder } from 'node:util'
 import { childPath, openDirectory } from '../storage/private-files.mjs'
 import { SettingsError, record } from './settings-schema.mjs'
 
 const CONFIG = 'config.json'
-const MAX_BYTES = 4 * 1024 * 1024
+export const MAX_SETTINGS_FILE_BYTES = 4 * 1024 * 1024
 const decoder = new TextDecoder('utf-8', { fatal: true })
 const READ_FLAGS = constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK
 const WRITE_FLAGS = constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW
 const queues = new Map()
 
-export async function withSettingsDirectory(path, expectedIdentity, task) {
+export async function withSettingsDirectory(path, expectedIdentity, task, { create = !expectedIdentity } = {}) {
   let handle
   try {
-    const opened = await openDirectory(path, { create: !expectedIdentity, owned: true })
+    const opened = await openDirectory(path, { create, owned: true })
     handle = opened.directory
     if (expectedIdentity && opened.identity !== expectedIdentity) throw new SettingsError('STORAGE')
     // One queue per directory inode for all instances inside this server. The host takes
@@ -63,7 +63,7 @@ export async function readSettingsFile(directory) {
   try {
     const info = await file.stat({ bigint: true })
     verifyFile(info)
-    if (info.size < 1n || info.size > BigInt(MAX_BYTES)) throw new SettingsError('CORRUPT')
+    if (info.size < 1n || info.size > BigInt(MAX_SETTINGS_FILE_BYTES)) throw new SettingsError('CORRUPT')
     const bytes = Buffer.alloc(Number(info.size) + 1)
     try {
       let offset = 0
@@ -87,16 +87,27 @@ export async function readSettingsFile(directory) {
   }
 }
 
-export async function assertWritable(directory, expected) {
-  const parent = await directory.stat({ bigint: true })
-  if ((parent.mode & 0o300n) !== 0o300n || (expected && (expected.mode & 0o200n) === 0n)) {
-    throw new SettingsError('READ_ONLY')
-  }
+function expectSnapshot(expected, current) {
+  if (current) verifyFile(current)
+  if ((!expected !== !current) || (expected && !sameSnapshot(expected, current))) throw new SettingsError('CONFLICT')
+}
+
+async function assertSettingsCurrent(directory, expected) {
   let current = null
   try { current = await fs.lstat(childPath(directory, CONFIG), { bigint: true }) }
   catch (error) { if (error.code !== 'ENOENT') throw error }
-  if (current) verifyFile(current)
-  if ((!expected !== !current) || (expected && !sameSnapshot(expected, current))) throw new SettingsError('CONFLICT')
+  expectSnapshot(expected, current)
+}
+
+function requireWritable(parent, expected) {
+  if ((parent.mode & 0o300n) !== 0o300n || (expected && (expected.mode & 0o200n) === 0n)) {
+    throw new SettingsError('READ_ONLY')
+  }
+}
+
+export async function assertWritable(directory, expected) {
+  requireWritable(await directory.stat({ bigint: true }), expected)
+  await assertSettingsCurrent(directory, expected)
 }
 
 export function encodeSettings(raw) {
@@ -105,7 +116,7 @@ export function encodeSettings(raw) {
   let bytes
   try { bytes = Buffer.from(JSON.stringify(raw) + '\n') }
   catch { throw new SettingsError('STORAGE') }
-  if (bytes.length > MAX_BYTES) throw new SettingsError('INVALID')
+  if (bytes.length > MAX_SETTINGS_FILE_BYTES) throw new SettingsError('INVALID')
   return bytes
 }
 
@@ -117,7 +128,12 @@ async function cleanTemp(path, info) {
   } catch { /* Cleanup cannot undo a visible commit. */ }
 }
 
-export async function publishSettingsFile(directory, bytes, expected) {
+function namedFile(path) {
+  try { return lstatSync(path, { bigint: true }) }
+  catch (error) { if (error.code === 'ENOENT') return null; throw error }
+}
+
+export async function publishSettingsFile(directory, bytes, expected, { beforePublish, authorize, preserveAccess } = {}) {
   const target = childPath(directory, CONFIG)
   const tmp = childPath(directory, `.config.${randomBytes(16).toString('hex')}.tmp`)
   let file, tempInfo, info
@@ -126,9 +142,25 @@ export async function publishSettingsFile(directory, bytes, expected) {
     tempInfo = await file.stat({ bigint: true })
     await file.chmod(0o600)
     await file.writeFile(bytes)
+    if (preserveAccess && expected) {
+      if (expected.gid !== tempInfo.gid) await file.chown(Number(expected.uid), Number(expected.gid))
+      if ((expected.mode & 0o777n) !== 0o600n) await file.chmod(Number(expected.mode & 0o777n))
+    }
     await file.sync()
     await directory.sync()
-    await assertWritable(directory, expected)
+    if (beforePublish || authorize) {
+      const staged = await file.stat({ bigint: true })
+      await beforePublish?.()
+      authorize?.() // Intentionally synchronous: no event-loop yield until submitting rename/link.
+      requireWritable(fstatSync(directory.fd, { bigint: true }), expected)
+      expectSnapshot(expected, namedFile(target))
+      const named = namedFile(tmp)
+      verifyFile(staged)
+      if (!named || !sameSnapshot(staged, named) || !sameSnapshot(staged, fstatSync(file.fd, { bigint: true })) ||
+          (preserveAccess && expected && (staged.mode !== expected.mode || staged.uid !== expected.uid || staged.gid !== expected.gid))) {
+        throw new SettingsError('STORAGE')
+      }
+    } else await assertWritable(directory, expected)
     if (expected) await fs.rename(tmp, target)
     else {
       try { await fs.link(tmp, target) }

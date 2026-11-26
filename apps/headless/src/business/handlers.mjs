@@ -18,6 +18,9 @@ import { HttpError, json, readJson } from '../http/policy.mjs'
 import { openSettings } from './settings.mjs'
 import { allowedModelOrigins } from './provider-fetch.mjs'
 import { openLibrary } from './library-routes.mjs'
+import { openSkillDocuments } from '../skills/documents.mjs'
+import { openSkillLibrary } from '../skills/store.mjs'
+import { skillLibraryRoutes } from '../skills/routes.mjs'
 
 const keyPath = /^\/api\/v1\/provider-keys\/([A-Za-z0-9_.-]{1,128})$/
 const names = new Set(['/api/v1/settings', '/api/v1/provider-keys', '/api/v1/provider-models'])
@@ -56,9 +59,13 @@ export async function openBusiness({ dataDir, vault, auth, version, allowedOrigi
   const lifetime = new AbortController()
   const journal = createEventJournal()
   let library, turns, uploads, browser, closingBrowser, git, closingGit, taskStore, preview, tasks, closingTasks
-  let terminalService, closingTerminals
+  let terminalService, closingTerminals, skills, closingSkills
   try {
     library = await openLibrary({ dataDir, workspaceRoot, workspaceWritable, privateRoots, gitProjects })
+    // Discover native documents only upon explicit owner requests (never feed this catalog to turns).
+    const documents = openSkillDocuments({ dataDir })
+    skills = skillLibraryRoutes({ auth, documents, store: openSkillLibrary({ dataDir, documents,
+      withRoleChoices: library.withSkillRoleChoices }) })
     if (library.gitGrants.enabled) git = openGitService({ grants: library.gitGrants, auth })
     // No scheduler is installed in this process. Task records are read only on a human request.
     taskStore = openTaskStore({ dataDir }); preview = openTaskPreview()
@@ -79,7 +86,7 @@ export async function openBusiness({ dataDir, vault, auth, version, allowedOrigi
     }
   } catch (err) {
     journal.close()
-    await Promise.allSettled([terminalService?.close(), git?.close(), ...(tasks ? [tasks.close()] : [preview?.close(), taskStore?.close?.()]),
+    await Promise.allSettled([skills?.close(), terminalService?.close(), git?.close(), ...(tasks ? [tasks.close()] : [preview?.close(), taskStore?.close?.()]),
       turns?.close(), uploads?.close(), library?.close()]); throw err
   }
   const terminals = terminalRoutes(terminalService)
@@ -90,6 +97,7 @@ export async function openBusiness({ dataDir, vault, auth, version, allowedOrigi
   const deliveries = deliveryRoutes({ turns, files: library.deliveryFiles })
   function beginShutdown() {
     lifetime.abort(); attachments.close()
+    if (!closingSkills) { closingSkills=skills.close();void closingSkills.catch(()=>{}) }
     if (!closingTerminals) { closingTerminals = terminals.close(); void closingTerminals.catch(() => {}) }
     if (!closingTasks) { closingTasks = tasks.close(); void closingTasks.catch(() => {}) }
     if (git && !closingGit) { closingGit = git.close(); void closingGit.catch(() => {}) }
@@ -99,13 +107,14 @@ export async function openBusiness({ dataDir, vault, auth, version, allowedOrigi
     beginShutdown,
     capabilities: Object.freeze({ textChat: true, library: true, workspaceFiles: library.workspaceFilesEnabled, attachments: true,
       browserPanel: !!browser, gitInspect: !!git, taskInspection: Boolean(tasks), deliveries: typeof turns.deliverySnapshot === 'function',
-      terminalViewer: Boolean(terminalService),
+      terminalViewer: Boolean(terminalService), skillLibrary: Boolean(skills),
       sessionWorkspaces: typeof turns.getWorkspace === 'function' && typeof turns.setWorkspace === 'function',
       sessionPreferences: typeof turns.patchPreferences === 'function' && typeof journal.watchSessions === 'function' }),
     createRealtime: ({ auth, policy }) => createChatWebSocket({ turns, journal, auth, policy }),
     getConfig: () => settings.getPublicConfig(),
     async handle(req, res, { auth, policy }) {
       const path = (req.url ?? '').split('?', 1)[0]
+      if ((path === '/api/v1/skills' || path.startsWith('/api/v1/skills/')) && await skills.handle(req,res,{auth,policy})) return true
       if ((path === '/api/v1/terminal/profiles' || (path.startsWith('/api/v1/workspaces/') && path.includes('/terminals'))) &&
           await terminals.handle(req,res,{auth,policy})) return true
       if ((path === '/api/v1/tasks' || path.startsWith('/api/v1/tasks/')) && await tasks.handle(req, res, { auth, policy })) return true
@@ -161,7 +170,7 @@ export async function openBusiness({ dataDir, vault, auth, version, allowedOrigi
       try { await turns.close() } finally {
         journal.close()
         try {
-          const results = await Promise.allSettled([closingBrowser, closingGit, closingTasks, closingTerminals])
+          const results = await Promise.allSettled([closingBrowser, closingGit, closingTasks, closingTerminals, closingSkills])
           if (results.some(row => row.status === 'rejected')) throw Error('Optional service shutdown unconfirmed')
         } finally { try { await uploads.close() } finally { await library.close() } }
       }
