@@ -143,6 +143,25 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+      - name: Verify the native skill library and owner preferences in two sandboxed Chrome logins
+        id: skills_ui
+        if: ${{ !cancelled() && steps.host_tests.outcome == 'success' }}
+        timeout-minutes: 5
+        env:
+          DEVA_QA_SKILLS_CAPTURE: '1'
+        run: node scripts/workbench/e2e-skill-library.mjs
+
+      - name: Publish the verified synthetic skill settings and document views
+        if: ${{ !cancelled() && steps.skills_ui.outcome == 'success' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: workbench-skill-library
+          path: |
+            test-results/skill-library/skills-list.png
+            test-results/skill-library/skill-detail.png
+          if-no-files-found: error
+          retention-days: 14
+
       - name: Select the same installed Chrome for UI and worker
         run: bash scripts/workbench/ci-select-chromium.sh
 
@@ -253,6 +272,37 @@ jobs:
       - name: Verify both live PTYs, kernel descriptors, owner UI and scoped teardown
         timeout-minutes: 6
         run: node scripts/workbench/container-terminal-viewer.mjs
+
+  packaged-skills:
+    name: Native skill preferences in the production amd64 workbench
+    if: ${{ github.event_name == 'pull_request' && github.head_ref == 'feat/web-workbench-skill-library' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 14
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          package-manager-cache: false
+      - name: Build the native Linux amd64 production image
+        timeout-minutes: 8
+        run: |
+          set -eu
+          test "$(uname -m)" = x86_64
+          docker build --platform linux/amd64 --target runtime -t deva-workbench:skills-verify .
+          docker image inspect -f '{{.Os}}/{{.Architecture}} {{.Id}} {{.Size}} bytes' deva-workbench:skills-verify
+      - name: Verify skill management and model isolation inside the packaged host
+        timeout-minutes: 3
+        run: |
+          set -eu
+          test -f "$PWD/apps/headless/test/skill-library-http.test.mjs"
+          docker run --rm --init --network none --read-only --user 1000:1000 --cap-drop ALL --security-opt no-new-privileges:true \
+            --pids-limit 128 --cpus 2 --memory 512m --tmpfs /tmp:rw,nosuid,nodev,noexec,mode=1777,size=96m \
+            --mount "type=bind,src=$PWD/apps/headless/test/skill-library-http.test.mjs,dst=/opt/deva/apps/headless/ci/skill-library-http.test.mjs,readonly" \
+            --entrypoint node deva-workbench:skills-verify --test /opt/deva/apps/headless/ci/skill-library-http.test.mjs
+      - name: Confirm real saved skill preferences across two distinct production containers
+        timeout-minutes: 3
+        run: node scripts/workbench/container-skill-library.mjs
 
   sandbox:
     name: Private human browser worker
