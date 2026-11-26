@@ -9,10 +9,11 @@ import {
   type ContentPart,
   type EffortLevel,
   type Message,
+  type NormalizedError,
   type StopReason,
   type ToolSpec
 } from '../providers/types'
-import { OUTPUT_BUDGET_SAFE, OUTPUT_BUDGET_WIDE, type ContextOverflow } from '../../shared/context'
+import { OUTPUT_BUDGET_SAFE, OUTPUT_BUDGET_WIDE } from '../../shared/context'
 import { REPEAT_STOP, REPEAT_WARN } from '../../shared/limits'
 import {
   executeTool,
@@ -66,7 +67,8 @@ import {
   rememberContextLimit,
   rememberOutputBudget
 } from './compaction'
-import { trailingRepetition, watchRepetition } from './repetition'
+import { consumeModelStep } from './model-step-stream'
+import { trailingRepetition } from './repetition'
 import { parseAskQuestions } from './ask-questions'
 import {
   MAX_RECONNECT,
@@ -461,8 +463,6 @@ async function streamModelStep(run: LoopRun): Promise<ModelStep> {
   let stopReason: StopReason = 'end_turn'
   // 本步被中止 / 出错打断（而非干净结束）：仍落地已收到的部分，见 commitStep。
   let interrupted: 'aborted' | 'error' | 'degenerate' | null = null
-  // 本步思考全文：只用于复读检测与截断后重画（思考不回放给模型，不进历史）。
-  let thinkingText = ''
   // 按需加载工具（见 tool-search.ts）里用法还不在上下文里的，在发请求前定格：发 tool_call 事件（画成
   // 「查看用法」）与工具循环里的拦截按同一份判定。子智能体禁用的工具照旧走「子智能体不可用」，不算在内。
   let pendingUsage = new Set<string>()
@@ -476,26 +476,12 @@ async function streamModelStep(run: LoopRun): Promise<ModelStep> {
   // 服务端建议的等待（retry-after），仅对紧随其后的那次退避生效。
   let retryAfterMs: number | undefined
   reconnect: for (let attempt = 0; ; attempt++) {
-    assistantText = ''
-    thinkingText = ''
     toolCalls = []
-    stopReason = 'end_turn'
-    // 复读看守（见 repetition.ts）：正文与思考各一路，命中即掐断本步的流。toolMark = 最近一次收到工具调用时
-    // 两路已有的长度：截断后重画只重画它之后的部分（之前的在工具卡前面，stream_reset 删不到）。
-    const watchText = watchRepetition()
-    const watchThinking = watchRepetition()
-    let looped: { channel: 'text' | 'thinking'; period: number } | null = null
+    // 最近一次收到工具调用时两路已有的长度：复读截断后重画只重画它之后的部分（工具卡前的删不到）。
     let toolMark = { text: 0, thinking: 0 }
-    let retryableDrop = false
-    let fatal = false
     // 不可重试错误先扣下、不立即画红框：其中几类引擎能自愈（输出预算降档、上下文压缩后重发），
     // 流结束后再定夺；自愈不了才上报。
-    let fatalErr: {
-      kind: string
-      message: string
-      limit?: number
-      overflow?: ContextOverflow
-    } | null = null
+    const failures: { retryableDrop?: boolean; fatalErr?: NormalizedError } = {}
     // 每次（含重发）现算：本步刚因不认思考等级被拒时，重发即不再带该参数。
     const stepEffort = sentEffort(model, effort)
     // 同理现算：本步刚因输出预算被拒时，重发即降回保守值。
@@ -525,7 +511,7 @@ async function streamModelStep(run: LoopRun): Promise<ModelStep> {
     const sent = modelMessages(history)
     pendingUsage = unknownUsages(sent, offeredTools)
 
-    for await (const ev of streamChat(
+    const events = streamChat(
       { adapter: model.adapter, providerId: model.providerId, baseURL: model.baseURL },
       {
         model: model.model,
@@ -545,25 +531,17 @@ async function streamModelStep(run: LoopRun): Promise<ModelStep> {
         // 子智能体同样走这里：其 system/tools 与主轮不同，自成一套缓存条目，各缓各的。
         cache: true
       }
-    )) {
-      if (ev.type === 'text_delta') {
-        assistantText += ev.text
-        if (!isSub) emit(turnId, sessionId, { type: 'text_delta', text: ev.text })
-        const hit = watchText(ev.text)
-        if (hit) {
-          looped = { channel: 'text', period: hit.period }
-          break // 跳出即取消底层请求（iterateSSE 的 finally）
-        }
-      } else if (ev.type === 'thinking_delta') {
-        thinkingText += ev.text
-        if (!isSub) emit(turnId, sessionId, { type: 'thinking_delta', text: ev.text })
-        const hit = watchThinking(ev.text)
-        if (hit) {
-          looped = { channel: 'thinking', period: hit.period }
-          break
-        }
-      } else if (ev.type === 'tool_call') {
-        toolMark = { text: assistantText.length, thinking: thinkingText.length }
+    )
+    const consumed = await consumeModelStep(events, {
+      signal: controller.signal,
+      onTextDelta(text) {
+        if (!isSub) emit(turnId, sessionId, { type: 'text_delta', text })
+      },
+      onThinkingDelta(text) {
+        if (!isSub) emit(turnId, sessionId, { type: 'thinking_delta', text })
+      },
+      onToolCall(ev, offsets) {
+        toolMark = offsets
         // 个别网关不给 id：补一个，且事件与消息共用同一个——按 toolUseId 归属的边车 / 检查点
         // 若遇空 id，会把不同轮的记录串到同一个键上。
         const id = ev.id || `call_${randomUUID()}`
@@ -603,10 +581,11 @@ async function streamModelStep(run: LoopRun): Promise<ModelStep> {
                 : ev.args,
             ...(evMeta ?? {})
           })
-      } else if (ev.type === 'tool_call_truncated') {
+      },
+      onTruncatedToolCall(ev, offsets) {
         // 参数残缺（撞上输出上限 / 被内容拦截 / 坏 JSON）：记成一次调用（进历史、画普通工具卡——
         // 哪怕是 ask_user / exit_plan，它们也没法被答复），由工具循环直接回灌纠正提示，绝不执行。
-        toolMark = { text: assistantText.length, thinking: thinkingText.length }
+        toolMark = offsets
         const id = ev.id || `call_${randomUUID()}`
         const input = truncatedCallInput(ev.partialArgs)
         toolCalls.push({
@@ -623,7 +602,8 @@ async function streamModelStep(run: LoopRun): Promise<ModelStep> {
           args: input,
           ...(evMeta ?? {})
         })
-      } else if (ev.type === 'usage') {
+      },
+      onUsage(ev) {
         // 子轮用量不代表主对话的上下文占用，不喂渲染层的上下文计量。
         if (!isSub)
           emit(turnId, sessionId, {
@@ -639,28 +619,26 @@ async function streamModelStep(run: LoopRun): Promise<ModelStep> {
           run.usedAt = history.length
         }
         args.onUsage?.(ev.input, ev.cacheRead ?? 0, ev.cacheWrite ?? 0)
-      } else if (ev.type === 'error') {
-        // 可重试且非用户中止 → 暂不上报，走自动重连；否则作为致命错误立即上报。
-        if (ev.error.retryable && !controller.signal.aborted) {
-          retryableDrop = true
-          lastDropReason = ev.error.message
-          retryAfterMs = ev.error.retryAfterMs
+      },
+      onError(error) {
+        // 可重试且非用户中止 → 暂不上报，走自动重连；否则按致命错误处理。
+        if (error.retryable && !controller.signal.aborted) {
+          failures.retryableDrop = true
+          lastDropReason = error.message
+          retryAfterMs = error.retryAfterMs
         } else {
-          fatal = true
-          fatalErr = {
-            kind: ev.error.kind,
-            message: ev.error.message,
-            limit: ev.error.limit,
-            overflow: ev.error.overflow
-          }
+          failures.fatalErr = error
         }
-      } else if (ev.type === 'done') {
-        stopReason = ev.stopReason
       }
-    }
+    })
+    assistantText = consumed.assistantText
+    stopReason = consumed.stopReason
+    const looped = consumed.repetition
+    const { fatalErr, retryableDrop } = failures
 
     // 中止 / 致命错误：不再直接 return——那样本步已流出的正文（渲染层早已画出）不进历史，
     // 重开对话后这一轮凭空消失。跳出重连循环，交给 commitStep 落地已收到的部分。
+    // 这里保留用户中止的优先级；仅由 provider 报告的 stopReason 仍交给 commitStep 判定。
     if (controller.signal.aborted) {
       interrupted = 'aborted'
       break reconnect
@@ -691,6 +669,7 @@ async function streamModelStep(run: LoopRun): Promise<ModelStep> {
         const hit = trailingRepetition(t)
         return hit ? t.slice(0, hit.start + hit.period) : t
       }
+      let { thinkingText } = consumed
       if (looped.channel === 'text') assistantText = cutLoop(assistantText)
       else thinkingText = cutLoop(thinkingText)
       if (!isSub) {
@@ -704,7 +683,7 @@ async function streamModelStep(run: LoopRun): Promise<ModelStep> {
       interrupted = 'degenerate'
       break reconnect
     }
-    if (fatal && fatalErr) {
+    if (fatalErr) {
       // 自愈⓪：模型 / 网关不认所选思考等级 → 记住，去掉该参数重发本步（不计入重连次数）。
       // 只认本步确实带了参数的情形（适配器据此才会归出该类），故不会空转。
       if (fatalErr.kind === 'effort_unsupported' && stepEffort) {

@@ -1,7 +1,7 @@
-import { createProviderCore } from '../../dist/provider-core.mjs'
+import { connectProvider } from './model-connection.mjs'
 import { HttpError, json, readJson } from '../http/policy.mjs'
 import { openSettings } from './settings.mjs'
-import { allowedModelOrigins, providerFetch } from './provider-fetch.mjs'
+import { allowedModelOrigins } from './provider-fetch.mjs'
 
 const keyPath = /^\/api\/v1\/provider-keys\/([A-Za-z0-9_.-]{1,128})$/
 const names = new Set(['/api/v1/settings', '/api/v1/provider-keys', '/api/v1/provider-models'])
@@ -24,35 +24,14 @@ function statusFor(err) {
   return Object.hasOwn(errors, err?.code) ? errors[err.code] : [500, 'internal']
 }
 const text = (str) => typeof str === 'string' && str.trim().length > 0
-const normalizeBase = (value) => value.trim().replace(/\/+$/, '')
 
 /** Use a single immutable provider snapshot for URL, credentials and headers. The browser may
  * request a known provider but never independently select the destination for its stored key. */
 async function probe(settings, supplied, opts, signal) {
   exact(supplied, ['providerId', 'adapter', 'baseURL'])
   if (!text(supplied.providerId) || !text(supplied.baseURL) || !['openai', 'anthropic', 'responses'].includes(supplied.adapter)) throw new HttpError(400, 'invalid_probe')
-  const p = await settings.getProvider(supplied.providerId)
-  if (!p) throw new HttpError(404, 'provider_not_found')
-  if (p.adapter !== supplied.adapter || normalizeBase(p.apiHost) !== normalizeBase(supplied.baseURL)) throw new HttpError(409, 'provider_changed')
-  const boundedFetch = providerFetch({ baseURL: p.apiHost, allowedOrigins: opts.allowedOrigins, maxBytes: 2 * 1024 * 1024, configuredCookie: p.headers?.cookie })
-  const client = createProviderCore({
-    httpFetch: (url, init = {}) => boundedFetch(url, { ...init, signal: init.signal ? AbortSignal.any([signal, init.signal]) : signal }),
-    describeNetError: () => '服务商连接失败', getAppVersion: () => opts.version,
-    getSecret: (id) => id === p.id ? p.apiKey : null,
-    providerCustomHeaders: (id) => id === p.id ? (p.headers ?? {}) : {}
-  })
-  const result = await client.listModels({ providerId: p.id, baseURL: p.apiHost, adapter: p.adapter })
-  if (!result.ok) {
-    // A remote provider can echo our Authorization or other confidential headers in an error.
-    // Only the normalized kind crosses back to the renderer.
-    const kind = result.kind ?? 'unknown'
-    const msg = kind === 'auth' ? '服务商未接受当前凭据' : kind === 'network' ? '服务商连接失败，请检查配置的地址和网络' : '服务商未返回可用的模型清单'
-    return { ok: false, kind, message: msg }
-  }
-  const privateValues = [p.apiKey, ...Object.values(p.headers ?? {})].filter(text)
-  const models = (result.models ?? []).filter((m) => text(m) && m.length <= 512 && !/[\x00-\x1f\x7f]/.test(m) &&
-    !privateValues.some((v) => m === v || (v.length >= 4 && m.includes(v)))).slice(0, 2048)
-  return { ok: true, models }
+  const connection = await connectProvider(settings, supplied.providerId, { ...opts, expected: supplied, signal })
+  return connection.listModels()
 }
 
 export async function openBusiness({ dataDir, vault, version, allowedOrigins = [] }) {
