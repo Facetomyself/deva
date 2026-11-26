@@ -1,5 +1,6 @@
 import { lazy, Suspense, type ReactNode } from 'react'
 import { Brain } from 'lucide-react'
+import { ToastProvider } from '../renderer/src/components/ToastProvider'
 import { DialogProvider } from '../renderer/src/components/DialogProvider'
 import { ModelSettings } from '../renderer/src/features/settings/ModelSettings'
 import { I18nProvider, useI18n } from '../renderer/src/i18n/i18n'
@@ -7,14 +8,14 @@ import { ModelsProvider, useModels } from '../renderer/src/store/models'
 import { ThemeProvider } from '../renderer/src/theme/ThemeContext'
 import { SettingsFrame } from '../renderer/src/redesign/SettingsFrame'
 import { copy } from './first-use-copy'
-import type { Bootstrap, Transport } from './transport'
+import type { Bootstrap, LibraryQueue, Transport } from './transport'
 
 const TextWorkbench = lazy(() => import('./text-workbench'))
 
 export interface DesktopSettingsProps {
   chat?: {
     transport: Transport; bootstrap: Bootstrap; beforeWrite: () => Promise<void>; onExpired: () => void
-    locked: boolean; notice: ReactNode; logout: () => void; working: boolean; logoutFailed: boolean
+    libraryQueue: LibraryQueue; locked: boolean; notice: ReactNode; logout: () => void; working: boolean; logoutFailed: boolean
   }
 }
 
@@ -46,7 +47,7 @@ function Workbench({ chat }: { chat: NonNullable<DesktopSettingsProps['chat']> }
   const { locale } = useI18n()
   return <Suspense fallback={<main className="wb-page"><p role="status">{copy[locale].loading}</p></main>}>
     <TextWorkbench transport={chat.transport} bootstrap={chat.bootstrap} beforeWrite={chat.beforeWrite} onExpired={chat.onExpired}
-      locked={chat.locked} notice={chat.notice} renderSettings={(close) => <WorkbenchSettingsDialog chat={chat} close={close} />} />
+      libraryQueue={chat.libraryQueue} locked={chat.locked} notice={chat.notice} renderSettings={(close) => <WorkbenchSettingsDialog chat={chat} close={close} />} />
   </Suspense>
 }
 
@@ -57,7 +58,7 @@ export function DesktopSettings({ chat }: DesktopSettingsProps): React.JSX.Eleme
       <I18nProvider>
         <DialogProvider>
           <ModelsProvider browserSettings>
-            {chat ? <Workbench chat={chat} /> : <ReadyModelSettings />}
+            {chat ? chat.bootstrap.capabilities?.library ? <ToastProvider><Workbench chat={chat} /></ToastProvider> : <Workbench chat={chat} /> : <ReadyModelSettings />}
           </ModelsProvider>
         </DialogProvider>
       </I18nProvider>

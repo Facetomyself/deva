@@ -341,7 +341,7 @@ When memory is full, the next write by the model first consolidates the existing
 
 ## Headless server workbench (fork development)
 
-The [amd64 Docker Compose workbench](apps/headless/README.md) supports browser enrollment, the original desktop model settings, and general text conversations with shared desktop UI, streaming, cancellation and reconnect. This is separate from the mobile relay; see the [parity inventory](docs/development/web-workbench/README.md) for the remaining desktop workflows.
+The [amd64 Docker Compose workbench](apps/headless/README.md) supports browser enrollment, the original desktop model settings, and general text conversations with shared desktop UI, streaming, cancellation and reconnect. It also includes profile and role editing, avatar management, and notes scoped to the owner, a role, or a registered project. This is separate from the mobile relay; see the [parity inventory](docs/development/web-workbench/README.md) for the remaining desktop workflows.
 
 ## Build from Source
 

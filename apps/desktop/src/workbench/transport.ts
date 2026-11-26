@@ -4,7 +4,7 @@ const prefix = '/api/v1'
 const csrfHeader = 'x-deva-csrf'
 
 type RecordValue = Record<string, unknown>
-type Revision = string | number
+export type Revision = string | number
 type Fetch = typeof fetch
 
 export interface Bootstrap {
@@ -14,7 +14,7 @@ export interface Bootstrap {
   config: RecordValue
   csrf: string
   expiresAt: number
-  capabilities?: { textChat?: true }
+  capabilities?: { textChat?: true; library?: true }
 }
 
 export type SessionScreen = { mode: 'authenticated'; bootstrap: Bootstrap } | { mode: 'claim' | 'login' }
@@ -73,7 +73,8 @@ export function createTransport(send: Fetch = fetch) {
     })
     if (!response.ok) {
       const failure: unknown = await response.json().catch(() => undefined)
-      throw new HttpFailure(response.status, record(failure) && typeof failure.error === 'string' ? failure.error : undefined)
+      const code = record(failure) ? failure.error ?? failure.code : undefined
+      throw new HttpFailure(response.status, typeof code === 'string' ? code : undefined)
     }
     return response.json()
   }
@@ -85,9 +86,12 @@ export function createTransport(send: Fetch = fetch) {
         typeof result.csrf !== 'string' || !result.csrf || typeof result.expiresAt !== 'number' ||
         !Number.isFinite(result.expiresAt)) throw new Error('Invalid session bootstrap')
     const { protocol, version, platform, config, csrf, expiresAt } = result
-    const capabilities = record(result.capabilities) && result.capabilities.textChat === true
-      ? { textChat: true as const } : undefined
-    return { protocol, version, platform, config, csrf, expiresAt, ...(capabilities ? { capabilities } : {}) }
+    const capabilities: Bootstrap['capabilities'] = {}
+    if (record(result.capabilities)) {
+      if (result.capabilities.textChat === true) capabilities.textChat = true
+      if (result.capabilities.library === true) capabilities.library = true
+    }
+    return { protocol, version, platform, config, csrf, expiresAt, ...(Object.keys(capabilities).length ? { capabilities } : {}) }
   }
 
   return {
@@ -122,6 +126,19 @@ export type SettingsHost = Pick<DevaApi, 'config' | 'secrets' | 'provider'> & {
   window: Pick<DevaApi['window'], 'setOverlaySymbolColor'>
 }
 
+type LibraryJob = 'read' | 'write' | 'config-write'
+export type LibraryQueue = <T>(kind: LibraryJob, operation: (token: string, revision: Revision) => Promise<{
+  value: T; configRevision?: Revision
+}>) => Promise<T>
+
+// Compare projections irrespective of JSON property order. Hidden config fields are not in this projection.
+function equivalent(a: unknown, b: unknown): boolean {
+  if (a === b) return true
+  if (Array.isArray(a) && Array.isArray(b)) return a.length === b.length && a.every((item, i) => equivalent(item, b[i]))
+  return record(a) && record(b) && Object.keys(a).length === Object.keys(b).length &&
+    Object.keys(a).every((key) => Object.prototype.hasOwnProperty.call(b, key) && equivalent(a[key], b[key]))
+}
+
 type SettingsBridgeOptions = {
   transport: Transport
   bootstrap: Bootstrap
@@ -146,19 +163,31 @@ export function createSettingsBridge({ transport, bootstrap, onFailure, updateBr
     ids = new Set(result.ids)
   }
 
+  async function readSettings(): Promise<{ config: RecordValue; revision: Revision }> {
+    const result = await transport.request('/settings')
+    if (!record(result) || !record(result.config) || !revision(result.revision)) throw new Error('Invalid settings response')
+    if (!csrf) throw new Error('Session closed')
+    return { config: result.config, revision: result.revision }
+  }
+
   const ready = Promise.all([
-    transport.request('/settings').then((result) => {
-      if (!record(result) || !record(result.config) || !revision(result.revision)) throw new Error('Invalid settings response')
-      if (!csrf) throw new Error('Session closed')
+    readSettings().then((result) => {
       snapshot = { ...result.config }
       currentRevision = result.revision
     }),
     readKeyFlags()
   ]).then(() => undefined)
 
+  function fail(error: unknown): void {
+    if (blocked) return
+    blocked = true
+    if (error instanceof HttpFailure && error.status === 401) closeSession()
+    onFailure(error)
+  }
+
   // A failed mutation leaves the latest server state unknown (including a dropped response).
   // Halt dependent work, show the failure, and reload from the server rather than rebasing a whole models table.
-  function enqueue<T>(operation: (token: string) => Promise<T>, mutation: boolean): Promise<T> {
+  function enqueue<T>(operation: (token: string) => Promise<T>, mutation: boolean, library = false): Promise<T> {
     if (closing || !csrf) return Promise.reject(new Error('Session closed'))
     const job = queueTail.then(async () => {
       await ready
@@ -166,17 +195,64 @@ export function createSettingsBridge({ transport, bootstrap, onFailure, updateBr
       try {
         return await operation(csrf)
       } catch (error) {
-        if (mutation || (error instanceof HttpFailure && [401, 403, 409].includes(error.status))) {
-          blocked = true
-          if (error instanceof HttpFailure && error.status === 401) closeSession()
-          onFailure(error)
-        }
+        if (mutation || (error instanceof HttpFailure && (error.status === 401 || error.status === 403 || (!library && error.status === 409)))) fail(error)
         throw error
       }
     })
     queueTail = job.then(() => undefined, () => undefined)
     return job
   }
+
+  const libraryQueue: LibraryQueue = (kind, operation) => enqueue(async (token) => {
+    const expected = currentRevision!
+    if (kind !== 'config-write') return (await operation(token, expected)).value
+
+    const verify = (ok: boolean, afterWrite = false): void => {
+      if (ok) return
+      const error = new HttpFailure(409, afterWrite ? 'settings_changed_after_write' : 'settings_changed')
+      fail(error)
+      throw error
+    }
+    try {
+      // Role and roster revisions do not cover settings. Do not adopt an external revision
+      // even when the visible projection happens to match (stored keys can differ).
+      const before = await readSettings()
+      verify(before.revision === expected && equivalent(before.config, snapshot))
+    } catch (error) {
+      fail(error)
+      throw error
+    }
+
+    let result: Awaited<ReturnType<typeof operation>>
+    try {
+      result = await operation(token, expected)
+    } catch (error) {
+      // An acknowledged resource conflict/validation failure belongs to its panel. A lost
+      // response or server failure leaves config unknown and must stop queued settings writes.
+      if (!(error instanceof HttpFailure) || error.status >= 500) fail(error)
+      else if (![401, 403].includes(error.status)) {
+        try { verify((await readSettings()).revision === expected) } catch (checkError) { fail(checkError); throw checkError }
+      }
+      throw error
+    }
+    try {
+      // Read config again: role APIs return independent CAS tokens, never a settings token.
+      // The settings projection excludes profile/roster data; unrelated differences are external.
+      const after = await readSettings()
+      verify((result.configRevision === undefined || result.configRevision === after.revision) && equivalent(after.config, snapshot), true)
+      const beforeKeys = [...ids].sort()
+      await readKeyFlags()
+      verify(equivalent(beforeKeys, [...ids].sort()), true)
+      // Do not adopt an external revision observed between the config and key-presence reads.
+      verify((await readSettings()).revision === after.revision, true)
+      snapshot = after.config
+      currentRevision = after.revision
+    } catch (error) {
+      fail(error)
+      throw error
+    }
+    return result.value
+  }, false, true)
 
   async function changeKey(id: string, token: string, value?: string): Promise<void> {
     const result = await transport.request(`/provider-keys/${encodeURIComponent(id)}`,
@@ -267,7 +343,7 @@ export function createSettingsBridge({ transport, bootstrap, onFailure, updateBr
     if (blocked || closing || !csrf) throw new Error('Reload settings before continuing')
   }
 
-  return { api, ready, logout, beforeChatWrite }
+  return { api, ready, logout, beforeChatWrite, libraryQueue }
 }
 
 /** Install just the features required by the lazy desktop ModelSettings subtree. */

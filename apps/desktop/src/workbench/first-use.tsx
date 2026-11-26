@@ -32,7 +32,7 @@ function applyAppearance(config: Record<string, unknown>): Locale {
 function issueFrom(error: unknown, fallback: Issue): Issue {
   if (error instanceof HttpFailure) {
     if (error.status === 401) return 'expired'
-    if (error.status === 409) return 'conflict'
+    if (error.status === 409 && error.code !== 'settings_changed_after_write') return 'conflict'
   }
   return fallback
 }
@@ -149,7 +149,7 @@ function FirstUse({ handoff }: { handoff: ClaimHandoff }): React.JSX.Element {
   </div>
   if (mode === 'chat' && Settings && bootstrap && bridge.current && issue !== 'expired' && issue !== 'settingsFailure') {
     return <SettingsBoundary onFailure={() => setIssue('settingsFailure')}>
-      <Settings chat={{ transport, bootstrap, beforeWrite: bridge.current.beforeChatWrite, onExpired, locked: settingsLocked,
+      <Settings chat={{ transport, bootstrap, beforeWrite: bridge.current.beforeChatWrite, libraryQueue: bridge.current.libraryQueue, onExpired, locked: settingsLocked,
         notice: alert, logout: () => void logout(), working, logoutFailed }} />
     </SettingsBoundary>
   }

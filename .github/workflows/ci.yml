@@ -42,6 +42,10 @@ jobs:
 
       - run: pnpm headless:test
 
-      - name: Verify first-use settings in real sandboxed Chrome
+      - name: Verify settings and chat in real sandboxed Chrome
         timeout-minutes: 4
         run: node scripts/workbench/e2e-browser.mjs
+
+      - name: Verify profiles, roles and scoped memories in real sandboxed Chrome
+        timeout-minutes: 5
+        run: node scripts/workbench/e2e-library.mjs

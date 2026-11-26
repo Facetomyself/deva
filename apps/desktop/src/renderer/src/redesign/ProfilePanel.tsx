@@ -7,7 +7,7 @@ import { PersonaFace, USER_AVATAR_SEED, resolveSpec } from '../components/humati
 import { useProfile } from '../store/profile'
 import { AvatarEditor } from './AvatarEditor'
 import { MemoryDetail } from './MemoryDetail'
-import { fill, useMemoryList } from './memory-editor'
+import { fill, useMemoryList, type MemoryList } from './memory-editor'
 
 /*
  * 个人资料面板（点左上角自己的头像打开）：头像 + Deva 记住的关于你（全局记忆，类用户画像）。
@@ -18,9 +18,26 @@ import { fill, useMemoryList } from './memory-editor'
 
 export function ProfilePanel({ onClose }: { onClose: () => void }): React.JSX.Element {
   const { t } = useI18n()
+  const memory = useMemoryList(undefined, {
+    title: t('cf.profile.memClear'), confirm: t('cf.profile.memClearConfirm')
+  })
+  return <ProfilePanelView onClose={onClose} memory={memory} />
+}
+
+type WebProfileView = {
+  avatarLocked: boolean
+  busy?: boolean
+  notice?: React.ReactNode
+  overviewActions?: React.ReactNode
+  renderDetail: (entry: MemoryEntry, close: () => void) => React.ReactNode
+}
+
+export function ProfilePanelView({ onClose, memory, web }: {
+  onClose: () => void; memory: MemoryList; web?: WebProfileView
+}): React.JSX.Element {
+  const { t } = useI18n()
   const toast = useToast()
   const profile = useProfile()
-
   const [editingAvatar, setEditingAvatar] = useState(false)
   const [savingAvatar, setSavingAvatar] = useState(false)
   // 记忆详情页：进来时把弹窗高度定格为当时的高度，切换前后弹窗大小不变；回到资料页再放开。
@@ -28,10 +45,7 @@ export function ProfilePanel({ onClose }: { onClose: () => void }): React.JSX.El
   const [detailId, setDetailId] = useState<string | null>(null)
   const [lockedH, setLockedH] = useState<number | null>(null)
 
-  const { mem, apply, pending, clearAll } = useMemoryList(undefined, {
-    title: t('cf.profile.memClear'),
-    confirm: t('cf.profile.memClearConfirm')
-  })
+  const { mem, apply, pending, clearAll } = memory
   const detail = detailId ? (mem?.entries.find((e) => e.id === detailId) ?? null) : null
 
   const openDetail = (id: string): void => {
@@ -57,6 +71,7 @@ export function ProfilePanel({ onClose }: { onClose: () => void }): React.JSX.El
 
   // ✕ / 背景：头像编辑屏、记忆详情页时只退回资料页（丢弃改动），否则关闭面板。
   const dismiss = (): void => {
+    if (web?.busy) return
     if (editingAvatar) {
       if (!savingAvatar) setEditingAvatar(false)
     } else if (detail) closeDetail()
@@ -70,8 +85,10 @@ export function ProfilePanel({ onClose }: { onClose: () => void }): React.JSX.El
       <div
         ref={modalRef}
         className="cf-modal is-editor"
+        data-testid={web ? 'workbench-profile-panel' : undefined}
         style={lockedH ? { height: lockedH } : undefined}
         role="dialog"
+        aria-modal={web ? true : undefined}
         aria-label={t('cf.profile.title')}
         onClick={(e) => e.stopPropagation()}
       >
@@ -79,12 +96,14 @@ export function ProfilePanel({ onClose }: { onClose: () => void }): React.JSX.El
           <span className="cf-modal__title">
             {editingAvatar ? t('cf.fAvatar') : detail ? t('cf.profile.memDetail') : t('cf.profile.title')}
           </span>
-          <button className="cf-modal__close" title={detail ? t('cf.cancel') : t('cf.close')} onClick={dismiss}>
+          <button className="cf-modal__close" title={detail ? t('cf.cancel') : t('cf.close')} onClick={dismiss}
+            data-testid={web ? 'workbench-profile-close' : undefined} disabled={web ? savingAvatar || web.busy : undefined}>
             ✕
           </button>
         </div>
+        {web?.notice}
         {detail ? (
-          <MemoryDetail key={detail.id} entry={detail} onClose={closeDetail} onChanged={apply} />
+          web ? web.renderDetail(detail, closeDetail) : <MemoryDetail key={detail.id} entry={detail} onClose={closeDetail} onChanged={apply} />
         ) : (
           <div className="cf-editor">
             {editingAvatar ? (
@@ -94,6 +113,8 @@ export function ProfilePanel({ onClose }: { onClose: () => void }): React.JSX.El
                 initialImage={profile.avatarImage}
                 title={t('cf.fAvatar')}
                 busy={savingAvatar}
+                saveDisabled={web?.avatarLocked}
+                webTestId={web ? 'workbench-profile-avatar' : undefined}
                 onCancel={() => setEditingAvatar(false)}
                 onDone={doneAvatar}
               />
@@ -106,6 +127,8 @@ export function ProfilePanel({ onClose }: { onClose: () => void }): React.JSX.El
                       className="cf-me__avatar"
                       title={t('cf.avaEdit')}
                       aria-label={t('cf.avaEdit')}
+                      disabled={web?.avatarLocked}
+                      data-testid={web ? 'workbench-profile-avatar-edit' : undefined}
                       onClick={() => setEditingAvatar(true)}
                     >
                       <PersonaFace
@@ -124,6 +147,7 @@ export function ProfilePanel({ onClose }: { onClose: () => void }): React.JSX.El
                 />
 
                 <div className="cf-editor__actions cf-me__actions">
+                  {web?.overviewActions}
                   <button
                     type="button"
                     className="cf-btn cf-me__clear"
@@ -132,7 +156,7 @@ export function ProfilePanel({ onClose }: { onClose: () => void }): React.JSX.El
                   >
                     {t('cf.profile.memClear')}
                   </button>
-                  <button type="button" className="cf-btn is-primary" onClick={onClose}>
+                  <button type="button" className="cf-btn is-primary" disabled={web?.busy} onClick={onClose}>
                     {t('cf.close')}
                   </button>
                 </div>
@@ -184,10 +208,12 @@ const ORBIT_MIN_W = 460
 function MemoryBoard({
   avatar,
   entries,
-  onOpen
+  onOpen,
+  keepAvatarWhenLoading
 }: {
   avatar: React.ReactNode
   entries: MemoryEntry[] | null
+  keepAvatarWhenLoading?: boolean
   onOpen: (id: string) => void
 }): React.JSX.Element {
   const { t } = useI18n()
@@ -206,7 +232,7 @@ function MemoryBoard({
 
   return (
     <div ref={boxRef} className="cf-me__board">
-      {!orbit && <div className="cf-me__head">{avatar}</div>}
+      {(!orbit || (keepAvatarWhenLoading && !entries)) && <div className="cf-me__head">{avatar}</div>}
       <section className="cf-me__mem" aria-label={t('cf.profile.memTitle')}>
         {entries &&
           (orbit ? (

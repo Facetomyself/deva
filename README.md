@@ -332,7 +332,7 @@ IM 机器人支持 `/new [角色名]`、`/list`、`/stop`、`/status`、`/help`�
 
 ## 无 GUI 服务器工作台（本分支开发中）
 
-[amd64 Docker Compose 与 Web 工作台说明](apps/headless/README.md)：当前可在浏览器认领服务器、配置模型，并使用桌面同源的会话列表、编辑器及消息区进行通用文本对话；支持停止与刷新续接。它和手机版中转是两个不同部署目标；完整业务进度见[对等清单](docs/development/web-workbench/README.md)。
+[amd64 Docker Compose 与 Web 工作台说明](apps/headless/README.md)：当前可在浏览器认领服务器、配置模型，并使用桌面同源的会话列表、编辑器及消息区进行通用文本对话；支持停止与刷新续接。网页还可以编辑个人资料、普通角色及其头像，并分别管理全局、角色和已授权项目的记忆。它和手机版中转是两个不同部署目标；完整业务进度见[对等清单](docs/development/web-workbench/README.md)。
 
 ## 从源码构建
 
