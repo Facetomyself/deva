@@ -49,3 +49,7 @@ jobs:
       - name: Verify profiles, roles and scoped memories in real sandboxed Chrome
         timeout-minutes: 5
         run: node scripts/workbench/e2e-library.mjs
+
+      - name: Verify manual project file edits in real sandboxed Chrome
+        timeout-minutes: 5
+        run: node scripts/workbench/e2e-workspaces.mjs

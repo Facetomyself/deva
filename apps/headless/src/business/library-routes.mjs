@@ -5,6 +5,8 @@ import { openProfile } from './profile.mjs'
 import { openPersonas } from './personas.mjs'
 import { checkRoleBindings } from './role-bindings.mjs'
 import { openWorkspaceCatalog } from './workspace-catalog.mjs'
+import { openWorkspaceFiles } from '../files/workspace-files.mjs'
+import { workspaceFileRoutes } from '../files/workspace-routes.mjs'
 
 const rolePath = /^\/api\/v1\/personas\/([A-Za-z0-9][A-Za-z0-9_.-]{0,63})(?:\/(enabled|avatar-image))?$/
 const memoryPath = /^\/api\/v1\/memory\/(global|role|project)(?:\/([A-Za-z0-9][A-Za-z0-9_.-]{0,127}))?$/
@@ -43,10 +45,12 @@ function snapshotOf(memory, scope) {
   return { snapshot, revision }
 }
 
-export async function openLibrary({ dataDir, workspaceRoot, privateRoots = [] }) {
+export async function openLibrary({ dataDir, workspaceRoot, workspaceWritable = false, privateRoots = [] }) {
+  if (typeof workspaceWritable !== 'boolean' || (workspaceWritable && !workspaceRoot)) throw new TypeError('Workspace writes require an explicit project root')
   const catalog = openWorkspaceCatalog({ root: workspaceRoot, privateRoots: [dataDir, ...privateRoots] })
-  let profile, personas, memory
+  let profile, personas, memory, fileCommands
   try {
+    if (workspaceRoot) fileCommands = workspaceFileRoutes(openWorkspaceFiles({ catalog, writable: workspaceWritable }))
     profile = await openProfile({ dataDir })
     personas = await openPersonas({ dataDir, workspaceCatalog: catalog, checkReferences: checkRoleBindings(dataDir) })
     memory = createMemoryService({ dataDir, resolveWorkspaceRoot: catalog.resolveRoot })
@@ -89,10 +93,12 @@ export async function openLibrary({ dataDir, workspaceRoot, privateRoots = [] })
     return { id: role.id, name: role.name, prompt: role.prompt, model: role.model, enabled: true }
   }
   return {
+    workspaceFilesEnabled: Boolean(fileCommands),
     resolveRole: id => serial(() => enabledRole(id)),
     withRoleForChat: (id, action) => serial(async () => action(await enabledRole(id))),
     async handle(req, res, { auth, policy }) {
       const path = (req.url ?? '').split('?', 1)[0]
+      if (path.startsWith('/api/v1/workspaces/') && fileCommands) return fileCommands(req, res, { auth, policy })
       const mem = memoryPath.exec(path), role = rolePath.exec(path)
       const ordering = path === '/api/v1/personas/order' && req.method === 'PUT'
       const forRole = role && (role[2] === 'avatar-image' ? ['GET', 'PUT'] : role[2] ? ['PUT'] : ['GET', 'PATCH', 'DELETE'])

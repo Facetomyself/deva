@@ -39,19 +39,19 @@ async function probe(settings, supplied, opts, signal) {
   return connection.listModels()
 }
 
-export async function openBusiness({ dataDir, vault, version, allowedOrigins = [], workspaceRoot, privateRoots }) {
+export async function openBusiness({ dataDir, vault, version, allowedOrigins = [], workspaceRoot, workspaceWritable = false, privateRoots }) {
   const opts = { version, allowedOrigins: [...allowedModelOrigins(allowedOrigins)] }
   const settings = await openSettings({ dataDir, vault })
   const lifetime = new AbortController()
   const journal = createEventJournal()
   let library, turns
   try {
-    library = await openLibrary({ dataDir, workspaceRoot, privateRoots })
+    library = await openLibrary({ dataDir, workspaceRoot, workspaceWritable, privateRoots })
     turns = createTextTurns({ dataDir, settings, journal, ...opts, resolveRole: library.resolveRole })
   } catch (err) { journal.close(); await library?.close(); throw err }
   const chats = chatRoutes(turns, { withRoleForChat: library.withRoleForChat })
   return {
-    capabilities: Object.freeze({ textChat: true, library: true }),
+    capabilities: Object.freeze({ textChat: true, library: true, workspaceFiles: library.workspaceFilesEnabled }),
     createRealtime: ({ auth, policy }) => createChatWebSocket({ turns, journal, auth, policy }),
     getConfig: () => settings.getPublicConfig(),
     async handle(req, res, { auth, policy }) {

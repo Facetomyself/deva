@@ -1,12 +1,12 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import { FolderPlus, Paperclip, Plus, Search } from 'lucide-react'
+import { Paperclip, Plus, Search } from 'lucide-react'
 import { useI18n } from '../renderer/src/i18n/i18n'
 import { findActive, useModels } from '../renderer/src/store/models'
 import { ChatSurface, ConversationHeader, ConversationScroller, ConversationSurface } from '../renderer/src/redesign/ChatSurface'
 import { Avatar } from '../renderer/src/redesign/shell-common'
 import { IconRail, ThreadRow } from '../renderer/src/redesign/Rail'
 import { TextConversationMessage } from '../renderer/src/redesign/ConvMessage'
-import { ComposerDraftInput, ComposerJump, ComposerSendButton } from '../renderer/src/redesign/ComposerControls'
+import { ComposerDraftInput, ComposerJump, ComposerSendButton, ComposerWorkspaceButton } from '../renderer/src/redesign/ComposerControls'
 import { useComposerEditor } from '../renderer/src/redesign/composer-editor'
 import { modelGroups, ModelSelectButton } from '../renderer/src/redesign/ModelMenu'
 import { clampComposer, clampSidebar, COMPOSER_DEFAULT, ICONRAIL_W, ResizeHandle, SIDEBAR_DEFAULT, useViewport } from '../renderer/src/redesign/resizable'
@@ -16,6 +16,9 @@ import { createLibrary, type Roster } from './library-transport'
 import { LibraryWorkspace, type LibraryPanel } from './library-workspace'
 import type { Bootstrap, LibraryQueue, Transport } from './transport'
 import { useTextWorkbench } from './use-text-workbench'
+import { WorkspaceFilesPanel } from './workspace-dialog'
+import { createWorkspaceFiles } from './workspace-files'
+import { createWorkspaceTransport } from './workspace-transport'
 import './text-workbench.css'
 
 type TextWorkbenchProps = {
@@ -25,6 +28,7 @@ type TextWorkbenchProps = {
 type Workspace = ReturnType<typeof useTextWorkbench>
 const EMPTY: NonNullable<ChatState['messages']> = []
 const PAGE = 80
+const WORKSPACE_OPEN = 'workbench-workspace-open'
 
 export default function TextWorkbench({ transport, bootstrap, beforeWrite, onExpired, libraryQueue, locked, notice, renderSettings }: TextWorkbenchProps): React.JSX.Element {
   const { t, locale } = useI18n()
@@ -50,6 +54,12 @@ export default function TextWorkbench({ transport, bootstrap, beforeWrite, onExp
   const [modelChoice, setModelChoice] = useState<Record<string, string>>({})
   const [recent, setRecent] = useState<string | null>(null)
   const state = wk.projection?.snapshot?.state
+  const filesEnabled = bootstrap.capabilities?.workspaceFiles === true
+  const files = useMemo(() => filesEnabled ? createWorkspaceFiles(createWorkspaceTransport(transport, bootstrap.csrf)) : undefined,
+    [filesEnabled, transport, bootstrap.csrf])
+  const [filesOpen, setFilesOpen] = useState(false)
+  const workspaceLabel = locale === 'zh-CN' ? '工作区文件' : 'Workspace files'
+  const openFiles = files ? () => { setFilesOpen(true); void files.loadProjects() } : undefined
   const selectedEntry = wk.sessions.find((s) => s.id === wk.selected)
   const shown = useMemo(() => [...wk.sessions].sort((a, b) => b.updatedAt - a.updatedAt)
     .filter((s) => (s.title || t('chat.untitled')).toLowerCase().includes(query.trim().toLowerCase())), [wk.sessions, query, t])
@@ -107,12 +117,15 @@ export default function TextWorkbench({ transport, bootstrap, beforeWrite, onExp
         <ConversationHeader>
           <span className="cf-idbtn__name wb-chat__title">{state?.title || selectedEntry?.title || (wk.selected ? t('chat.untitled') : t('cf.tabChats'))}</span>
           {personaId && <span className="wb-chat__persona" data-testid="workbench-chat-persona"><Avatar persona={appearance(personaId)} size={22} plain />{appearance(personaId).name}</span>}
+          {openFiles && !(wk.selected && (state?.writable || state?.active)) &&
+            <ComposerWorkspaceButton label={workspaceLabel} onClick={openFiles} testId={WORKSPACE_OPEN} />}
           <span className="cf-conv__tag wb-chat__scope" title={scope}>{scope}</span>
         </ConversationHeader>
         {notice}
         {wk.selected ? <TextThread key={wk.selected} sid={wk.selected} wk={wk} c={c} locked={locked}
           preferred={modelChoice[wk.selected] ?? state?.model ?? selectedEntry?.model ?? (personaId ? null : recent)}
-          onPick={(id) => { const sid = wk.selected; if (sid) setModelChoice((choices) => ({ ...choices, [sid]: id })); setRecent(id) }} openSettings={openSettings} />
+          onPick={(id) => { const sid = wk.selected; if (sid) setModelChoice((choices) => ({ ...choices, [sid]: id })); setRecent(id) }}
+          openSettings={openSettings} openFiles={openFiles} workspaceLabel={workspaceLabel} />
           : <div className="wb-chat__empty cf-empty">
             {wk.listLoading ? <span role="status">{c.loading}</span> : <>
               <span>{wk.listIssue ? c[wk.listIssue] : c.empty}</span>
@@ -125,6 +138,7 @@ export default function TextWorkbench({ transport, bootstrap, beforeWrite, onExp
       </ConversationSurface>
     </div>
     {settingsOpen && renderSettings(() => setSettingsOpen(false))}
+    {files && <WorkspaceFilesPanel open={filesOpen} close={() => setFilesOpen(false)} controller={files} />}
   </ChatSurface>
   return library ? <LibraryWorkspace api={library} panel={panel} locked={locked} notice={notice} onRoster={setRoster}
     close={() => setPanel(undefined)} openProjects={() => setPanel('projects')} createChat={async (role) => {
@@ -134,8 +148,9 @@ export default function TextWorkbench({ transport, bootstrap, beforeWrite, onExp
     }}>{surface}</LibraryWorkspace> : surface
 }
 
-function TextThread({ sid, wk, c, locked, preferred, onPick, openSettings }: {
+function TextThread({ sid, wk, c, locked, preferred, onPick, openSettings, openFiles, workspaceLabel }: {
   sid: string; wk: Workspace; c: ChatCopy; locked: boolean; preferred: string | null; onPick: (id: string) => void; openSettings: () => void
+  openFiles?: () => void; workspaceLabel: string
 }): React.JSX.Element {
   const state = wk.projection?.snapshot?.state
   const link = wk.projection?.status ?? 'loading'
@@ -194,14 +209,15 @@ function TextThread({ sid, wk, c, locked, preferred, onPick, openSettings }: {
     {(state?.writable || active) && <TextComposer sid={sid} model={(preferred ?? '')} onPick={onPick} openSettings={openSettings}
       draft={wk.drafts} writeLocked={locked || link !== 'ready' || !state?.writable || !!wk.pending}
       stopping={link !== 'ready' || !!wk.pending} active={active} send={wk.send} stop={wk.stop} c={c}
-      jump={!atBottom ? jump : undefined} />}
+      jump={!atBottom ? jump : undefined} openFiles={openFiles} workspaceLabel={workspaceLabel} />}
     {state?.turnLimit && state.writable && <p className="wb-chat__limits">{c.limits.replace('{turns}', String(state.turnLimit))}</p>}
   </>
 }
 
-function TextComposer({ sid, draft, model, onPick, openSettings, writeLocked, stopping, active, send, stop, c, jump }: {
+function TextComposer({ sid, draft, model, onPick, openSettings, writeLocked, stopping, active, send, stop, c, jump, openFiles, workspaceLabel }: {
   sid: string; draft: Map<string, string>; model: string; onPick: (id: string) => void; openSettings: () => void
   writeLocked: boolean; stopping: boolean; active: ChatState['active'] | undefined; send: Workspace['send']; stop: Workspace['stop']; c: ChatCopy; jump?: () => void
+  openFiles?: () => void; workspaceLabel: string
 }): React.JSX.Element {
   const { t } = useI18n()
   const { ready, providers, activeModelId } = useModels()
@@ -259,7 +275,8 @@ function TextComposer({ sid, draft, model, onPick, openSettings, writeLocked, st
         <ComposerDraftInput editor={editor} height={clampComposer(height, viewport.h)} placeholder={c.input} />
         <div className="cf-box__bar">
           <button className="cf-iconbtn" type="button" title={c.unavailable} aria-label={t('cf.attach')} disabled><Paperclip size={16} /></button>
-          <button className="cf-wschip" type="button" title={c.unavailable} aria-label={t('cf.mountWorkspace')} disabled><FolderPlus size={15} />{t('cf.mountWorkspace')}</button>
+          <ComposerWorkspaceButton label={openFiles ? workspaceLabel : t('cf.mountWorkspace')} title={openFiles ? workspaceLabel : c.unavailable}
+            onClick={openFiles} testId={openFiles ? WORKSPACE_OPEN : undefined} />
           <div className="cf-mp">
             {open && <div className="model-pick__backdrop" onClick={() => setOpen(false)} />}
             <div className="model-pick"><ModelSelectButton active={picked} groups={groups} open={open}

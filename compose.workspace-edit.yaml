@@ -1,0 +1,14 @@
+# Opt-in for MANUAL updates to existing text documents. Use this *instead of* the read-only
+# workspace override. The service still runs non-root; the project owner must grant filesystem write access.
+services:
+  workbench:
+    environment:
+      DEVA_WORKSPACE_ROOT: /workspaces
+      DEVA_WORKSPACE_WRITE: "1"
+    volumes:
+      - type: bind
+        source: ${DEVA_WORKSPACE_PARENT:?Set a dedicated project directory for manual edits}
+        target: /workspaces
+        read_only: false
+        bind:
+          create_host_path: false
