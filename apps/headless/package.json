@@ -1,0 +1,14 @@
+{
+  "name": "@deva/headless",
+  "version": "0.1.17",
+  "private": true,
+  "type": "module",
+  "description": "Deva 无桌面 Web 宿主",
+  "license": "MIT",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "build": "node scripts/build-provider.mjs",
+    "test": "node scripts/build-provider.mjs && node --test --test-concurrency=1 test/*.test.mjs"
+  },
+  "devDependencies": { "esbuild": "0.21.5" }
+}

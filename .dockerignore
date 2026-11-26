@@ -1,0 +1,16 @@
+**/.git
+**/.git/**
+**/node_modules
+**/.pnpm-store
+**/out
+**/dist
+**/.deva
+**/.deva-headless
+**/.env
+**/.env.*
+**/*.key
+**/*.pem
+**/*.log
+**/*.tsbuildinfo
+**/test-results
+**/playwright-report

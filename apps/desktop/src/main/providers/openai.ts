@@ -1,4 +1,3 @@
-import { describeNetError } from '../http'
 import { fetchModel } from './request'
 import { iterateSSE, STREAM_IDLE_MS } from './sse'
 import {
@@ -6,17 +5,19 @@ import {
   inbandError,
   parseToolArgs,
   settleBrokenCalls,
-  toolImagesNote,
-  type AdapterConfig,
-  type ContentPart,
-  type GenerateRequest,
-  type ImagePart,
-  type Message,
-  type StopReason,
-  type StreamEvent
+  toolImagesNote
+} from './protocol'
+import type {
+  AdapterConfig,
+  ContentPart,
+  GenerateRequest,
+  ImagePart,
+  Message,
+  StopReason,
+  StreamEvent
 } from './types'
 import type { EffortRequest } from '../../shared/effort'
-import { isEn } from '../locale'
+import type { ProviderTransport } from './runtime'
 
 /**
  * OpenAI Chat Completions 风味适配器（兼容 DeepSeek / Moonshot / 智谱 / Qwen / Ollama 等）。
@@ -200,7 +201,8 @@ interface PendingCall {
 
 export async function* streamOpenAI(
   cfg: AdapterConfig,
-  req: GenerateRequest
+  req: GenerateRequest,
+  { httpFetch, describeNetError, isEn }: ProviderTransport
 ): AsyncGenerator<StreamEvent> {
   const url = `${cfg.baseURL.replace(/\/$/, '')}/chat/completions`
   const messages = mapMessages(req.system, req.messages, isGemini(cfg.baseURL, req.model))
@@ -225,7 +227,7 @@ export async function* streamOpenAI(
 
   let res: Response
   try {
-    res = await fetchModel(url, {
+    res = await fetchModel(httpFetch, isEn, url, {
       method: 'POST',
       headers: {
         'content-type': 'application/json',
@@ -249,7 +251,7 @@ export async function* streamOpenAI(
     const text = await res.text().catch(() => '')
     yield {
       type: 'error',
-      error: httpError(res.status, text, res.headers.get('retry-after'), Boolean(req.effort))
+      error: httpError(isEn(), res.status, text, res.headers.get('retry-after'), Boolean(req.effort))
     }
     yield { type: 'done', stopReason: 'error' }
     return
@@ -286,7 +288,7 @@ export async function* streamOpenAI(
   }
 
   try {
-    for await (const { data } of iterateSSE(res, STREAM_IDLE_MS)) {
+    for await (const { data } of iterateSSE(res, STREAM_IDLE_MS, isEn)) {
       if (data === '[DONE]') break
       let chunk: Record<string, unknown>
       try {
@@ -306,7 +308,7 @@ export async function* streamOpenAI(
           inband.type ??
           (isEn() ? 'The server returned an unspecified error' : '服务端返回了未说明的错误')
         // 按正文归类（上下文超限等，见 inbandError）：错误码也并进去，个别网关只在 code 里写 context_length_exceeded。
-        const error = inbandError(`${message} ${inband.code ?? ''}`, { kind: 'server', retryable: false, message })
+        const error = inbandError(isEn, `${message} ${inband.code ?? ''}`, { kind: 'server', retryable: false, message })
         yield { type: 'error', error }
         yield { type: 'done', stopReason: 'error' }
         return

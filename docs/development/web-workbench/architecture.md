@@ -5,7 +5,7 @@
 ## 目前的切分线
 
 - 桌面继续用 Electron 注册的 `window.deva`。新的生产构建 `pnpm workbench:build` 从同一份桌面 React 工作台和浏览器外框生成两个惰性分块及 CSS，不依赖手机页面或内置 relay。
-- 产物是 `apps/desktop/out/workbench/workbench.js`，导出 `mountWorkbench(host, view?)`。这是**供后续 Web 服务加载的 ES 模块，不是单独运行的 Web 服务器**。当前阶段没有可供配置真实设备的 HTTP 入口。
+- 产物是 `apps/desktop/out/workbench/workbench.js`，导出 `mountWorkbench(host, view?)`。这是**供后续 Web 服务加载的 ES 模块，不是单独运行的 Web 服务器**。独立的首用 HTML 入口由 [headless 服务](../../../apps/headless/README.md) 托管：只有网页认领、登录和模型设置已接通，可在同源请求下使用原 ModelSettings。完整工作台仍需实际业务能力才能挂载。
 - Web 宿主必须先完成登录、取得首帧设置快照，并提供完整类型的本地浏览器适配器，才可渲染。解析成数据的服务端响应不会成为 JavaScript 代码，也不接受凭 URL 指定宿主模块。
 - `view` 默认 `workbench`，`browser` 为内置浏览器的 React 外框。外框不是被浏览网页的内容，也不提供实际浏览器引擎。一个文档只绑定一个宿主及视图；更换身份或退出须销毁该页面。
 

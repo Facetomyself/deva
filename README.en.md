@@ -339,6 +339,10 @@ When memory is full, the next write by the model first consolidates the existing
 
 </details>
 
+## Headless server workbench (fork development)
+
+The [amd64 Docker Compose workbench](apps/headless/README.md) supports browser enrollment and the original desktop model settings UI. This is separate from the mobile relay; see the [parity inventory](docs/development/web-workbench/README.md) for the remaining desktop workflows.
+
 ## Build from Source
 
 Stack: Electron 33 · React 18 · TypeScript · electron-vite · pnpm workspace. Requires Node.js 20+ and pnpm 10.

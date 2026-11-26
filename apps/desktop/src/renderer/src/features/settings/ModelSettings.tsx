@@ -29,6 +29,7 @@ import {
 import { Switch } from './Switch'
 import { ModelDetail } from './ModelDetail'
 import { ProviderAdvanced } from './ProviderAdvanced'
+import { ProviderUrlInput } from './ProviderUrlInput'
 
 /**
  * 模型设置页（设置 › 模型）。钻取式（主从抽屉）导航：列表态只列服务商，点进去为配置详情 + 返回；
@@ -40,8 +41,9 @@ import { ProviderAdvanced } from './ProviderAdvanced'
 
 type FetchStatus = 'idle' | 'loading' | 'done' | 'error'
 
-export function ModelSettings(): React.JSX.Element {
-  const { t } = useI18n()
+export function ModelSettings({ webAddressEditor = false }: { webAddressEditor?: boolean } = {}): React.JSX.Element {
+  const { t, locale } = useI18n()
+  const [webKeyAllowed, setWebKeyAllowed] = useState(false)
   const dialog = useDialog()
   const {
     providers,
@@ -101,6 +103,14 @@ export function ModelSettings(): React.JSX.Element {
     setFetchState({ status: 'idle', list: [] })
     fetchTokenRef.current++
   }, [selectedProviderId]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Web 服务将密钥绑定至已保存的地址；地址切换（包括套用预置）不能把输入框残留的旧密钥再次提交。
+  useEffect(() => {
+    if (!webAddressEditor) return
+    clearKeyTimer()
+    setKeyDraft('')
+    setKeySaveState('idle')
+  }, [webAddressEditor, selectedProvider?.apiHost])
 
   // 卸载时清理防抖计时器，避免泄漏与卸载后 setState
   useEffect(() => () => clearKeyTimer(), [])
@@ -319,7 +329,7 @@ export function ModelSettings(): React.JSX.Element {
   // 不清空 keyDraft（自动保存要边打字边存，清空会打断输入）；切换服务商时才清。
   const doSaveKey = async (providerId: string, value: string): Promise<void> => {
     const key = value.trim()
-    if (!key) return
+    if (!key || (webAddressEditor && !webKeyAllowed)) return
     setKeySaveState('saving')
     const res = await setApiKey(providerId, key)
     setKeySaveState(res.ok ? 'saved' : 'idle')
@@ -548,7 +558,7 @@ export function ModelSettings(): React.JSX.Element {
                       : t('models.apiKeyPlaceholder')
                   }
                   value={keyDraft}
-                  disabled={!secretsAvailable}
+                  disabled={!secretsAvailable || (webAddressEditor && !webKeyAllowed)}
                   onChange={(e) => onKeyChange(selectedProvider.id, e.target.value)}
                   onBlur={() => void flushKey(selectedProvider.id)}
                   onKeyDown={(e) => {
@@ -565,6 +575,8 @@ export function ModelSettings(): React.JSX.Element {
               </div>
             </div>
             {!secretsAvailable && <div className="field__warn">{t('models.secretsUnavailable')}</div>}
+            {webAddressEditor && secretsAvailable && !webKeyAllowed && <div className="field__note">{locale === 'en'
+              ? 'Set a complete API address before adding a key.' : '先设置完整的 API 地址，再填写此服务商的密钥。'}</div>}
             {selectedProvider.docUrl && (
               <a className="field__hint-link" href={selectedProvider.docUrl} target="_blank" rel="noreferrer">
                 {t('models.getKey')}
@@ -577,13 +589,17 @@ export function ModelSettings(): React.JSX.Element {
           <div className="field">
             <label className="field__label">{t('models.apiHost')}</label>
             <div className="field__control">
-              <input
-                className="input"
-                type="text"
-                value={selectedProvider.apiHost}
-                onChange={(e) => updateProvider(selectedProvider.id, { apiHost: e.target.value })}
-                onBlur={onHostBlur}
-              />
+              {webAddressEditor ? (
+                <ProviderUrlInput value={selectedProvider.apiHost} onReady={setWebKeyAllowed} onCommit={(apiHost) => updateProvider(selectedProvider.id, { apiHost })} />
+              ) : (
+                <input
+                  className="input"
+                  type="text"
+                  value={selectedProvider.apiHost}
+                  onChange={(e) => updateProvider(selectedProvider.id, { apiHost: e.target.value })}
+                  onBlur={onHostBlur}
+                />
+              )}
               {seedHost && selectedProvider.apiHost !== seedHost && (
                 <button className="icon-btn" title={t('models.resetHost')} onClick={resetHost}>
                   <RotateCcw size={14} />

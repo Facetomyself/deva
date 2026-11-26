@@ -1,4 +1,3 @@
-import { describeNetError } from '../http'
 import { fetchModel } from './request'
 import { iterateSSE, STREAM_IDLE_MS } from './sse'
 import {
@@ -6,15 +5,17 @@ import {
   inbandError,
   parseToolArgs,
   settleBrokenCalls,
-  toolImagesNote,
-  type AdapterConfig,
-  type ContentPart,
-  type GenerateRequest,
-  type Message,
-  type StopReason,
-  type StreamEvent
+  toolImagesNote
+} from './protocol'
+import type {
+  AdapterConfig,
+  ContentPart,
+  GenerateRequest,
+  Message,
+  StopReason,
+  StreamEvent
 } from './types'
-import { isEn } from '../locale'
+import type { ProviderTransport } from './runtime'
 
 /**
  * OpenAI Responses API 适配器（POST {baseURL}/responses，stream:true）。
@@ -113,7 +114,8 @@ interface PendingCall {
 
 export async function* streamResponses(
   cfg: AdapterConfig,
-  req: GenerateRequest
+  req: GenerateRequest,
+  { httpFetch, describeNetError, isEn }: ProviderTransport
 ): AsyncGenerator<StreamEvent> {
   const url = `${cfg.baseURL.replace(/\/$/, '')}/responses`
   const body = {
@@ -141,7 +143,7 @@ export async function* streamResponses(
 
   let res: Response
   try {
-    res = await fetchModel(url, {
+    res = await fetchModel(httpFetch, isEn, url, {
       method: 'POST',
       headers: {
         'content-type': 'application/json',
@@ -165,7 +167,7 @@ export async function* streamResponses(
     const text = await res.text().catch(() => '')
     yield {
       type: 'error',
-      error: httpError(res.status, text, res.headers.get('retry-after'), Boolean(req.effort))
+      error: httpError(isEn(), res.status, text, res.headers.get('retry-after'), Boolean(req.effort))
     }
     yield { type: 'done', stopReason: 'error' }
     return
@@ -199,7 +201,7 @@ export async function* streamResponses(
   }
 
   try {
-    for await (const { data } of iterateSSE(res, STREAM_IDLE_MS)) {
+    for await (const { data } of iterateSSE(res, STREAM_IDLE_MS, isEn)) {
       if (data === '[DONE]') break
       let evt: Record<string, unknown>
       try {
@@ -267,7 +269,7 @@ export async function* streamResponses(
         const message = err?.message ?? (isEn() ? 'Generation failed' : '生成失败')
         yield {
           type: 'error',
-          error: inbandError(`${message} ${err?.code ?? ''}`, { kind: 'server', retryable: false, message })
+          error: inbandError(isEn, `${message} ${err?.code ?? ''}`, { kind: 'server', retryable: false, message })
         }
         yield { type: 'done', stopReason: 'error' }
         return
@@ -276,7 +278,7 @@ export async function* streamResponses(
           typeof evt.message === 'string'
             ? evt.message
             : ((evt.error as { message?: string })?.message ?? (isEn() ? 'Stream error' : '流式错误'))
-        yield { type: 'error', error: inbandError(message, { kind: 'server', retryable: false, message }) }
+        yield { type: 'error', error: inbandError(isEn, message, { kind: 'server', retryable: false, message }) }
         yield { type: 'done', stopReason: 'error' }
         return
       }

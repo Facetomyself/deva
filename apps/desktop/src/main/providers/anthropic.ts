@@ -1,21 +1,22 @@
-import { describeNetError } from '../http'
 import { fetchModel } from './request'
 import { iterateSSE, STREAM_IDLE_MS } from './sse'
 import {
   httpError,
   inbandError,
   parseToolArgs,
-  settleBrokenCalls,
-  type AdapterConfig,
-  type ContentPart,
-  type GenerateRequest,
-  type ImagePart,
-  type Message,
-  type StopReason,
-  type StreamEvent
+  settleBrokenCalls
+} from './protocol'
+import type {
+  AdapterConfig,
+  ContentPart,
+  GenerateRequest,
+  ImagePart,
+  Message,
+  StopReason,
+  StreamEvent
 } from './types'
 import type { EffortRequest } from '../../shared/effort'
-import { isEn } from '../locale'
+import type { ProviderTransport } from './runtime'
 
 /**
  * Anthropic Messages API 适配器。手写 SSE → 归一化 StreamEvent，不引 SDK。
@@ -131,7 +132,8 @@ function mapStopReason(raw: string | null | undefined): StopReason {
 
 export async function* streamAnthropic(
   cfg: AdapterConfig,
-  req: GenerateRequest
+  req: GenerateRequest,
+  { httpFetch, describeNetError, isEn }: ProviderTransport
 ): AsyncGenerator<StreamEvent> {
   const url = `${cfg.baseURL.replace(/\/$/, '')}/v1/messages`
   const messages = mapMessages(req.messages)
@@ -164,7 +166,7 @@ export async function* streamAnthropic(
 
   let res: Response
   try {
-    res = await fetchModel(url, {
+    res = await fetchModel(httpFetch, isEn, url, {
       method: 'POST',
       headers: {
         'content-type': 'application/json',
@@ -189,7 +191,7 @@ export async function* streamAnthropic(
     const text = await res.text().catch(() => '')
     yield {
       type: 'error',
-      error: httpError(res.status, text, res.headers.get('retry-after'), Boolean(req.effort))
+      error: httpError(isEn(), res.status, text, res.headers.get('retry-after'), Boolean(req.effort))
     }
     yield { type: 'done', stopReason: 'error' }
     return
@@ -217,7 +219,7 @@ export async function* streamAnthropic(
   }
 
   try {
-    for await (const { data } of iterateSSE(res, STREAM_IDLE_MS)) {
+    for await (const { data } of iterateSSE(res, STREAM_IDLE_MS, isEn)) {
       if (data === '[DONE]') break
       let evt: Record<string, unknown>
       try {
@@ -271,7 +273,7 @@ export async function* streamAnthropic(
         // 上下文超限等按正文归类（见 inbandError），其余（overloaded 等）照旧按可重试的服务端错误。
         yield {
           type: 'error',
-          error: inbandError(`${message} ${err?.type ?? ''}`, { kind: 'server', retryable: true, message })
+          error: inbandError(isEn, `${message} ${err?.type ?? ''}`, { kind: 'server', retryable: true, message })
         }
         yield { type: 'done', stopReason: 'error' }
         return

@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
-import { app } from 'electron'
-import { providerCustomHeaders } from '../services/model-resolve'
+import { sanitizeHeaders } from '../../shared/provider-headers'
+import type { ProviderDependencies } from './runtime'
 
 /**
  * OpenCode Console 推理网关（Go 套餐与按量计费）对第三方客户端的两项要求，见官方文档
@@ -42,13 +42,14 @@ function isOpencodeInference(baseURL: string): boolean {
  * @param sessionId 所属对话 id；缺省（不经对话的一次性调用）退回本次运行 id。
  */
 export function providerHeaders(
+  deps: Pick<ProviderDependencies, 'getAppVersion' | 'providerCustomHeaders'>,
   baseURL: string,
   providerId: string,
   sessionId?: string
 ): Record<string, string> {
-  const headers: Record<string, string> = { 'user-agent': `deva/${app.getVersion()}` }
+  const headers: Record<string, string> = { 'user-agent': `deva/${deps.getAppVersion()}` }
   if (isOpencodeInference(baseURL)) headers['x-opencode-session'] = sessionId?.trim() || runSessionId
-  return { ...headers, ...providerCustomHeaders(providerId) }
+  return { ...headers, ...sanitizeHeaders(deps.providerCustomHeaders(providerId)) }
 }
 
 /** 推理网关里紧跟在套餐段之后的 API 段（见官方 Base URLs 一节）。 */

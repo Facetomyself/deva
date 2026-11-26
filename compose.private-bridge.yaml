@@ -1,0 +1,7 @@
+# Optional override for a trusted Docker host with an existing built-in bridge but no
+# published-port NAT. Requires Compose v2 with !reset support. It exposes NO host port.
+# Browser access is via an SSH loopback forward to the actual container IP and port 8787.
+services:
+  workbench:
+    network_mode: bridge
+    ports: !reset []
