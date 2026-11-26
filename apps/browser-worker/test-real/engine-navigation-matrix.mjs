@@ -46,11 +46,11 @@ function evidence() {
   const milliseconds = Object.fromEntries(Object.values(MILESTONES).map((key) => [key, -1]));
   let started, startWall, finished;
   return {
-    counters, milliseconds, networkFailure: 'none', blockedKind: 'none',
+    counters, milliseconds, networkFailure: 'none', blockedKind: 'none', pinDetail: 'none', shape: 'none', pinTargets: 0,
     begin() { started = performance.now(); startWall = Date.now(); },
     reset() {
       started = undefined; finished = undefined; startWall = undefined;
-      this.networkFailure = 'none'; this.blockedKind = 'none';
+      this.networkFailure = 'none'; this.blockedKind = 'none'; this.pinDetail = 'none'; this.shape = 'none'; this.pinTargets = 0;
       for (const key of COUNTERS) counters[key] = 0;
       for (const key of Object.values(MILESTONES)) milliseconds[key] = -1;
     },
@@ -294,6 +294,27 @@ function controller({ browser, local, lane, trace, signal }) {
   signal.addEventListener('abort', () => pipe.stop('BROWSER_TIMEOUT'), { once: true });
   function setFault(code) { fault ??= code; }
   function check() { if (fault) throw fail(fault); if (signal.aborted) throw fail('BROWSER_TIMEOUT'); }
+  function shape(event, info) {
+    if (trace.shape !== 'none') return;
+    const allowedTypes = ['page', 'iframe', 'worker', 'shared_worker', 'service_worker', 'tab', 'browser'];
+    const type = allowedTypes.includes(info?.type) ? info.type : info?.type === undefined ? 'missing' : 'other';
+    const url = typeof info?.url === 'string' ? info.url : '';
+    const scheme = url === BOOTSTRAP_URL ? 'blank' : !url ? 'empty' : /^https?:/iu.test(url) ? 'http' :
+      /^chrome-extension:/iu.test(url) ? 'extension' : /^chrome-untrusted:/iu.test(url) ? 'chrome-untrusted' :
+      /^chrome:/iu.test(url) ? 'chrome' : /^data:/iu.test(url) ? 'data' : 'other';
+    const ctx = !info?.browserContextId ? 'omitted' : info.browserContextId === context ? 'task' :
+      info.browserContextId === bootContext ? 'default' : 'other';
+    const targetToken = info?.targetId;
+    const role = !targetToken ? 'missing' : targetToken === bootId ? 'default-blank' : targetToken === target ? 'task' :
+      targetToken === candidate ? 'candidate' : preserved.has(targetToken) || retired.has(targetToken) ? 'known-component' : 'unknown';
+    trace.shape = `event:${event},during:${trace.pinDetail},type:${type},scheme:${scheme},context:${ctx},role:${role},` +
+      `opener:${Number(!!info?.openerId)},attached:${Number(!!info?.attached)},postNav:${Number(navigated)},` +
+      `creating:${Number(pageCreating)},verifiedDefault:${Number(!!bootContext)},canonicalComponent:${Number(defaultComponent(info))}`;
+  }
+  function targetFault(event, info) {
+    shape(event, info);
+    throw fail('BROWSER_TARGET_LOST');
+  }
   function defaultComponent(info) {
     return !!bootContext && context !== bootContext && info?.browserContextId === bootContext &&
       info.type === 'service_worker' && !info.openerId && !info.attached && typeof info.targetId === 'string' &&
@@ -325,6 +346,7 @@ function controller({ browser, local, lane, trace, signal }) {
       }, () => setFault('BROWSER_TARGET_LOST')));
       return;
     }
+    shape('unexpected-discovery', info);
     setFault('BROWSER_TARGET_LOST');
     pipe.stop('BROWSER_TARGET_LOST');
   }
@@ -345,7 +367,10 @@ function controller({ browser, local, lane, trace, signal }) {
   }
   function onEvent(method, p, sid) {
     if (method === 'Target.targetCreated' && sid === null) return targetCreated(p.targetInfo);
-    if (method === 'Target.targetDestroyed' && p.targetId === target) return setFault('BROWSER_TARGET_LOST');
+    if (method === 'Target.targetDestroyed' && ((target && p.targetId === target) || (candidate && p.targetId === candidate))) {
+      shape('target-destroyed', p);
+      return setFault('BROWSER_TARGET_LOST');
+    }
     if (method === 'Fetch.requestPaused' && sid === guard) return fetchPaused(p);
     if (method === 'Fetch.authRequired' && sid === guard) return continueFetch('Fetch.continueWithAuth',
       { requestId: p.requestId, authChallengeResponse: { response: 'CancelAuth' } });
@@ -353,43 +378,58 @@ function controller({ browser, local, lane, trace, signal }) {
   }
   return {
     async pin() {
+      trace.pinDetail = 'browser-version';
       const version = await root('Browser.getVersion');
       if (!/^(?:Chrome|Chromium|HeadlessChrome)\/[\d.]+$/u.test(version.product ?? '')) throw fail('BROWSER_QA_LAUNCH');
+      trace.pinDetail = 'initial-inventory';
       let initial;
       for (let i = 0; i < 8; i++) {
         const { targetInfos } = await root('Target.getTargets', { filter: PAGES });
-        if (!Array.isArray(targetInfos) || targetInfos.length > 1) throw fail('BROWSER_TARGET_LOST');
+        trace.pinTargets = Array.isArray(targetInfos) ? Math.min(256, targetInfos.length) : 0;
+        if (!Array.isArray(targetInfos) || targetInfos.length > 1) targetFault('initial-inventory', targetInfos?.[0]);
         [initial] = targetInfos;
         if (initial?.url) break;
         await sleep(50, undefined, { signal });
       }
       if (initial?.url !== BOOTSTRAP_URL || initial.type !== 'page' || initial.openerId || initial.attached ||
-          typeof initial.targetId !== 'string' || !initial.targetId) throw fail('BROWSER_TARGET_LOST');
+          typeof initial.targetId !== 'string' || !initial.targetId) targetFault('initial-blank', initial);
       bootId = initial.targetId;
       bootContext = initial.browserContextId;
       if (lane.task) {
+        trace.pinDetail = 'create-context';
         ({ browserContextId: context } = await root('Target.createBrowserContext', { disposeOnDetach: true }));
-        if (typeof context !== 'string' || !context || context === bootContext) throw fail('BROWSER_TARGET_LOST');
+        if (typeof context !== 'string' || !context || context === bootContext) targetFault('context-result', { browserContextId: context });
       } else target = bootId;
+      trace.pinDetail = 'discover-targets';
       await root('Target.setDiscoverTargets', { discover: true, filter: TARGETS });
       check();
       if (lane.task) {
+        trace.pinDetail = 'create-task';
         pageCreating = true;
-        ({ targetId: target } = await root('Target.createTarget', { browserContextId: context, url: BOOTSTRAP_URL, background: false }));
+        const created = await root('Target.createTarget', { browserContextId: context, url: BOOTSTRAP_URL, background: false });
         pageCreating = false;
-        if (typeof target !== 'string' || !target || target === bootId || (candidate && candidate !== target)) throw fail('BROWSER_TARGET_LOST');
+        check();
+        if (typeof created.targetId !== 'string' || !created.targetId || created.targetId === bootId ||
+            (candidate && candidate !== created.targetId)) targetFault('task-result', { targetId: created.targetId, browserContextId: context });
+        target = created.targetId;
       }
+      trace.pinDetail = 'download-deny';
       await root('Browser.setDownloadBehavior', { behavior: 'deny', eventsEnabled: true, ...(context ? { browserContextId: context } : {}) });
+      check();
+      trace.pinDetail = 'attach-task';
       ({ sessionId: control } = await root('Target.attachToTarget', { targetId: target, flatten: true }));
-      if (typeof control !== 'string' || !control) throw fail('BROWSER_TARGET_LOST');
+      check();
+      if (typeof control !== 'string' || !control) targetFault('attach-result', { targetId: target, browserContextId: context });
       guard = control;
       if (lane.split) {
         ({ sessionId: guard } = await root('Target.attachToTarget', { targetId: target, flatten: true }));
-        if (typeof guard !== 'string' || !guard || guard === control) throw fail('BROWSER_TARGET_LOST');
+        if (typeof guard !== 'string' || !guard || guard === control) targetFault('attach-result', { targetId: target, browserContextId: context });
       }
+      trace.pinDetail = 'check-task-info';
       const { targetInfo } = await root('Target.getTargetInfo', { targetId: target });
+      check();
       if (targetInfo?.targetId !== target || targetInfo.type !== 'page' || targetInfo.url !== BOOTSTRAP_URL ||
-          targetInfo.openerId || (context && targetInfo.browserContextId !== context)) throw fail('BROWSER_TARGET_LOST');
+          targetInfo.openerId || (context && targetInfo.browserContextId !== context)) targetFault('task-info', targetInfo);
     },
     async guard() {
       const page = on(control);
@@ -478,7 +518,8 @@ async function runLane(executablePath, driverPath, lane) {
   function collect() {
     trace.finish();
     const counts = Object.entries({ ...trace.counters, ...trace.milliseconds }).map(([key, value]) => `${key}:${value}`).join(',');
-    reports.push({ name, phase, code, counts, elapsed: trace.elapsed(), networkFailure: trace.networkFailure, blockedKind: trace.blockedKind });
+    reports.push({ name, phase, code, counts, elapsed: trace.elapsed(), networkFailure: trace.networkFailure,
+      blockedKind: trace.blockedKind, pinDetail: trace.pinDetail, pinTargets: trace.pinTargets, shape: trace.shape });
   }
   try {
     local = await fixture(trace);
@@ -510,7 +551,8 @@ async function runLane(executablePath, driverPath, lane) {
     const okay = report.code === 'none' && cleaned;
     if (okay) passes++;
     console.log(`QA lane=${report.name} verdict=${okay ? 'pass' : 'fail'} phase=${report.phase} code=${report.code} cleanup=${Number(cleaned)} ` +
-      `navigationMs=${report.elapsed} networkFailure=${report.networkFailure} blockedKind=${report.blockedKind} counts=${report.counts}`);
+      `navigationMs=${report.elapsed} networkFailure=${report.networkFailure} blockedKind=${report.blockedKind} ` +
+      `pinDetail=${report.pinDetail} pinTargets=${report.pinTargets} shape=${report.shape} counts=${report.counts}`);
   }
   return { passes, ran: reports.length };
 }

@@ -123,12 +123,22 @@ async function verifyW3cSandbox(owned, signal) {
 }
 
 export function fixedWebdriverComparison({ owned, binary, local, trace, signal, direct, observe }) {
-  let port, id, pinnedWindow, bootUrl, firstPassed = false, cdpAttempted = false;
+  let port, id, pinnedWindow, attested = false, firstPassed = false, cdpAttempted = false;
   async function sameWindow() {
     const { status, value } = await webdriverRequest(port, 'GET', `/session/${id}/window`);
     if (status !== 200 || typeof value !== 'string' || !/^[a-z\d_\-]{1,128}$/iu.test(value) ||
         (pinnedWindow && pinnedWindow !== value)) throw fail('BROWSER_TARGET_LOST');
     pinnedWindow = value;
+  }
+  async function establishBlank() {
+    if (!attested) throw fail('BROWSER_SANDBOX_REQUIRED');
+    await sameWindow();
+    const path = `/session/${id}/url`;
+    const blank = await webdriverRequest(port, 'POST', path, { url: 'about:blank' });
+    if (blank.status !== 200) throw fail('BROWSER_QA_BLANK_BASELINE');
+    await sameWindow();
+    const current = await webdriverRequest(port, 'GET', path);
+    if (current.status !== 200 || current.value !== 'about:blank') throw fail('BROWSER_QA_BLANK_BASELINE');
   }
   async function logs(path, keep) {
     const result = await webdriverRequest(port, 'POST', `${path}/se/log`, { type: 'performance' }).catch(() => null);
@@ -179,18 +189,13 @@ export function fixedWebdriverComparison({ owned, binary, local, trace, signal, 
       if (status !== 200 || !/^[a-f\d]{32}$/iu.test(value?.sessionId ?? '')) throw fail('BROWSER_QA_DRIVER_SESSION');
       id = value.sessionId;
       await sameWindow();
-      const initial = await webdriverRequest(port, 'GET', `/session/${id}/url`);
-      if (initial.status !== 200 || !['about:blank', 'data:,'].includes(initial.value)) throw fail('BROWSER_QA_FIXED_FIXTURE');
-      bootUrl = initial.value;
     },
-    async attest() { await verifyW3cSandbox(owned, signal); },
-    async navigate() { await navigateFixed(false); firstPassed = true; },
+    async attest() { await verifyW3cSandbox(owned, signal); attested = true; },
+    async navigate() { await establishBlank(); await navigateFixed(false); firstPassed = true; },
     async compareCdpNavigation() {
       if (direct || !firstPassed || cdpAttempted) throw fail('BROWSER_QA_FIXED_FIXTURE');
       cdpAttempted = true;
-      const blank = await webdriverRequest(port, 'POST', `/session/${id}/url`, { url: bootUrl });
-      if (blank.status !== 200) throw fail('BROWSER_NAVIGATION_FAILED');
-      await sameWindow();
+      await establishBlank();
       await navigateFixed(true);
     },
     async close() { if (id) await webdriverRequest(port, 'DELETE', `/session/${id}`).catch(() => {}); },
