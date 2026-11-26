@@ -25,17 +25,18 @@ Buffer.from('0000000049454e44ae426082', 'hex').copy(png, 33);
 const FRAME = png.toString('base64');
 
 function protocolFixture({ probeOnly, verifySandbox = async () => {}, navigationMs = 400, commandMs = 350, signal,
-  pauseRenderer = false, initiallyHeld = [], launchTargets = [], fetchNavigation = false, holdNavigationCommit = false } = {}) {
+  initiallyHeld = [], launchTargets, unexpectedDiscovered, fetchNavigation = false, holdNavigationCommit = false } = {}) {
   const writer = new PassThrough();
   const reader = new PassThrough();
   const commands = [];
   const main = 'main-frame';
   const session = 'main-session';
-  const context = 'isolated-context';
+  const context = 'default-private-profile';
   const target = 'single-target';
   const info = { url: 'about:blank', title: '', targetId: target, browserContextId: context, type: 'page' };
+  const initialTargets = launchTargets ?? [{ ...info, attached: false }];
   const entries = [{ id: 0, url: 'about:blank' }];
-  let index = 0, loader = 0, closed = 0, buffer = '', resumed = !pauseRenderer, pausedNavigation;
+  let index = 0, loader = 0, closed = 0, buffer = '', pausedNavigation;
   const fetchEvent = () => ({ requestId: 'fixture-document', resourceType: 'Document', frameId: main,
     request: { url: pausedNavigation.params.url } });
   const hold = new Set(initiallyHeld);
@@ -59,25 +60,18 @@ function protocolFixture({ probeOnly, verifySandbox = async () => {}, navigation
   function onCommand(request) {
     commands.push(request);
     const { method, params } = request;
-    if (hold.has(method) || (!resumed && /^(?:Page|Network|Emulation|Fetch)\./u.test(method))) {
-      held.set(method, request);
-      return;
-    }
+    if (hold.has(method)) { held.set(method, request); return; }
     switch (method) {
       case 'Browser.getVersion': return respond(request, { product: 'Chrome/140.0.0.0' });
-      case 'Target.getTargets': return respond(request, { targetInfos: launchTargets });
-      case 'Target.setAutoAttach': {
-        if (!request.sessionId) for (const initial of launchTargets) {
-          emit('Target.attachedToTarget', { sessionId: 'initial-session', targetInfo: initial, waitingForDebugger: false }, null);
-        }
+      case 'Target.getTargets': return respond(request, { targetInfos: initialTargets });
+      case 'Target.setDiscoverTargets': {
+        for (const initial of initialTargets) emit('Target.targetCreated', { targetInfo: initial }, null);
+        if (unexpectedDiscovered) emit('Target.targetCreated', { targetInfo: unexpectedDiscovered }, null);
         return respond(request);
       }
-      case 'Target.closeTarget': return respond(request, { success: true });
-      case 'Target.createBrowserContext': return respond(request, { browserContextId: context });
-      case 'Target.createTarget':
-        emit('Target.attachedToTarget', { sessionId: session, targetInfo: { ...info }, waitingForDebugger: !resumed }, null);
-        return respond(request, { targetId: target });
-      case 'Runtime.runIfWaitingForDebugger': resumed = true; return respond(request);
+      case 'Target.attachToTarget':
+        emit('Target.attachedToTarget', { sessionId: session, targetInfo: { ...info }, waitingForDebugger: false }, null);
+        return respond(request, { sessionId: session });
       case 'Target.getTargetInfo': return respond(request, { targetInfo: { ...info } });
       case 'Page.getFrameTree': return respond(request, { frameTree: { frame: { url: info.url, id: main } } });
       case 'Page.navigate': {
@@ -172,35 +166,55 @@ test('launcher stderr exposes an enum only and stops classifying before site use
   stream.end();
 });
 
-test('only the known initial blank may coexist until the isolated target replaces it', async (t) => {
-  const initial = { targetId: 'original-blank', type: 'page', url: 'about:blank', attached: false };
-  const fixture = protocolFixture({ launchTargets: [initial] });
+test('startup attaches only to the single openerless initial blank and rejects foreign targets', async (t) => {
+  const fixture = protocolFixture();
   const engine = await fixture.engine;
   t.after(() => engine.close());
-  const closed = fixture.commands.findIndex(({ method }) => method === 'Target.closeTarget');
-  assert.ok(closed > fixture.commands.findIndex(({ method }) => method === 'Runtime.runIfWaitingForDebugger'));
-  assert.deepEqual(fixture.commands[closed].params, { targetId: 'original-blank' });
-  assert.ok(closed < fixture.commands.findIndex(({ method }) => method === 'Page.navigate'));
-  const unexpected = protocolFixture({ launchTargets: [{ ...initial, url: OTHER }] });
-  await assert.rejects(unexpected.engine, { code: 'BROWSER_TARGET_LOST', diagnostic: { stage: 'discover-bootstrap' } });
-  assert.equal(unexpected.closed, 1);
-  assert.ok(!unexpected.commands.some(({ method }) => method === 'Page.navigate'));
+  const attached = fixture.commands.filter(({ method }) => method === 'Target.attachToTarget');
+  assert.deepEqual(attached.map(({ params }) => params), [{ targetId: 'single-target', flatten: true }]);
+  assert.ok(!fixture.commands.some(({ method }) => ['Target.createTarget', 'Target.closeTarget', 'Target.createBrowserContext',
+    'Target.setAutoAttach', 'Runtime.runIfWaitingForDebugger'].includes(method)));
+  const initial = { targetId: 'original-blank', type: 'page', url: 'about:blank', attached: false };
+  for (const launchTargets of [[{ ...initial, url: OTHER }], [{ ...initial, openerId: 'other' }], [{ ...initial, attached: true }],
+    [initial, { ...initial, targetId: 'another' }]]) {
+    const unexpected = protocolFixture({ launchTargets });
+    await assert.rejects(unexpected.engine, { code: 'BROWSER_TARGET_LOST', diagnostic: { stage: 'discover-bootstrap' } });
+    assert.equal(unexpected.closed, 1);
+    assert.ok(!unexpected.commands.some(({ method }) => method === 'Page.navigate'));
+  }
+  const discovered = protocolFixture({ unexpectedDiscovered: { targetId: 'browser-worker', type: 'worker' } });
+  await assert.rejects(discovered.engine, { code: 'BROWSER_TARGET_LOST', diagnostic: { stage: 'watch-targets' } });
+  assert.equal(discovered.closed, 1);
 });
 
-test('startup resumes a paused blank renderer before renderer controls and still secures it before the site', async (t) => {
+test('startup installs guards and attests its existing renderer before activation and site navigation', async (t) => {
   let attested = false;
-  const fixture = protocolFixture({ pauseRenderer: true, verifySandbox: async () => {
+  const fixture = protocolFixture({ verifySandbox: async () => {
     assert.equal(fixture.commands.at(-1).method, 'Page.captureScreenshot');
-    assert.ok(!fixture.commands.some(({ method }) => method === 'Page.navigate'));
+    assert.ok(!fixture.commands.some(({ method }) => method === 'Target.activateTarget' || method === 'Page.navigate'));
     attested = true;
   } });
   const engine = await fixture.engine;
   t.after(() => engine.close());
   assert.equal(attested, true);
   const order = fixture.commands.map(({ method }) => method);
-  assert.ok(order.indexOf('Runtime.runIfWaitingForDebugger') < order.indexOf('Page.enable'));
-  assert.ok(order.indexOf('Browser.setDownloadBehavior') < order.indexOf('Runtime.runIfWaitingForDebugger'));
-  assert.ok(order.indexOf('Fetch.enable') < order.indexOf('Page.navigate'));
+  const required = ['Target.setDiscoverTargets', 'Browser.setDownloadBehavior', 'Target.attachToTarget', 'Page.enable',
+    'Fetch.enable', 'Page.captureScreenshot', 'Target.activateTarget', 'Page.navigate'];
+  assert.deepEqual(order.filter((method) => required.includes(method)), required);
+});
+
+test('a newly discovered tab or subtarget invalidates the only engine page', async () => {
+  for (const type of ['page', 'iframe', 'worker']) {
+    const fixture = protocolFixture();
+    const engine = await fixture.engine;
+    await engine.captureFrame();
+    fixture.emit('Target.targetCreated', { targetInfo: { type, url: 'about:blank', targetId: 'foreign' } }, null);
+    assert.equal(engine.getLatestFrame(), null);
+    await assert.rejects(engine.getPageInfo(), { code: 'BROWSER_TARGET_LOST' });
+    await engine.close();
+    assert.equal(fixture.closed, 1);
+    assert.equal(fixture.commands.filter(({ method }) => method === 'Target.attachToTarget').length, 1);
+  }
 });
 
 test('startup timeout reports only a predefined phase and CDP command', async () => {
@@ -226,9 +240,10 @@ test('entry interleaves Fetch request and response continuations with a waiting 
     ['Page.navigate', 'Fetch.continueRequest', 'Fetch.continueResponse']);
   assert.equal(commands[navigate + 1].params.interceptResponse, true);
   assert.ok(commands[navigate + 2].params.responseHeaders.some(({ name }) => name === 'Content-Security-Policy'));
-  const attachments = commands.filter(({ method }) => method === 'Target.setAutoAttach');
-  assert.ok(attachments.find(({ sessionId }) => !sessionId).params.filter.some(({ type }) => type === 'page'));
-  assert.ok(!attachments.find(({ sessionId }) => sessionId).params.filter.some(({ type }) => type === 'page'));
+  const discovery = commands.find(({ method }) => method === 'Target.setDiscoverTargets');
+  assert.equal(discovery.sessionId, undefined);
+  assert.deepEqual(discovery.params.filter.map(({ type }) => type).filter(Boolean),
+    ['page', 'iframe', 'worker', 'shared_worker', 'service_worker']);
   assert.deepEqual(await engine.getPageInfo(), { origin: ORIGIN, title: 'Fixture' });
 });
 
@@ -273,7 +288,7 @@ test('startup applies fixed pipe methods and keeps one isolated target through h
   assert.deepEqual(typed.map(({ params }) => params.type ?? params.text),
     ['mousePressed', 'mouseReleased', '人工接管', 'mouseWheel', 'keyDown', 'keyUp']);
   assert.ok(typed.every(({ sessionId }) => sessionId === 'main-session'));
-  assert.equal(fixture.commands.filter(({ method }) => method === 'Target.createTarget').length, 1);
+  assert.equal(fixture.commands.filter(({ method }) => method === 'Target.attachToTarget').length, 1);
   assert.ok(fixture.commands.every(({ method }) => !['Runtime.evaluate', 'Network.getCookies', 'DOM.getDocument'].includes(method)));
   assert.equal(fixture.commands.find(({ method }) => method === 'Browser.setDownloadBehavior').params.behavior, 'deny');
   await engine.close();
@@ -331,8 +346,7 @@ test('page-driven same-origin document navigation is sandboxed; redirects and un
   fixture.emit('Fetch.requestPaused', { ...safe, responseStatusCode: 200,
     responseHeaders: [{ name: 'Content-Disposition', value: 'attachment; filename=a' }] });
   await assert.rejects(engine.getPageInfo(), { code: 'BROWSER_DOWNLOAD_UNSUPPORTED' });
-  fixture.emit('Target.attachedToTarget', { sessionId: 'popup', targetInfo: { targetId: 'popup', type: 'page' } }, null);
-  assert.equal(fixture.commands.at(-1).method, 'Target.closeTarget');
+  fixture.emit('Page.windowOpen', {});
   await assert.rejects(engine.getPageInfo(), { code: 'BROWSER_POPUP_UNSUPPORTED' });
   fixture.emit('Page.fileChooserOpened', {});
   await assert.rejects(engine.getPageInfo(), { code: 'BROWSER_FILE_CHOOSER_UNSUPPORTED' });
@@ -400,12 +414,12 @@ test('stop interrupts navigation and probe only validates an internal bootstrap 
 test('aborting startup cleans up the session and ignores late browser replies', async () => {
   const controller = new AbortController();
   const fixture = protocolFixture({ signal: controller.signal });
-  fixture.hold('Target.createTarget');
+  fixture.hold('Target.attachToTarget');
   await new Promise(setImmediate);
-  assert.ok(fixture.commands.some(({ method }) => method === 'Target.createTarget'));
+  assert.ok(fixture.commands.some(({ method }) => method === 'Target.attachToTarget'));
   controller.abort(new Error('not public'));
   await assert.rejects(fixture.engine, { code: 'BROWSER_ABORTED', message: 'BROWSER_ABORTED' });
-  fixture.release('Target.createTarget', { targetId: 'late-target' });
+  fixture.release('Target.attachToTarget', { sessionId: 'late-session' });
   assert.equal(fixture.closed, 1);
   assert.ok(!fixture.commands.some(({ method }) => method === 'Page.navigate'));
   await assert.rejects(probeChromium({ executablePath: '/bin/false', signal: controller.signal }), { code: 'BROWSER_ABORTED' });

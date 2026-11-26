@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
 import { constants } from 'node:fs';
-import { access, chmod, mkdir, mkdtemp, readdir, readFile, realpath, rm } from 'node:fs/promises';
+import { access, chmod, mkdir, mkdtemp, readdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { BOOTSTRAP_URL, configPolicy, EngineError, fail, VIEWPORT } from './policy.mjs';
@@ -35,6 +35,16 @@ async function safeRemove(profile) {
     throw fail('BROWSER_CLEANUP_FAILED');
   }
   await rm(profile, { recursive: true, force: true });
+}
+
+async function initializePreferences(profile) {
+  const browserProfile = join(profile, 'Default');
+  await mkdir(browserProfile, { mode: 0o700 });
+  await writeFile(join(browserProfile, 'Preferences'), JSON.stringify({
+    credentials_enable_service: false,
+    profile: { password_manager_enabled: false },
+    autofill: { profile_enabled: false, credit_card_enabled: false },
+  }), { encoding: 'utf8', mode: 0o600, flag: 'wx' });
 }
 
 async function runtimeEnv(profile) {
@@ -179,6 +189,7 @@ async function launch(policy, probeOnly, signal) {
     checkStartup();
     profile = await mkdtemp(join(PROFILE_ROOT, PROFILE_PREFIX));
     await chmod(profile, 0o700);
+    await initializePreferences(profile);
     const env = await runtimeEnv(profile);
     checkStartup();
     const child = spawn(executable, browserFlags(profile, policy.proxyUrl), {

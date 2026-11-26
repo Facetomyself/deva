@@ -1,13 +1,13 @@
 import { isAbsolute } from 'node:path';
 
 const DIAGNOSTIC_STAGES = new Set([
-  'version', 'discover-bootstrap', 'context', 'download-guard', 'root-auto-attach', 'create-target', 'wait-target',
-  'resume-bootstrap', 'close-startup-blank', 'page-controls', 'bootstrap-png', 'sandbox-attest', 'entry-navigation',
+  'version', 'discover-bootstrap', 'watch-targets', 'download-guard', 'attach-bootstrap', 'page-controls',
+  'bootstrap-png', 'sandbox-attest', 'activate-bootstrap', 'entry-navigation',
 ]);
 const DIAGNOSTIC_COMMANDS = new Set([
-  'Browser.getVersion', 'Browser.setDownloadBehavior', 'Browser.close', 'Target.createBrowserContext',
-  'Target.createTarget', 'Target.setAutoAttach', 'Target.getTargetInfo', 'Target.getTargets', 'Target.closeTarget',
-  'Runtime.runIfWaitingForDebugger', 'Page.enable', 'Page.setLifecycleEventsEnabled', 'Page.setInterceptFileChooserDialog',
+  'Browser.getVersion', 'Browser.setDownloadBehavior', 'Browser.close', 'Target.setDiscoverTargets',
+  'Target.attachToTarget', 'Target.activateTarget', 'Target.getTargetInfo', 'Target.getTargets',
+  'Page.enable', 'Page.setLifecycleEventsEnabled', 'Page.setInterceptFileChooserDialog',
   'Network.setCacheDisabled', 'Network.setBypassServiceWorker', 'Emulation.setDeviceMetricsOverride', 'Page.getFrameTree',
   'Fetch.enable', 'Fetch.continueRequest', 'Fetch.continueResponse', 'Fetch.failRequest', 'Fetch.continueWithAuth',
   'SystemInfo.getProcessInfo',
@@ -28,7 +28,7 @@ const SANDBOX_FIELDS = [
 export const ENTRY_EVENTS = Object.freeze([
   'navigateSent', 'navigateAck', 'requestPaused', 'responsePaused', 'responseError', 'otherSessionFetch', 'blockedDocument',
   'continueRequestSent', 'continueRequestAck', 'continueResponseSent', 'continueResponseAck', 'fetchCommandError',
-  'targetAttach', 'targetDetach', 'frameNavigated', 'mainFrameNavigated', 'withinDocument', 'mainFrameLoad',
+  'targetCreated', 'targetAttach', 'targetDetach', 'frameNavigated', 'mainFrameNavigated', 'withinDocument', 'mainFrameLoad',
 ]);
 
 export class EngineError extends Error {
