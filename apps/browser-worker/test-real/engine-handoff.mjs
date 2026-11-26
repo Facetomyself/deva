@@ -16,6 +16,9 @@ const input = '人工接管·状态保留';
 const ENTRY_QUERY = 'token=fixture-local-query';
 const ENTRY_HASH = 'fixture-local-fragment';
 let verificationPhase = 'preflight';
+const fixtureTrace = { proxyReceived: 0, proxyForwarded: 0, proxyResponse: 0, proxyError: 0, proxyConnect: 0,
+  documentReceived: 0, documentResponse: 0 };
+const bumpFixture = (key) => { fixtureTrace[key] = Math.min(fixtureTrace[key] + 1, 256); };
 
 async function executable() {
   const chosen = process.argv[2] || process.env.CHROMIUM_PATH || process.env.CHROME_BIN || process.env.CHROME_PATH;
@@ -68,7 +71,13 @@ async function readForm(req) {
 function makeSite(state) {
   return createServer((req, res) => {
     const path = new URL(req.url, 'http://127.0.0.1').pathname;
-    if (path === '/form' && req.method === 'GET') {
+    if (['/form', '/submit', '/receipt', '/stall'].includes(path)) {
+      bumpFixture('documentReceived');
+      res.once('finish', () => bumpFixture('documentResponse'));
+    }
+    if (path === '/_proxy_probe' && req.method === 'GET') {
+      res.writeHead(204).end();
+    } else if (path === '/form' && req.method === 'GET') {
       writeHtml(res, color, 'Fixture Form', `<h1>Fixture Form</h1><form action="/submit" method="post">
         <input aria-label="Handoff fixture" name="value" required><input type="hidden" name="tab" id="tab">
         <button type="submit">Submit</button></form><script>
@@ -95,26 +104,43 @@ function makeSite(state) {
 
 function makeProxy(origin, state) {
   const server = createServer((req, res) => {
+    bumpFixture('proxyReceived');
     let url;
     try { url = new URL(req.url); } catch { res.writeHead(403).end(); return; }
     if (url.origin !== origin || !['GET', 'POST'].includes(req.method) || url.username || url.password) {
       res.writeHead(403).end(); return;
     }
     state.proxyRequests++;
+    bumpFixture('proxyForwarded');
     const headers = { ...req.headers, host: url.host, connection: 'close' };
     delete headers['proxy-connection'];
     const upstream = request(url, { method: req.method, headers, agent: false }, (response) => {
+      bumpFixture('proxyResponse');
       res.writeHead(response.statusCode, response.headers);
       response.pipe(res);
     });
-    upstream.on('error', () => res.destroy());
+    upstream.on('error', () => { bumpFixture('proxyError'); res.destroy(); });
     res.on('close', () => upstream.destroy());
     req.pipe(upstream);
   });
   // This fixture needs HTTP only and cannot forward arbitrary destinations.
-  server.on('connect', (_req, socket) => socket.destroy());
+  server.on('connect', (_req, socket) => { bumpFixture('proxyConnect'); socket.destroy(); });
   server.on('upgrade', (_req, socket) => socket.destroy());
   return server;
+}
+
+async function verifyProxyFixture(proxyUrl, origin) {
+  const status = await new Promise((resolve, reject) => {
+    const check = request(proxyUrl, { path: `${origin}/_proxy_probe`, agent: false }, (res) => {
+      res.resume();
+      res.once('end', () => resolve(res.statusCode));
+      res.once('error', reject);
+    });
+    check.once('error', reject);
+    check.setTimeout(1500, () => check.destroy());
+    check.end();
+  });
+  assert.equal(status, 204);
 }
 
 function topLeftRgb(frame) {
@@ -207,6 +233,10 @@ async function run() {
     const origin = await listenLoopback(site);
     proxy = makeProxy(origin, state);
     const proxyUrl = await listenLoopback(proxy);
+    verificationPhase = 'proxy-fixture';
+    await verifyProxyFixture(proxyUrl, origin);
+    state.proxyRequests = 0;
+    for (const key of Object.keys(fixtureTrace)) fixtureTrace[key] = 0;
     const options = { executablePath, proxyUrl };
     verificationPhase = 'probe';
     assert.deepEqual(await probeChromium(options), { available: true });
@@ -276,9 +306,12 @@ run().catch((error) => {
   const diagnostic = error instanceof EngineError ? error.diagnostic : undefined;
   const code = /^BROWSER_[A-Z_]+$/u.test(error?.code) ? error.code : 'FIXTURE_FAILURE';
   const sandbox = Object.entries(diagnostic?.sandbox ?? {}).map(([name, value]) => `${name}:${Number(value)}`).join(',');
+  const entry = Object.entries(diagnostic?.entryNavigation ?? {}).map(([name, value]) => `${name}:${value}`).join(',');
+  const fixture = Object.entries(fixtureTrace).map(([name, value]) => `${name}:${value}`).join(',');
   const labels = [`phase=${verificationPhase}`, diagnostic?.stage && `stage=${diagnostic.stage}`,
     diagnostic?.command && `command=${diagnostic.command}`, diagnostic?.launchHint && `launch=${diagnostic.launchHint}`,
-    sandbox && `sandbox=${sandbox}`].filter(Boolean);
+    sandbox && `sandbox=${sandbox}`, entry && `entry=${entry}`,
+    verificationPhase !== 'preflight' && `fixture=${fixture}`].filter(Boolean);
   console.error(`FAIL ${code} [${labels.join(' ')}]`);
   process.exitCode = 1;
 });

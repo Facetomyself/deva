@@ -20,7 +20,7 @@ function browserFlags(profile, proxyUrl) {
     '--headless', '--remote-debugging-pipe',
     `--user-data-dir=${profile}`, `--window-size=${VIEWPORT.width},${VIEWPORT.height}`,
     `--proxy-server=${proxyUrl}`, '--proxy-bypass-list=<-loopback>',
-    '--host-resolver-rules=MAP * ~NOTFOUND', '--disable-quic',
+    `--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE ${new URL(proxyUrl).hostname}`, '--disable-quic',
     '--force-webrtc-ip-handling-policy=disable_non_proxied_udp',
     '--disable-blink-features=FileSystemAccess,FileSystemAccessLocal',
     '--no-first-run', '--no-default-browser-check', '--disable-background-networking',

@@ -25,7 +25,7 @@ Buffer.from('0000000049454e44ae426082', 'hex').copy(png, 33);
 const FRAME = png.toString('base64');
 
 function protocolFixture({ probeOnly, verifySandbox = async () => {}, navigationMs = 400, commandMs = 350, signal,
-  pauseRenderer = false, initiallyHeld = [], launchTargets = [] } = {}) {
+  pauseRenderer = false, initiallyHeld = [], launchTargets = [], fetchNavigation = false, holdNavigationCommit = false } = {}) {
   const writer = new PassThrough();
   const reader = new PassThrough();
   const commands = [];
@@ -35,7 +35,9 @@ function protocolFixture({ probeOnly, verifySandbox = async () => {}, navigation
   const target = 'single-target';
   const info = { url: 'about:blank', title: '', targetId: target, browserContextId: context, type: 'page' };
   const entries = [{ id: 0, url: 'about:blank' }];
-  let index = 0, loader = 0, closed = 0, buffer = '', resumed = !pauseRenderer;
+  let index = 0, loader = 0, closed = 0, buffer = '', resumed = !pauseRenderer, pausedNavigation;
+  const fetchEvent = () => ({ requestId: 'fixture-document', resourceType: 'Document', frameId: main,
+    request: { url: pausedNavigation.params.url } });
   const hold = new Set(initiallyHeld);
   const held = new Map();
   const emit = (method, params, sessionId = session) => send({ method, params, ...(sessionId ? { sessionId } : {}) });
@@ -79,10 +81,27 @@ function protocolFixture({ probeOnly, verifySandbox = async () => {}, navigation
       case 'Target.getTargetInfo': return respond(request, { targetInfo: { ...info } });
       case 'Page.getFrameTree': return respond(request, { frameTree: { frame: { url: info.url, id: main } } });
       case 'Page.navigate': {
+        if (fetchNavigation) {
+          pausedNavigation = request;
+          return emit('Fetch.requestPaused', fetchEvent());
+        }
         const id = commit(params.url);
         entries.splice(++index, Infinity, { id: index, url: params.url });
         return respond(request, { frameId: main, loaderId: id });
       }
+      case 'Fetch.continueRequest':
+        respond(request);
+        if (pausedNavigation) emit('Fetch.requestPaused', { ...fetchEvent(), responseStatusCode: 200,
+          responseHeaders: [{ name: 'Content-Type', value: 'text/html' }] });
+        return;
+      case 'Fetch.continueResponse':
+        respond(request);
+        if (pausedNavigation && !holdNavigationCommit) {
+          const pending = pausedNavigation;
+          pausedNavigation = null;
+          return respond(pending, { frameId: main, loaderId: commit(pending.params.url) });
+        }
+        return;
       case 'Page.getNavigationHistory': return respond(request, { currentIndex: index, entries });
       case 'Page.navigateToHistoryEntry':
         index = entries.findIndex((entry) => entry.id === params.entryId);
@@ -194,6 +213,45 @@ test('startup timeout reports only a predefined phase and CDP command', async ()
   });
   assert.equal(fixture.closed, 1);
   assert.equal(new EngineError('BROWSER_START_FAILED', { stage: '/private/path', command: START }).diagnostic, undefined);
+});
+
+test('entry interleaves Fetch request and response continuations with a waiting Page.navigate', async (t) => {
+  const fixture = protocolFixture({ fetchNavigation: true });
+  const engine = await fixture.engine;
+  t.after(() => engine.close());
+  const commands = fixture.commands;
+  const navigate = commands.findIndex(({ method }) => method === 'Page.navigate');
+  assert.ok(navigate >= 0);
+  assert.deepEqual(commands.slice(navigate, navigate + 3).map(({ method }) => method),
+    ['Page.navigate', 'Fetch.continueRequest', 'Fetch.continueResponse']);
+  assert.equal(commands[navigate + 1].params.interceptResponse, true);
+  assert.ok(commands[navigate + 2].params.responseHeaders.some(({ name }) => name === 'Content-Security-Policy'));
+  const attachments = commands.filter(({ method }) => method === 'Target.setAutoAttach');
+  assert.ok(attachments.find(({ sessionId }) => !sessionId).params.filter.some(({ type }) => type === 'page'));
+  assert.ok(!attachments.find(({ sessionId }) => sessionId).params.filter.some(({ type }) => type === 'page'));
+  assert.deepEqual(await engine.getPageInfo(), { origin: ORIGIN, title: 'Fixture' });
+});
+
+test('entry timeout distinguishes committed Fetch continuations from an absent document commit', async () => {
+  const fixture = protocolFixture({ fetchNavigation: true, holdNavigationCommit: true, commandMs: 60 });
+  await assert.rejects(fixture.engine, (error) => {
+    assert.equal(error.code, 'BROWSER_TIMEOUT');
+    assert.equal(error.diagnostic.command, 'Page.navigate');
+    const { entryNavigation } = error.diagnostic;
+    assert.equal(entryNavigation.navigateAck, 0);
+    assert.equal(entryNavigation.requestPaused, 1);
+    assert.equal(entryNavigation.continueRequestSent, 1);
+    assert.equal(entryNavigation.continueRequestAck, 1);
+    assert.equal(entryNavigation.responsePaused, 1);
+    assert.equal(entryNavigation.continueResponseSent, 1);
+    assert.equal(entryNavigation.continueResponseAck, 1);
+    assert.equal(entryNavigation.mainFrameNavigated, 0);
+    assert.ok(!JSON.stringify(error.diagnostic).includes(START));
+    return true;
+  });
+  assert.equal(fixture.closed, 1);
+  const bad = new EngineError('BROWSER_TIMEOUT', { entryNavigation: { responsePaused: 1, requestPaused: START, body: START } });
+  assert.deepEqual(bad.diagnostic.entryNavigation, { responsePaused: 1 });
 });
 
 test('startup applies fixed pipe methods and keeps one isolated target through handoff and history', async (t) => {

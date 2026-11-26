@@ -1,13 +1,15 @@
 import { STATUS_CODES } from 'node:http';
 import { connectPipe } from './pipe.mjs';
 import {
-  BOOTSTRAP_URL, PAGE_POLICIES, VIEWPORT, fail, keyParams, publicPageInfo, readFrame, validateInput,
+  BOOTSTRAP_URL, ENTRY_EVENTS, PAGE_POLICIES, VIEWPORT, fail, keyParams, publicPageInfo, readFrame, validateInput,
 } from './policy.mjs';
 
 const NAVIGATION_MS = 12_000;
 const PAGE_TARGETS = [{ type: 'page', exclude: false }, { exclude: true }];
 const AUTO_ATTACH = { autoAttach: true, waitForDebuggerOnStart: true, flatten: true };
-const SUBTARGETS = ['iframe', 'worker', 'shared_worker', 'service_worker', 'page']
+// Root auto-attach already owns all top-level pages, including new windows. Do not
+// also pause pages from the page-scoped observer during a renderer process swap.
+const SUBTARGETS = ['iframe', 'worker', 'shared_worker', 'service_worker']
   .map((type) => ({ type, exclude: false })).concat({ exclude: true });
 const SHELL_REASONS = new Set(['BROWSER_CLOSED', 'BROWSER_DISCONNECTED']);
 const cloneFrame = (frame) => ({ ...frame, bytes: Buffer.from(frame.bytes) });
@@ -25,6 +27,10 @@ export async function startChromiumSession({ writer, reader, policy, verifySandb
   let latest = null, location = null;
   const loaded = new Set();
   const changed = new Set();
+  const entryTrace = Object.fromEntries(ENTRY_EVENTS.map((name) => [name, 0]));
+  function bump(name) {
+    if (startupStage === 'entry-navigation') entryTrace[name] = Math.min(entryTrace[name] + 1, 256);
+  }
 
   const notify = () => { for (const fn of changed) fn(); };
   const invalidate = () => { latest = null; frameEpoch++; };
@@ -91,7 +97,15 @@ export async function startChromiumSession({ writer, reader, policy, verifySandb
 
   function sendEventCommand(method, args, id = sessionId) {
     if (closing) return;
-    pipe.send(method, args, id).catch((error) => fatal(error.code));
+    const fetchCommand = method === 'Fetch.continueRequest' ? 'continueRequest' :
+      method === 'Fetch.continueResponse' ? 'continueResponse' : null;
+    if (fetchCommand) bump(`${fetchCommand}Sent`);
+    pipe.send(method, args, id).then(() => {
+      if (fetchCommand) bump(`${fetchCommand}Ack`);
+    }, (error) => {
+      if (method.startsWith('Fetch.')) bump('fetchCommandError');
+      fatal(error.code);
+    });
   }
 
   function dismissTarget(id) {
@@ -111,12 +125,16 @@ export async function startChromiumSession({ writer, reader, policy, verifySandb
   }
 
   function rejectDocument(requestId, code) {
+    bump('blockedDocument');
     sendEventCommand('Fetch.failRequest', { requestId, errorReason: 'BlockedByClient' });
     restrict(code);
   }
 
   function onDocument(p) {
     const { requestId, request, frameId: requestFrame, responseStatusCode: code, responseHeaders: headers = [] } = p;
+    if (code === undefined && !p.responseErrorReason) bump('requestPaused');
+    else bump('responsePaused');
+    if (p.responseErrorReason) bump('responseError');
     if (typeof requestId !== 'string' || p.resourceType !== 'Document') return fatal('BROWSER_PROTOCOL_INVALID');
     if (requestFrame !== frameId || !policy.permits(request?.url)) return rejectDocument(requestId, 'BROWSER_NAVIGATION_BLOCKED');
     if (p.responseErrorReason) return sendEventCommand('Fetch.continueResponse', { requestId });
@@ -144,6 +162,7 @@ export async function startChromiumSession({ writer, reader, policy, verifySandb
   function onEvent(method, p, id) {
     if (closing) return;
     if (method === 'Target.attachedToTarget') {
+      bump('targetAttach');
       const target = p.targetInfo;
       if (!target || typeof target.targetId !== 'string' || typeof p.sessionId !== 'string') return fatal('BROWSER_PROTOCOL_INVALID');
       if (id === null && startupBlankId && target.targetId === startupBlankId) {
@@ -157,21 +176,33 @@ export async function startChromiumSession({ writer, reader, policy, verifySandb
       } else if (target.targetId !== targetId) dismissTarget(target.targetId);
       return;
     }
-    if (method === 'Target.detachedFromTarget' && p.sessionId === sessionId) return fatal('BROWSER_TARGET_LOST');
+    if (method === 'Target.detachedFromTarget') {
+      bump('targetDetach');
+      if (p.sessionId === sessionId) return fatal('BROWSER_TARGET_LOST');
+    }
     if (method === 'Browser.downloadWillBegin') return restrict('BROWSER_DOWNLOAD_UNSUPPORTED');
-    if (!sessionId || id !== sessionId) return;
+    if (!sessionId || id !== sessionId) {
+      if (method === 'Fetch.requestPaused') bump('otherSessionFetch');
+      return;
+    }
     switch (method) {
       case 'Page.frameNavigated':
+        bump('frameNavigated');
         if (!p.frame?.parentId && p.frame?.id === frameId) {
+          bump('mainFrameNavigated');
           const { url, urlFragment, loaderId } = p.frame;
           trackNavigation(urlFragment && !url.includes('#') ? `${url}${urlFragment}` : url, loaderId);
         } else if (p.frame && !p.frame.parentId && frameId) fatal('BROWSER_TARGET_LOST');
         break;
       case 'Page.navigatedWithinDocument':
-        if (p.frameId === frameId) trackNavigation(p.url, location?.loaderId);
+        if (p.frameId === frameId) {
+          bump('withinDocument');
+          trackNavigation(p.url, location?.loaderId);
+        }
         break;
       case 'Page.lifecycleEvent':
         if (p.frameId === frameId && p.name === 'load') {
+          bump('mainFrameLoad');
           loaded.add(p.loaderId);
           if (loaded.size > 16) loaded.delete(loaded.values().next().value);
           notify();
@@ -224,7 +255,9 @@ export async function startChromiumSession({ writer, reader, policy, verifySandb
       const destination = policy.entry(url);
       const last = navigationEpoch, stopped = stopEpoch;
       invalidate();
+      bump('navigateSent');
       const result = await page('Page.navigate', { url: destination });
+      bump('navigateAck');
       if (stopEpoch !== stopped) throw fail('BROWSER_NAVIGATION_STOPPED');
       if (result.isDownload) throw fail('BROWSER_DOWNLOAD_UNSUPPORTED');
       if (result.errorText || result.frameId !== frameId) throw fail('BROWSER_NAVIGATION_FAILED');
@@ -393,10 +426,12 @@ export async function startChromiumSession({ writer, reader, policy, verifySandb
   } catch (error) {
     await close();
     const code = signal?.aborted ? abortCode() : error?.code;
-    const diagnostic = { ...error?.diagnostic, stage: startupStage };
+    const diagnostic = { ...error?.diagnostic, stage: startupStage,
+      ...(startupStage === 'entry-navigation' ? { entryNavigation: entryTrace } : {}) };
     if (!SHELL_REASONS.has(code) && code !== 'BROWSER_COMMAND_FAILED' && code?.startsWith('BROWSER_')) throw fail(code, diagnostic);
     throw fail('BROWSER_START_FAILED', diagnostic);
   } finally { signal?.removeEventListener('abort', abort); }
+  startupStage = null;
 
   return Object.freeze({
     navigate, back: () => history(-1), forward: () => history(1), stop, close, getPageInfo, captureFrame,

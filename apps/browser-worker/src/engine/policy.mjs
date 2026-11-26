@@ -25,8 +25,14 @@ const SANDBOX_FIELDS = [
   'seccompReadable', 'seccomp', 'filterCountReadable', 'filterDelta',
 ];
 
+export const ENTRY_EVENTS = Object.freeze([
+  'navigateSent', 'navigateAck', 'requestPaused', 'responsePaused', 'responseError', 'otherSessionFetch', 'blockedDocument',
+  'continueRequestSent', 'continueRequestAck', 'continueResponseSent', 'continueResponseAck', 'fetchCommandError',
+  'targetAttach', 'targetDetach', 'frameNavigated', 'mainFrameNavigated', 'withinDocument', 'mainFrameLoad',
+]);
+
 export class EngineError extends Error {
-  constructor(code, { stage, command, launchHint, sandbox } = {}) {
+  constructor(code, { stage, command, launchHint, sandbox, entryNavigation } = {}) {
     super(code);
     this.name = 'EngineError';
     this.code = code;
@@ -43,6 +49,14 @@ export class EngineError extends Error {
         }
       }
       if (Object.keys(fields).length) safe.sandbox = Object.freeze(fields);
+    }
+    if (entryNavigation && typeof entryNavigation === 'object') {
+      const counts = {};
+      for (const name of ENTRY_EVENTS) {
+        const value = entryNavigation[name];
+        if (Number.isInteger(value) && value >= 0 && value <= 256) counts[name] = value;
+      }
+      if (Object.keys(counts).length) safe.entryNavigation = Object.freeze(counts);
     }
     if (Object.keys(safe).length) this.diagnostic = Object.freeze(safe);
   }

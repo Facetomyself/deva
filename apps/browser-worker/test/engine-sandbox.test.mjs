@@ -31,11 +31,16 @@ function fixture({ renderer = rendererStatus, rendererParent = 103, rendererMap 
   return {
     reads, owned, files,
     verify: () => verifyRendererSandbox({ pid: 101, uid, profile, signal: new AbortController().signal, timeoutMs: 0,
+      trustedBrowserInventory,
       getProcessInfo: async () => ({ processInfo: inventory ?? [{ type: 'browser', id: 102 }, { type: 'renderer', id: 104 }] }),
       observeOwned: (rows) => { for (const row of rows) owned.add(row.pid); },
       proc: { async readlink() { throw new Error('no ptrace'); }, async readFile(path) {
         reads.push(path);
-        if (!files.has(path)) throw new Error('not present');
+        if (path === '/proc/104/stat') {
+          if (rendererStatRead && recycledRenderer) return stat(104, rendererParent, 104, 1041);
+          rendererStatRead = true;
+        }
+        if (!files.has(path) || files.get(path) === null) throw new Error('not present');
         return files.get(path);
       } },
     }),
@@ -47,6 +52,48 @@ test('attests a real renderer identity across distinct kernel process groups usi
   await verify();
   assert.deepEqual([...owned].sort(), [101, 102, 103, 104]);
   assert.ok(reads.every((path) => /^\/proc\/(101|102|103|104)\//u.test(path)));
+});
+
+test('strict local renderer discovery recognizes only exact role arguments', () => {
+  for (const argv of ['chrome\0--type=renderer\0', '/opt/google/chrome/chrome --type=renderer --lang=en-US']) {
+    assert.deepEqual(classifyRendererCmdline(argv), { readable: true, explicitRenderer: true, contradictory: false });
+  }
+  for (const argv of [
+    'chrome\0https://example.invalid/--type=renderer\0', 'chrome --url=https://example.invalid/#--type=renderer',
+    'chrome --note="fake --type=renderer token"', 'chrome --note=fake --type=renderer',
+    'chrome\0--url=note --type=renderer\0', 'chrome --type=renderer2',
+    'unrelated --type=renderer', 'chrome\0--type=renderer\0--type=gpu-process\0',
+  ]) {
+    assert.equal(classifyRendererCmdline(argv).explicitRenderer, false);
+  }
+  assert.equal(classifyRendererCmdline('chrome --type=gpu-process --lang=en-US').contradictory, true);
+  assert.equal(classifyRendererCmdline('chrome --type=renderer --note="test --type=gpu-process"').contradictory, false);
+});
+
+test('the private Browser report can identify hidden argv, but enforces stable lineage and rejects conflicting roles', async () => {
+  for (const argv of [null, '', 'chrome\0']) {
+    await fixture({ argv, trustedBrowserInventory: true }).verify();
+    await assert.rejects(fixture({ argv }).verify(), { code: 'BROWSER_SANDBOX_REQUIRED' });
+  }
+  for (const argv of ['chrome\0--type=gpu-process\0', 'chrome --type=utility --lang=en-US']) {
+    await assert.rejects(fixture({ argv, trustedBrowserInventory: true }).verify(), (error) => {
+      assert.equal(error.diagnostic.sandbox.rendererArgvContradiction, true);
+      assert.equal(error.diagnostic.sandbox.rendererIdentity, false);
+      return true;
+    });
+  }
+  await assert.rejects(fixture({ argv: '', trustedBrowserInventory: true, recycledRenderer: true }).verify(), (error) => {
+    assert.equal(error.diagnostic.sandbox.rendererStable, false);
+    assert.equal(error.diagnostic.sandbox.rendererIdentity, false);
+    return true;
+  });
+  await assert.rejects(fixture({ argv: '', trustedBrowserInventory: true,
+    renderer: rendererStatus.replace('NoNewPrivs:\t1', 'NoNewPrivs:\t0') }).verify(), { code: 'BROWSER_SANDBOX_REQUIRED' });
+  await assert.rejects(fixture({ argv: '', trustedBrowserInventory: true,
+    inventory: [{ type: 'browser', id: 102 }, { type: 'renderer', id: 104 }, { type: 'GPU', id: 104 }] }).verify(), (error) => {
+    assert.equal(error.diagnostic.sandbox.inventoryConsistent, false);
+    return true;
+  });
 });
 
 test('renderer status flags are independent, strictly required, and exposed only as evidence labels', async () => {
