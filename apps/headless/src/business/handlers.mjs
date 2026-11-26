@@ -55,7 +55,8 @@ export async function openBusiness({ dataDir, vault, auth, version, allowedOrigi
     library = await openLibrary({ dataDir, workspaceRoot, workspaceWritable, privateRoots, gitProjects })
     if (library.gitGrants.enabled) git = openGitService({ grants: library.gitGrants, auth })
     uploads = await openUploadStore({ dataDir })
-    turns = createTextTurns({ dataDir, settings, journal, ...opts, resolveRole: library.resolveRole, uploads, deliveries: true })
+    turns = createTextTurns({ dataDir, settings, journal, ...opts, resolveRole: library.resolveRole,
+      withWorkspace: library.withWorkspace, uploads, deliveries: true })
     // The Unix client is loaded only when the operator mounted a private worker socket.
     if (browserRunDir) {
       const { createManualBrowser } = await import('../browser/manual-browser.mjs')
@@ -76,6 +77,7 @@ export async function openBusiness({ dataDir, vault, auth, version, allowedOrigi
     beginShutdown,
     capabilities: Object.freeze({ textChat: true, library: true, workspaceFiles: library.workspaceFilesEnabled, attachments: true,
       browserPanel: !!browser, gitInspect: !!git, deliveries: typeof turns.deliverySnapshot === 'function',
+      sessionWorkspaces: typeof turns.getWorkspace === 'function' && typeof turns.setWorkspace === 'function',
       sessionPreferences: typeof turns.patchPreferences === 'function' && typeof journal.watchSessions === 'function' }),
     createRealtime: ({ auth, policy }) => createChatWebSocket({ turns, journal, auth, policy }),
     getConfig: () => settings.getPublicConfig(),

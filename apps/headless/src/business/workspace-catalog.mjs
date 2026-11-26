@@ -138,7 +138,9 @@ export function openWorkspaceCatalog({ root, privateRoots = [] }) {
         pinned = openChild(record.name)
         if (!sameInode(record.info, pinned.info)) throw unavailable()
         assertCurrent()
-        return Object.freeze({ fd: pinned.sub, mount: rootMount, assertCurrent, close() { if (!released) { released = true; close(pinned.sub) } } })
+        // root/name are private operator facts, not part of the enumerable project list or an HTTP DTO.
+        return Object.freeze({ fd: pinned.sub, mount: rootMount, id: record.id, name: record.name, root: record.path,
+          assertCurrent, close() { if (!released) { released = true; close(pinned.sub) } } })
       } catch {
         close(pinned?.sub)
         throw unavailable()

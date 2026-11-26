@@ -1,18 +1,20 @@
 import { HttpError, json, readJson } from '../http/policy.mjs'
 import { sessionPreferenceRoute } from './session-routes.mjs'
+import { makeChatWorkspaceRoute } from '../http/chat-workspace.mjs'
 import { isChatRoleId } from './text-turns.mjs'
 
 const collection = '/api/v1/chats'
-const resource = /^\/api\/v1\/chats\/([A-Za-z0-9_-]{1,128})(?:\/(turns|stop|preferences))?$/
+const resource = /^\/api\/v1\/chats\/([A-Za-z0-9_-]{1,128})(?:\/(turns|stop|preferences|workspace))?$/
 const roleServiceError = () => new HttpError(503, 'chat_role_unavailable')
 const roleUnavailable = () => new HttpError(409, 'role_unavailable')
 
 async function createBoundSession(turns, withRoleForChat, body, authenticate) {
-  if (Object.keys(body).some(key => key !== 'sessionId' && key !== 'personaId')) throw new HttpError(400, 'invalid_create')
+  if (Object.keys(body).some(key => !['sessionId', 'personaId', 'workspaceId'].includes(key))) throw new HttpError(400, 'invalid_create')
   const { personaId } = body
   if (!isChatRoleId(personaId)) throw new HttpError(400, 'invalid_persona_id')
   if (!withRoleForChat) throw roleServiceError()
-  const options = Object.hasOwn(body, 'sessionId') ? { sessionId: body.sessionId } : {}
+  const options = { ...(Object.hasOwn(body, 'sessionId') ? { sessionId: body.sessionId } : {}),
+    ...(Object.hasOwn(body, 'workspaceId') ? { workspaceId: body.workspaceId } : {}) }
   let session, finished = false
   try {
     const result = await withRoleForChat(personaId, role => {
@@ -37,10 +39,14 @@ async function createBoundSession(turns, withRoleForChat, body, authenticate) {
  * this entry nor a caller-supplied payload can select a model URL, send a system prompt, or run tools. */
 export function chatRoutes(turns, { withRoleForChat } = {}) {
   if (withRoleForChat !== undefined && typeof withRoleForChat !== 'function') throw new TypeError('withRoleForChat must be a function')
+  const focus = makeChatWorkspaceRoute(turns)
   return async (req, res, { auth, policy }) => {
     const path = (req.url ?? '').split('?', 1)[0]
     const match = resource.exec(path)
     if (path !== collection && !match) return false
+    if (match?.[2] === 'workspace') {
+      await focus(req, res, { auth, policy }, path, match[1]); return true
+    }
     if (match?.[2] === 'preferences') {
       await sessionPreferenceRoute(req, res, { auth, policy }, turns, path, match[1])
       return true
@@ -57,6 +63,7 @@ export function chatRoutes(turns, { withRoleForChat } = {}) {
       if (!match) {
         if (write) {
           const body = await readJson(req, 512)
+          authenticateWrite() // Reading a slow request body must not extend the login.
           const session = Object.hasOwn(body, 'personaId')
             ? await createBoundSession(turns, withRoleForChat, body, authenticateWrite)
             : turns.create(body)

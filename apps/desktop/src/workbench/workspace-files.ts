@@ -41,6 +41,7 @@ export function createWorkspaceFiles(api: WorkspaceTransport) {
   const activePaths = new Map<string, string>()
   const unavailable = new Set<string>()
   let projects: FetchState<WorkspaceOption[]> = {}
+  let projectRequest: Promise<boolean> | undefined
   let projectId = ''
   let directories = new Map<string, FetchState<WorkspaceDirectory>>()
   let expanded = new Set<string>()
@@ -107,43 +108,58 @@ export function createWorkspaceFiles(api: WorkspaceTransport) {
     return fallback
   }
 
-  async function loadProjects(): Promise<void> {
-    if (expired || projects.pending || projects.data) return
+  async function loadProjects(refresh = false, signal?: AbortSignal): Promise<void> {
+    if (expired || signal?.aborted) return
+    if (projectRequest) {
+      if (!await projectRequest) await loadProjects(refresh, signal)
+      return
+    }
+    if (!refresh && projects.data) return
+    const previous = projects
+    projectRequest = Promise.resolve().then(async () => {
+      if (signal?.aborted) { projects = previous; return false }
+      try {
+        const data = await (signal ? api.projects(signal) : api.projects())
+        projects = signal?.aborted ? previous : { data }
+      } catch (error) {
+        projects = signal?.aborted ? previous : { issue: failed(error, 'readFailure') }
+      }
+      return !signal?.aborted
+    }).finally(() => { projectRequest = undefined; emit() })
     projects = { pending: true }
     emit()
-    try { projects = { data: await api.projects() } }
-    catch (error) { projects = { issue: failed(error, 'readFailure') } }
-    emit()
+    await projectRequest
   }
 
   function directory(path: string, state: FetchState<WorkspaceDirectory>): void {
     directories = new Map(directories).set(path, state)
     emit()
   }
-  async function list(path: string, refresh = false): Promise<void> {
-    if (!projectId || projectIssue() || directories.get(path)?.pending || (!refresh && directories.get(path)?.data)) return
+  async function list(path: string, refresh = false, signal?: AbortSignal): Promise<void> {
+    if (signal?.aborted || !projectId || projectIssue() || directories.get(path)?.pending || (!refresh && directories.get(path)?.data)) return
     const id = projectId
     const generation = dirGeneration
     directory(path, { pending: true })
     try {
-      const data = await api.list(id, path)
-      if (generation === dirGeneration) directory(path, { data })
+      const data = await (signal ? api.list(id, path, signal) : api.list(id, path))
+      if (!signal?.aborted && generation === dirGeneration) directory(path, { data })
     } catch (error) {
+      if (signal?.aborted) return
       const issue = failed(error, 'readFailure', id)
       if (generation === dirGeneration) directory(path, { issue })
       else emit()
     }
   }
 
-  function select(id: string): Promise<void> | undefined {
-    if (id === projectId || (id && !projects.data?.some((project) => project.id === id))) return
+  function select(id: string, signal?: AbortSignal): Promise<void> | undefined {
+    if (signal?.aborted || id === projectId || (id && !projects.data?.some((project) => project.id === id))) return
     cancelRead()
     projectId = id
     dirGeneration++
     directories = new Map()
     expanded = new Set()
     emit()
-    return list('')
+    return list('', false, signal)
   }
   function toggle(path: string): Promise<void> | undefined {
     if (projectIssue() || !path) return
@@ -273,3 +289,20 @@ export function createWorkspaceFiles(api: WorkspaceTransport) {
 }
 
 export type WorkspaceFiles = ReturnType<typeof createWorkspaceFiles>
+
+/** Called only after an explicit open and a fresh conversation binding check. */
+export async function openWorkspaceProject(files: WorkspaceFiles, id: string, signal: AbortSignal): Promise<boolean> {
+  if (signal.aborted) return false
+  await files.loadProjects(true, signal)
+  if (signal.aborted) return false
+  if (files.snapshot().projects.issue === 'expired') throw new HttpFailure(401)
+  if (!files.snapshot().projects.data?.some((project) => project.id === id)) return false
+  signal.addEventListener('abort', () => {
+    if (files.snapshot().projectId === id) void files.select('')
+  }, { once: true })
+  await (files.select(id, signal) ?? files.list('', false, signal))
+  if (signal.aborted) return false
+  const view = files.snapshot()
+  if (view.issue === 'expired') throw new HttpFailure(401)
+  return view.projectId === id && !view.issue
+}

@@ -14,7 +14,7 @@ export interface Bootstrap {
   config: RecordValue
   csrf: string
   expiresAt: number
-  capabilities?: { textChat?: true; library?: true; workspaceFiles?: true; attachments?: true; browserPanel?: true; sessionPreferences?: true; deliveries?: true; gitInspect?: true }
+  capabilities?: { textChat?: true; library?: true; workspaceFiles?: true; attachments?: true; browserPanel?: true; sessionPreferences?: true; deliveries?: true; gitInspect?: true; sessionWorkspaces?: true }
 }
 
 export type SessionScreen = { mode: 'authenticated'; bootstrap: Bootstrap } | { mode: 'claim' | 'login' }
@@ -75,11 +75,14 @@ export function createTransport(send: Fetch = fetch) {
     return response.status === 204 ? undefined : response.json()
   }
 
-  function request(path: string, method = 'GET', body?: unknown, csrf?: string): Promise<unknown> {
+  function request(path: string, method = 'GET', body?: unknown, csrf?: string, options?: {
+    signal?: AbortSignal; referrerPolicy?: ReferrerPolicy
+  }): Promise<unknown> {
     const headers: Record<string, string> = { accept: 'application/json' }
     if (body !== undefined) headers['content-type'] = 'application/json'
     if (csrf) headers[csrfHeader] = csrf
-    return fetchJson(path, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) })
+    return fetchJson(path, { method, headers, body: body === undefined ? undefined : JSON.stringify(body),
+      ...(options?.signal ? { signal: options.signal } : {}) }, options?.referrerPolicy)
   }
 
   function gitRequest(path: string, body: object, csrf: string, signal: AbortSignal): Promise<unknown> {
@@ -119,6 +122,7 @@ export function createTransport(send: Fetch = fetch) {
       if (result.capabilities.sessionPreferences === true) capabilities.sessionPreferences = true
       if (result.capabilities.deliveries === true) capabilities.deliveries = true
       if (result.capabilities.gitInspect === true) capabilities.gitInspect = true
+      if (result.capabilities.sessionWorkspaces === true) capabilities.sessionWorkspaces = true
     }
     return { protocol, version, platform, config, csrf, expiresAt, ...(Object.keys(capabilities).length ? { capabilities } : {}) }
   }

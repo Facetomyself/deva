@@ -4,7 +4,7 @@ import { HttpFailure, type LibraryQueue, type Revision, type Transport } from '.
 
 export const MEMORY_TYPES = ['user', 'feedback', 'project', 'reference'] as const
 export type MemoryInput = Pick<MemoryEntry, 'type' | 'title' | 'body'>
-export type Scope = { kind: 'global' } | { kind: 'role' | 'project'; id: string }
+export type Scope = { kind: 'global' } | { kind: 'role'; id: string } | { kind: 'project'; id: string; signal?: AbortSignal }
 export type ProfileSnapshot = { profile: UserProfile; revision: Revision; imageRevision: Revision }
 export type RoleImage = { image: string; revision: Revision; imageRevision: Revision }
 export type MemoryState = { snapshot: MemorySnapshot; revision: Revision }
@@ -113,9 +113,24 @@ export function createLibrary(transport: Transport, queue: LibraryQueue) {
   }
   const getRoleImage = (id: string) => transport.request(`${rolePath(id)}/avatar-image`).then(parseRoleImage)
 
+  // A conversation-scoped editor may close while waiting in the owner library queue.
+  async function memoryRequest(scope: Scope, method: string, body?: unknown, token?: string): Promise<unknown> {
+    const signal = scope.kind === 'project' ? scope.signal : undefined
+    const ensureOpen = (): void => { if (signal?.aborted) throw new Error('Project view closed') }
+    ensureOpen()
+    try {
+      const value = await transport.request(memoryPath(scope), method, body, token, signal ? { signal, referrerPolicy: 'same-origin' } : undefined)
+      ensureOpen()
+      return value
+    } catch (error) {
+      ensureOpen()
+      throw error
+    }
+  }
+
   function changeMemory(scope: Scope, method: 'POST' | 'DELETE', body: Record<string, unknown> & { revision: Revision }): Promise<MemoryResult> {
     return queue<MemoryResult>('write', async (token) => {
-      const result = object(await transport.request(memoryPath(scope), method, body, token))
+      const result = object(await memoryRequest(scope, method, body, token))
       const current = revision(result.revision)
       if (result.ok === true) return { value: { ok: true, snapshot: parseMemory(result.snapshot), revision: current } }
       const code = string(result.code) as MemoryErrorCode
@@ -174,7 +189,7 @@ export function createLibrary(transport: Transport, queue: LibraryQueue) {
     workspaces: () => queue('read', async () => ({ value: array(object(await transport.request('/workspaces')).workspaces)
       .map((item): WorkspaceOption => { const w = object(item); return { id: opaqueId(w.id), name: string(w.name) } }) })),
     memory: (scope: Scope) => queue('read', async () => {
-      const result = object(await transport.request(memoryPath(scope)))
+      const result = object(await memoryRequest(scope, 'GET'))
       return { value: { snapshot: parseMemory(result.snapshot), revision: revision(result.revision) } }
     }),
     writeMemory: (scope: Scope, input: MemoryInput, revision: Revision, id?: string) =>

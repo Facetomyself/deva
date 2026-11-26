@@ -1,5 +1,6 @@
 # Optional: choose one dedicated directory whose direct children are approved projects.
-# This grants project selection for role profiles and scoped memory, not arbitrary host file I/O.
+# Owner-operated files, scoped notes, role defaults and optional conversation bindings only.
+# No automatic model file access, Git history grant, or command execution.
 services:
   workbench:
     environment:

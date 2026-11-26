@@ -5,6 +5,7 @@ import { openProfile } from './profile.mjs'
 import { openPersonas } from './personas.mjs'
 import { checkRoleBindings } from './role-bindings.mjs'
 import { openWorkspaceCatalog } from './workspace-catalog.mjs'
+import { workspaceBindingResolver } from './workspace-binding.mjs'
 import { gitGrants, gitProjectNames } from '../git/access.mjs'
 import { openWorkspaceFiles } from '../files/workspace-files.mjs'
 import { workspaceFileRoutes } from '../files/workspace-routes.mjs'
@@ -90,19 +91,18 @@ export async function openLibrary({ dataDir, workspaceRoot, workspaceWritable = 
     }
     return { ok: true, ...snapshotOf(memory, scope) }
   }
-  async function enabledRole(id) {
-    const role = await personas.get(id)
+  async function enabledRole(id, inheritWorkspace = false) {
+    const role = await personas.getForChat(id, inheritWorkspace)
     if (!role?.enabled) throw new HttpError(409, 'role_unavailable')
-    // Only these data fields are part of a conversation binding. A role's folder selection
-    // or an instruction in its Markdown never authorizes execution or external file reads.
-    return { id: role.id, name: role.name, prompt: role.prompt, model: role.model, enabled: true }
+    return role
   }
   return {
     workspaceFilesEnabled: Boolean(fileCommands),
     gitGrants: approvedGit,
     deliveryFiles: workspaceRoot ? openDeliveryFiles({ catalog }) : undefined,
     resolveRole: id => serial(() => enabledRole(id)),
-    withRoleForChat: (id, action) => serial(async () => action(await enabledRole(id))),
+    withWorkspace: workspaceBindingResolver(catalog),
+    withRoleForChat: (id, action) => serial(async () => action(await enabledRole(id, true))),
     async handle(req, res, { auth, policy }) {
       const path = (req.url ?? '').split('?', 1)[0]
       if (path.startsWith('/api/v1/workspaces/') && fileCommands) return fileCommands(req, res, { auth, policy })
