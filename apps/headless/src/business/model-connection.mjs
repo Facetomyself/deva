@@ -1,6 +1,7 @@
 import { createProviderCore } from '../../dist/provider-core.mjs'
 import { HttpError } from '../http/policy.mjs'
 import { providerFetch } from './provider-fetch.mjs'
+import { filterModelOutput } from './private-output.mjs'
 
 const trimBase = s => s.trim().replace(/\/+$/, '')
 const text = s => typeof s === 'string' && s.trim().length > 0
@@ -41,7 +42,7 @@ export async function connectProvider(settings, id, { version, allowedOrigins, s
     // from a browser. The chosen model is fixed here. Turn code consumes the desktop protocol.
     streamChat(req) {
       if (!modelId) throw new HttpError(422, 'no_selected_model')
-      return core.streamChat(cfg, { ...req, model: modelId })
+      return filterModelOutput(core.streamChat(cfg, { ...req, model: modelId }), [p.apiKey, ...Object.values(p.headers ?? {})])
     }
   })
 }
