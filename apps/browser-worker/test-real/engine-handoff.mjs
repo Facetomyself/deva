@@ -307,10 +307,12 @@ run().catch((error) => {
   const code = /^BROWSER_[A-Z_]+$/u.test(error?.code) ? error.code : 'FIXTURE_FAILURE';
   const sandbox = Object.entries(diagnostic?.sandbox ?? {}).map(([name, value]) => `${name}:${Number(value)}`).join(',');
   const entry = Object.entries(diagnostic?.entryNavigation ?? {}).map(([name, value]) => `${name}:${value}`).join(',');
+  const target = Object.entries(diagnostic?.target ?? {}).map(([name, value]) =>
+    `${name}:${typeof value === 'boolean' ? Number(value) : value}`).join(',');
   const fixture = Object.entries(fixtureTrace).map(([name, value]) => `${name}:${value}`).join(',');
   const labels = [`phase=${verificationPhase}`, diagnostic?.stage && `stage=${diagnostic.stage}`,
     diagnostic?.command && `command=${diagnostic.command}`, diagnostic?.launchHint && `launch=${diagnostic.launchHint}`,
-    sandbox && `sandbox=${sandbox}`, entry && `entry=${entry}`,
+    sandbox && `sandbox=${sandbox}`, entry && `entry=${entry}`, target && `target=${target}`,
     verificationPhase !== 'preflight' && `fixture=${fixture}`].filter(Boolean);
   console.error(`FAIL ${code} [${labels.join(' ')}]`);
   process.exitCode = 1;

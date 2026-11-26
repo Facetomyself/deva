@@ -1,4 +1,5 @@
 import { STATUS_CODES } from 'node:http';
+import { setTimeout as delay } from 'node:timers/promises';
 import { connectPipe } from './pipe.mjs';
 import {
   BOOTSTRAP_URL, ENTRY_EVENTS, PAGE_POLICIES, VIEWPORT, fail, keyParams, publicPageInfo, readFrame, validateInput,
@@ -6,22 +7,22 @@ import {
 
 const NAVIGATION_MS = 12_000;
 const PAGE_TARGETS = [{ type: 'page', exclude: false }, { exclude: true }];
-const AUTO_ATTACH = { autoAttach: true, waitForDebuggerOnStart: true, flatten: true };
-// Root auto-attach already owns all top-level pages, including new windows. Do not
-// also pause pages from the page-scoped observer during a renderer process swap.
-const SUBTARGETS = ['iframe', 'worker', 'shared_worker', 'service_worker']
+const DISCOVERED_TARGETS = ['page', 'iframe', 'worker', 'shared_worker', 'service_worker']
   .map((type) => ({ type, exclude: false })).concat({ exclude: true });
 const SHELL_REASONS = new Set(['BROWSER_CLOSED', 'BROWSER_DISCONNECTED']);
 const cloneFrame = (frame) => ({ ...frame, bytes: Buffer.from(frame.bytes) });
+const reportTypes = new Set(['page', 'iframe', 'worker', 'shared_worker', 'service_worker', 'tab', 'browser']);
+const reportType = (type) => type === undefined ? 'missing' : reportTypes.has(type) ? type : 'other';
+const reportUrl = (url) => url === undefined || url === '' ? 'empty' : url === BOOTSTRAP_URL ? 'blank' :
+  typeof url === 'string' && /^https?:\/\//iu.test(url) ? 'http' : 'other';
 
 // Internal controller, with the process/transport boundary explicit for deterministic tests.
 // The exported production facade has only the fixed methods returned at the bottom.
 export async function startChromiumSession({ writer, reader, policy, verifySandbox, shutdown, probeOnly = false,
   commandMs, handshakeMs, navigationMs = NAVIGATION_MS, signal, abortCode = () => 'BROWSER_ABORTED' }) {
-  let contextId, targetId, sessionId, frameId, startupBlankId;
-  let startupStage = 'version';
-  let opening = false;
-  const attached = new Map();
+  let contextId, targetId, sessionId, frameId, attachmentEvent;
+  let startupStage = 'version', postNavigation = false, targetLoss;
+  let targetSnapshot = {};
   let fatalCode = null, closing = null, busy = false, stopping = null, notice = null;
   let privateInput = false, frameEpoch = 0, stopEpoch = 0, navigationEpoch = 0;
   let latest = null, location = null;
@@ -42,7 +43,7 @@ export async function startChromiumSession({ writer, reader, policy, verifySandb
       throw fail(code);
     }
   }
-  function checkLive() { if (fatalCode || closing) throw fail(fatalCode ?? 'BROWSER_CLOSED'); }
+  function checkLive() { if (fatalCode || closing) throw fail(fatalCode ?? 'BROWSER_CLOSED', { target: targetLoss }); }
   function fatal(code) {
     if (fatalCode || closing) return;
     fatalCode = code;
@@ -108,9 +109,48 @@ export async function startChromiumSession({ writer, reader, policy, verifySandb
     });
   }
 
-  function dismissTarget(id) {
-    restrict('BROWSER_POPUP_UNSUPPORTED');
-    sendEventCommand('Target.closeTarget', { targetId: id }, null);
+  function contextRelation(target) {
+    const observed = target?.browserContextId;
+    if (observed === undefined || observed === null || observed === '') return 'omitted';
+    if (typeof observed !== 'string') return 'invalid';
+    if (!contextId) return 'unbound';
+    return observed === contextId ? 'same' : 'different';
+  }
+
+  function ownsTarget(target) {
+    if (!targetId || target?.type !== 'page' || target.targetId !== targetId || target.openerId) return false;
+    const relation = contextRelation(target);
+    return relation !== 'different' && relation !== 'invalid';
+  }
+
+  function bindReportedContext(target) {
+    if (!contextId && contextRelation(target) === 'unbound') contextId = target.browserContextId;
+  }
+
+  function saveTargetSnapshot(targetInfos) {
+    const first = Array.isArray(targetInfos) ? targetInfos[0] : undefined;
+    targetSnapshot = {
+      snapshotCount: Array.isArray(targetInfos) ? Math.min(targetInfos.length, 256) : 0,
+      snapshotType: reportType(first?.type), snapshotUrlKind: reportUrl(first?.url),
+      snapshotContext: typeof first?.browserContextId === 'string' && !!first.browserContextId,
+      snapshotAttached: !!first?.attached, snapshotOpener: !!first?.openerId,
+    };
+  }
+
+  function recordTargetLoss(event, target, id, observedSession, waiting = false) {
+    const knownSession = sessionId ?? attachmentEvent;
+    targetLoss ??= {
+      ...targetSnapshot, event, eventStage: startupStage ?? 'live', type: reportType(target?.type),
+      urlKind: reportUrl(target?.url), context: contextRelation(target), root: id === null,
+      sameTarget: !!targetId && target?.targetId === targetId,
+      sameSession: !!knownSession && observedSession === knownSession,
+      opener: !!target?.openerId, postNavigation, waiting: waiting === true,
+    };
+  }
+
+  function loseTarget(event, target, id = null, observedSession, waiting) {
+    recordTargetLoss(event, target, id, observedSession, waiting);
+    fatal('BROWSER_TARGET_LOST');
   }
 
   function trackNavigation(url, loaderId = null) {
@@ -161,24 +201,31 @@ export async function startChromiumSession({ writer, reader, policy, verifySandb
 
   function onEvent(method, p, id) {
     if (closing) return;
+    if (method === 'Target.targetCreated') {
+      bump('targetCreated');
+      const info = p.targetInfo;
+      const startupBlank = info?.url === BOOTSTRAP_URL || (!postNavigation && reportUrl(info?.url) === 'empty');
+      if (id !== null || !ownsTarget(info) || !startupBlank) return loseTarget('created', info, id);
+      bindReportedContext(info);
+      return;
+    }
+    if (method === 'Target.targetDestroyed' && targetId && p.targetId === targetId) {
+      return loseTarget('destroyed', { targetId: p.targetId }, id);
+    }
     if (method === 'Target.attachedToTarget') {
       bump('targetAttach');
-      const target = p.targetInfo;
-      if (!target || typeof target.targetId !== 'string' || typeof p.sessionId !== 'string') return fatal('BROWSER_PROTOCOL_INVALID');
-      if (id === null && startupBlankId && target.targetId === startupBlankId) {
-        if (target.type !== 'page' || target.url !== BOOTSTRAP_URL || target.openerId) fatal('BROWSER_TARGET_LOST');
-        return; // This exact pre-existing blank is never resumed or exposed.
+      if (id !== null || !ownsTarget(p.targetInfo) || p.waitingForDebugger || typeof p.sessionId !== 'string' ||
+          !p.sessionId || (sessionId && sessionId !== p.sessionId) || (attachmentEvent && attachmentEvent !== p.sessionId)) {
+        return loseTarget('attached', p.targetInfo, id, p.sessionId, p.waitingForDebugger);
       }
-      if (id === null && opening && target.type === 'page' && target.browserContextId === contextId) {
-        if (attached.size) return fatal('BROWSER_TARGET_LOST');
-        attached.set(target.targetId, p.sessionId);
-        notify();
-      } else if (target.targetId !== targetId) dismissTarget(target.targetId);
+      bindReportedContext(p.targetInfo);
+      attachmentEvent = p.sessionId;
       return;
     }
     if (method === 'Target.detachedFromTarget') {
       bump('targetDetach');
-      if (p.sessionId === sessionId) return fatal('BROWSER_TARGET_LOST');
+      const knownSession = sessionId ?? attachmentEvent;
+      if (knownSession && p.sessionId === knownSession) return loseTarget('detached', { targetId: p.targetId }, id, p.sessionId);
     }
     if (method === 'Browser.downloadWillBegin') return restrict('BROWSER_DOWNLOAD_UNSUPPORTED');
     if (!sessionId || id !== sessionId) {
@@ -192,7 +239,9 @@ export async function startChromiumSession({ writer, reader, policy, verifySandb
           bump('mainFrameNavigated');
           const { url, urlFragment, loaderId } = p.frame;
           trackNavigation(urlFragment && !url.includes('#') ? `${url}${urlFragment}` : url, loaderId);
-        } else if (p.frame && !p.frame.parentId && frameId) fatal('BROWSER_TARGET_LOST');
+        } else if (p.frame && !p.frame.parentId && frameId) {
+          loseTarget('main-frame', { targetId, type: 'page', url: p.frame.url }, id, id);
+        }
         break;
       case 'Page.navigatedWithinDocument':
         if (p.frameId === frameId) {
@@ -220,7 +269,7 @@ export async function startChromiumSession({ writer, reader, policy, verifySandb
         sendEventCommand('Page.handleJavaScriptDialog', { accept: false });
         restrict('BROWSER_DIALOG_UNSUPPORTED');
         break;
-      case 'Inspector.targetCrashed': fatal('BROWSER_TARGET_LOST'); break;
+      case 'Inspector.targetCrashed': loseTarget('crashed', { targetId, type: 'page' }, id, id); break;
       default: break;
     }
   }
@@ -255,6 +304,7 @@ export async function startChromiumSession({ writer, reader, policy, verifySandb
       const destination = policy.entry(url);
       const last = navigationEpoch, stopped = stopEpoch;
       invalidate();
+      postNavigation = true;
       bump('navigateSent');
       const result = await page('Page.navigate', { url: destination });
       bump('navigateAck');
@@ -281,10 +331,11 @@ export async function startChromiumSession({ writer, reader, policy, verifySandb
     return run(async () => {
       if (privateInput) return { origin: location ? policy.origin : null, title: '' };
       const { targetInfo } = await root('Target.getTargetInfo', { targetId });
-      if (targetInfo?.targetId !== targetId || targetInfo?.browserContextId !== contextId) {
-        fatal('BROWSER_TARGET_LOST');
-        throw fail('BROWSER_TARGET_LOST');
+      if (!ownsTarget(targetInfo)) {
+        loseTarget('get-info', targetInfo);
+        checkLive();
       }
+      bindReportedContext(targetInfo);
       if (!policy.permits(targetInfo.url)) return { origin: null, title: '' };
       // The last frame event and Target.getTargetInfo may briefly disagree during navigation.
       if (targetInfo.url.split('#', 1)[0] !== location?.url.split('#', 1)[0]) {
@@ -353,44 +404,43 @@ export async function startChromiumSession({ writer, reader, policy, verifySandb
     const version = await pipe.send('Browser.getVersion', {}, null, handshakeMs);
     if (!/^(?:Chromium|Chrome|HeadlessChrome)\/[\d.]+$/u.test(version.product ?? '')) throw fail('BROWSER_START_FAILED');
     startupStage = 'discover-bootstrap';
-    const { targetInfos } = await root('Target.getTargets', { filter: PAGE_TARGETS });
-    if (!Array.isArray(targetInfos) || targetInfos.length > 1) throw fail('BROWSER_TARGET_LOST');
-    if (targetInfos.length === 1) {
-      const [initial] = targetInfos;
-      if (initial?.type !== 'page' || initial.url !== BOOTSTRAP_URL || initial.openerId || initial.attached ||
-          typeof initial.targetId !== 'string' || !initial.targetId) throw fail('BROWSER_TARGET_LOST');
-      startupBlankId = initial.targetId;
+    let initial;
+    for (let attempt = 0; attempt < 8; attempt++) {
+      const { targetInfos } = await root('Target.getTargets', { filter: PAGE_TARGETS });
+      saveTargetSnapshot(targetInfos);
+      if (!Array.isArray(targetInfos) || targetInfos.length > 1) {
+        recordTargetLoss('snapshot', targetInfos?.[0], null);
+        throw fail('BROWSER_TARGET_LOST');
+      }
+      [initial] = targetInfos;
+      if (initial && initial.url !== '') break;
+      if (attempt < 7) await delay(40, undefined, { signal });
     }
-    startupStage = 'context';
-    const context = await root('Target.createBrowserContext', { disposeOnDetach: true });
-    if (typeof context.browserContextId !== 'string') throw fail('BROWSER_START_FAILED');
-    contextId = context.browserContextId;
+    if (initial?.type !== 'page' || initial.url !== BOOTSTRAP_URL || initial.openerId || initial.attached ||
+        typeof initial.targetId !== 'string' || !initial.targetId || contextRelation(initial) === 'invalid') {
+      recordTargetLoss('snapshot', initial, null);
+      throw fail('BROWSER_TARGET_LOST');
+    }
+    targetId = initial.targetId;
+    bindReportedContext(initial);
+    startupStage = 'watch-targets';
+    // The process owns a single private default profile. Watch for unexpected targets,
+    // but never put a renderer or a provisional cross-process navigation into debugger wait.
+    await root('Target.setDiscoverTargets', { discover: true, filter: DISCOVERED_TARGETS });
+    checkLive();
     startupStage = 'download-guard';
-    await root('Browser.setDownloadBehavior', { behavior: 'deny', browserContextId: contextId, eventsEnabled: true });
-    startupStage = 'root-auto-attach';
-    await root('Target.setAutoAttach', { ...AUTO_ATTACH, filter: PAGE_TARGETS });
-    opening = true;
-    startupStage = 'create-target';
-    const created = await root('Target.createTarget', { url: BOOTSTRAP_URL, browserContextId: contextId });
-    if (typeof created.targetId !== 'string') throw fail('BROWSER_START_FAILED');
-    targetId = created.targetId;
-    startupStage = 'wait-target';
-    sessionId = await awaitState(() => attached.get(targetId));
-    attached.clear();
-    opening = false;
-    // Chrome can defer renderer-dependent replies while its new target waits for a debugger.
-    // Resume only the fixed internal blank page, before sending Page/Network/Emulation commands.
-    // Its download guard is already active and no site is navigated until all guards and attestation pass.
-    startupStage = 'resume-bootstrap';
-    await page('Runtime.runIfWaitingForDebugger');
-    if (startupBlankId) {
-      startupStage = 'close-startup-blank';
-      const { success } = await root('Target.closeTarget', { targetId: startupBlankId });
-      if (success !== true) throw fail('BROWSER_TARGET_LOST');
-      startupBlankId = undefined;
+    await root('Browser.setDownloadBehavior', { behavior: 'deny', eventsEnabled: true });
+    checkLive();
+    startupStage = 'attach-bootstrap';
+    const attached = await root('Target.attachToTarget', { targetId, flatten: true });
+    checkLive();
+    if (typeof attached.sessionId !== 'string' || !attached.sessionId ||
+        (attachmentEvent && attachmentEvent !== attached.sessionId)) {
+      recordTargetLoss('attach-result', initial, null, attached.sessionId);
+      throw fail('BROWSER_TARGET_LOST');
     }
+    sessionId = attached.sessionId;
     startupStage = 'page-controls';
-    await page('Target.setAutoAttach', { ...AUTO_ATTACH, filter: SUBTARGETS });
     await page('Page.enable');
     await page('Page.setLifecycleEventsEnabled', { enabled: true });
     await page('Page.setInterceptFileChooserDialog', { enabled: true });
@@ -411,6 +461,8 @@ export async function startChromiumSession({ writer, reader, policy, verifySandb
     startupStage = 'sandbox-attest';
     await verifySandbox(() => root('SystemInfo.getProcessInfo'));
     if (!probeOnly) {
+      startupStage = 'activate-bootstrap';
+      await root('Target.activateTarget', { targetId });
       startupStage = 'entry-navigation';
       await navigate(policy.startUrl);
     }
@@ -426,7 +478,7 @@ export async function startChromiumSession({ writer, reader, policy, verifySandb
   } catch (error) {
     await close();
     const code = signal?.aborted ? abortCode() : error?.code;
-    const diagnostic = { ...error?.diagnostic, stage: startupStage,
+    const diagnostic = { ...error?.diagnostic, stage: targetLoss?.eventStage ?? startupStage, target: targetLoss,
       ...(startupStage === 'entry-navigation' ? { entryNavigation: entryTrace } : {}) };
     if (!SHELL_REASONS.has(code) && code !== 'BROWSER_COMMAND_FAILED' && code?.startsWith('BROWSER_')) throw fail(code, diagnostic);
     throw fail('BROWSER_START_FAILED', diagnostic);
