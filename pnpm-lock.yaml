@@ -8,6 +8,8 @@ importers:
 
   .: {}
 
+  apps/browser-worker: {}
+
   apps/desktop:
     dependencies:
       '@electron-toolkit/utils':
