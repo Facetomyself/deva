@@ -60,8 +60,17 @@ async function inspectRuntime() {
   const socket = await lstat('/run/deva/workbench-control.sock')
   const clipboardPaths = await Promise.all(['/tmp/.X11-unix', '/run/user/1000', '/run/dbus/system_bus_socket'].map(path =>
     lstat(path).then(() => false, error => error.code === 'ENOENT')))
+  // Vite emits the actual HTML startup chunk under assets/. workbench.js is a separate
+  // embeddable entry point; verify both rather than assuming the HTML loads that library.
+  const html = await readFile('/opt/deva/web/index.html','utf8')
+  const manifest = JSON.parse(await readFile('/opt/deva/web/manifest.json','utf8'))
+  const files = new Set(Object.values(manifest).map(item => item.file))
+  const scripts = [...html.matchAll(/<script\b[^>]*\bsrc="\.\/(assets\/[\w.-]+\.js)"[^>]*><\/script>/g)].map(match=>match[1])
+  if (!scripts.length || scripts.length>6 || new Set(scripts).size!==scripts.length || scripts.some(file=>!files.has(file)) ||
+      !scripts.some(file=>/^assets\/index-[\w-]+\.js$/.test(file))) throw Error('unexpected built HTML entries')
+  const htmlScripts = await Promise.all(scripts.map(async file=>({file,sha:await digest('/opt/deva/web/'+file)})))
   return {
-    platform: process.platform,
+    htmlScripts, platform: process.platform,
     arch: process.arch,
     node: Number(process.versions.node.split('.')[0]),
     production: process.env.NODE_ENV === 'production',

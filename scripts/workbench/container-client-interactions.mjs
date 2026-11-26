@@ -44,13 +44,18 @@ async function verifyServedBundle(port, files) {
   const [html, js, unexpectedHost] = await Promise.all([
     http(port, '/'), http(port, '/workbench.js'), http(port, '/', { headers: { host: 'wrong.invalid' } })
   ])
-  check(html.status === 200 && js.status === 200 && unexpectedHost.status === 403 &&
-    /^text\/html\b/.test(html.headers['content-type']) && /^text\/javascript\b/.test(js.headers['content-type']) &&
-    html.headers['content-security-policy']?.includes("script-src 'self'") &&
-    html.headers['permissions-policy'] === 'clipboard-read=(), clipboard-write=(self), fullscreen=(self)' &&
-    /<script[^>]+src=["'](?:\/|\.\/)?workbench\.js["']/u.test(html.body.toString('utf8')) &&
-    digest(html.body) === files.html && digest(js.body) === files.js,
-  'Loopback CLI did not serve the exact embedded production HTML and JavaScript with the configured origin')
+  check(html.status===200 && js.status===200 && unexpectedHost.status===403,'CLI must serve only the exact loopback Host')
+  check(/^text\/html\b/.test(html.headers['content-type']) && /^text\/javascript\b/.test(js.headers['content-type']),'Incorrect MIME of packaged HTML or API entry')
+  check(html.headers['content-security-policy']?.includes("script-src 'self'") &&
+    html.headers['permissions-policy'] === 'clipboard-read=(), clipboard-write=(self), fullscreen=(self)', 'Missing immutable page clipboard/fullscreen policy')
+  check(digest(html.body)===files.html && digest(js.body)===files.js,'HTML or public entry differs from the actual image bytes')
+  const names = [...html.body.toString('utf8').matchAll(/<script\b[^>]*\bsrc="\.\/(assets\/[\w.-]+\.js)"[^>]*><\/script>/g)].map(match=>match[1])
+  check(names.length>0 && names.length<=6 && Array.isArray(files.htmlScripts) && names.length===files.htmlScripts.length,'Missing packaged browser startup scripts')
+  for (const [i,name] of names.entries()) {
+    check(files.htmlScripts[i]?.file===name && /^[0-9a-f]{64}$/.test(files.htmlScripts[i].sha),'HTML entry does not match the Vite manifest')
+    const asset=await http(port,'/'+name)
+    check(asset.status===200 && /^text\/javascript\b/.test(asset.headers['content-type']) && digest(asset.body)===files.htmlScripts[i].sha,'Actual browser JS differs from the static image bytes')
+  }
 }
 
 async function claimVerifyAndLogout(docker, port, origin, password) {
