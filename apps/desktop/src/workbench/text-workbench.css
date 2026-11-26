@@ -14,6 +14,11 @@
 .wb-chat .wb-chat__logout { margin-top: auto; }
 .wb-chat .cf-modal__body .wb-settings { user-select: text; }
 .wb-chat .wb-error { margin: 8px; }
+.wb-chat .wb-attachment__issues { margin: 0 12px; padding: 6px 10px; border: 1px solid var(--border); border-radius: 6px; font-size: 12px; overflow-wrap: anywhere; }
+.wb-chat .wb-attachment__issues p { margin: 2px 0; }
+.wb-chat .wb-attachment__draft-status { display: flex; gap: 8px; justify-content: space-between; padding: 0 10px; font-size: 12px; overflow-wrap: anywhere; }
+.wb-chat .wb-attachment__hint { margin: 4px 0 0; padding-inline: 10px; font-size: 12px; color: var(--fg-muted); }
+.wb-chat .wb-attachment__preview-failed { text-align: center; font-size: 10px; padding: 2px; color: var(--fg-muted); }
 @media (max-width: 700px) {
   .wb-chat .cf-modal__body { overflow: auto; }
   .wb-chat .cf-box__bar .cf-wschip:disabled { font-size: 0; }

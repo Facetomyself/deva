@@ -14,7 +14,7 @@ export interface Bootstrap {
   config: RecordValue
   csrf: string
   expiresAt: number
-  capabilities?: { textChat?: true; library?: true; workspaceFiles?: true }
+  capabilities?: { textChat?: true; library?: true; workspaceFiles?: true; attachments?: true }
 }
 
 export type SessionScreen = { mode: 'authenticated'; bootstrap: Bootstrap } | { mode: 'claim' | 'login' }
@@ -62,13 +62,9 @@ export function captureClaim(location: Pick<Location, 'hash' | 'pathname' | 'sea
 }
 
 export function createTransport(send: Fetch = fetch) {
-  async function request(path: string, method = 'GET', body?: unknown, csrf?: string): Promise<unknown> {
-    const headers: Record<string, string> = { accept: 'application/json' }
-    if (body !== undefined) headers['content-type'] = 'application/json'
-    if (csrf) headers[csrfHeader] = csrf
+  async function fetchJson(path: string, init: RequestInit): Promise<unknown> {
     const response = await send(prefix + path, {
-      method, headers, body: body === undefined ? undefined : JSON.stringify(body),
-      credentials: 'same-origin', mode: 'same-origin', redirect: 'error',
+      ...init, credentials: 'same-origin', mode: 'same-origin', redirect: 'error',
       cache: 'no-store', referrerPolicy: 'no-referrer'
     })
     if (!response.ok) {
@@ -76,7 +72,24 @@ export function createTransport(send: Fetch = fetch) {
       const code = record(failure) ? failure.error ?? failure.code : undefined
       throw new HttpFailure(response.status, typeof code === 'string' ? code : undefined)
     }
-    return response.json()
+    return response.status === 204 ? undefined : response.json()
+  }
+
+  function request(path: string, method = 'GET', body?: unknown, csrf?: string): Promise<unknown> {
+    const headers: Record<string, string> = { accept: 'application/json' }
+    if (body !== undefined) headers['content-type'] = 'application/json'
+    if (csrf) headers[csrfHeader] = csrf
+    return fetchJson(path, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) })
+  }
+
+  async function uploadAttachment(sid: string, body: Blob, encodedName: string, mime: string, csrf: string): Promise<unknown> {
+    if (typeof sid !== 'string' || /^[A-Za-z0-9_-]{1,128}$/u.exec(sid)?.[0] !== sid || !(body instanceof Blob) || !csrf ||
+        /^[A-Za-z0-9_-]{1,340}$/u.exec(encodedName)?.[0] !== encodedName || /^[a-z0-9!#$&^_.+-]+\/[a-z0-9!#$&^_.+-]+$/u.exec(mime)?.[0] !== mime)
+      throw new Error('Invalid attachment upload')
+    return fetchJson(`/chats/${sid}/attachments`, { method: 'POST', body, headers: {
+      accept: 'application/json', 'content-type': 'application/octet-stream', [csrfHeader]: csrf,
+      'x-deva-file-name': encodedName, 'x-deva-file-type': mime
+    } })
   }
 
   async function bootstrap(): Promise<Bootstrap> {
@@ -91,12 +104,13 @@ export function createTransport(send: Fetch = fetch) {
       if (result.capabilities.textChat === true) capabilities.textChat = true
       if (result.capabilities.library === true) capabilities.library = true
       if (result.capabilities.workspaceFiles === true) capabilities.workspaceFiles = true
+      if (result.capabilities.attachments === true) capabilities.attachments = true
     }
     return { protocol, version, platform, config, csrf, expiresAt, ...(Object.keys(capabilities).length ? { capabilities } : {}) }
   }
 
   return {
-    request,
+    request, uploadAttachment,
     async inspect(): Promise<SessionScreen> {
       try {
         return { mode: 'authenticated', bootstrap: await bootstrap() }

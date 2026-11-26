@@ -6,6 +6,18 @@ import { basename, dirname, extname, join, resolve } from 'path'
 import type { ContentPart } from '../providers/types'
 import { trustRoot } from './fs-guard'
 import { sniffImageMime, thumbnailDataUrl } from './image-read'
+import {
+  classifyAttachmentExtension as classify,
+  IMAGE_MIME,
+  imageAttachmentPart,
+  MAX_IMAGE,
+  MAX_PDF,
+  MAX_TEXT,
+  pdfAttachmentPart,
+  textAttachmentPart
+} from './attachment-parts-core'
+
+export { ATTACH_TEXT_PREFIX, ATTACHMENTS_ONLY_QUESTION } from './attachment-parts-core'
 
 /**
  * 附加文件服务（主进程）。
@@ -30,17 +42,11 @@ export interface PickedAttachment {
   reason?: string
 }
 
-/** 文本类附件注入模型时的前缀标记（供历史重建识别为「附件」而非提问正文）。 */
-export const ATTACH_TEXT_PREFIX = '[附件文件] '
-
 /** 文件夹附件注入模型时的前缀标记：其后是绝对路径（首行），供历史重建识别为「文件夹」。 */
 export const ATTACH_FOLDER_PREFIX = '[附件文件夹] '
 
 /** 只给位置的文件附件注入模型时的前缀标记：其后是绝对路径（首行），供历史重建识别为「文件」。 */
 export const ATTACH_PATH_PREFIX = '[附件文件路径] '
-
-/** 只发了附件、没写字时代填的提问正文（模型需要一句话；手机端不把它当用户的话显示）。 */
-export const ATTACHMENTS_ONLY_QUESTION = '请理解并处理上述附件。'
 
 /** 拖入 / 粘贴的条目里认出的文件夹。 */
 export interface DroppedFolder {
@@ -50,36 +56,6 @@ export interface DroppedFolder {
 
 /** 拖入 / 粘贴的一项：文件夹，或带真实路径的文件（已按选择框同样的规则判定并授权）。 */
 export type DroppedEntry = { folder: DroppedFolder } | { file: PickedAttachment }
-
-const IMAGE_MIME: Record<string, string> = {
-  '.png': 'image/png',
-  '.jpg': 'image/jpeg',
-  '.jpeg': 'image/jpeg',
-  '.gif': 'image/gif',
-  '.webp': 'image/webp'
-}
-
-// 可作为纯文本注入的扩展名（代码 / 配置 / 文档源）。
-const TEXT_EXT = new Set([
-  '.txt', '.md', '.markdown', '.json', '.jsonc', '.yaml', '.yml', '.toml', '.ini', '.csv', '.tsv', '.log',
-  '.js', '.jsx', '.ts', '.tsx', '.mjs', '.cjs', '.vue', '.svelte',
-  '.html', '.htm', '.css', '.scss', '.less', '.xml', '.svg',
-  '.py', '.rb', '.go', '.rs', '.java', '.kt', '.kts', '.c', '.h', '.cpp', '.hpp', '.cc', '.cs', '.php',
-  '.swift', '.m', '.mm', '.sh', '.bash', '.zsh', '.ps1', '.bat', '.sql', '.gradle', '.properties',
-  '.env', '.r', '.dart', '.lua', '.pl', '.dockerfile', '.makefile', '.cmake'
-])
-
-const MAX_IMAGE = 5 * 1024 * 1024 // 5MB
-const MAX_PDF = 20 * 1024 * 1024 // 20MB（Anthropic 上限约 32MB，留余量）
-const MAX_TEXT = 512 * 1024 // 512KB（避免文本注入撑爆上下文）
-
-function classify(ext: string): AttachmentKind {
-  const e = ext.toLowerCase()
-  if (e in IMAGE_MIME) return 'image'
-  if (e === '.pdf') return 'document'
-  if (TEXT_EXT.has(e)) return 'text'
-  return 'unsupported'
-}
 
 // 本会话内被用户明确选中且合规的绝对路径白名单。
 const allowed = new Set<string>()
@@ -317,14 +293,7 @@ export async function buildAttachmentPart(
     if (kind === 'image') {
       const buf = await fs.readFile(abs)
       if (buf.length > MAX_IMAGE) return { note: `图片过大已忽略：${name}` }
-      return {
-        part: {
-          type: 'image',
-          mediaType: IMAGE_MIME[extname(abs).toLowerCase()],
-          data: buf.toString('base64'),
-          name
-        }
-      }
+      return { part: imageAttachmentPart(name, IMAGE_MIME[extname(abs).toLowerCase()], buf) }
     }
     if (kind === 'document') {
       // 仅 OpenAI Chat Completions 无 PDF 通道；Anthropic 与 OpenAI Responses 均可原生读取。
@@ -332,16 +301,12 @@ export async function buildAttachmentPart(
         return { note: `PDF「${name}」需使用 Anthropic 或 OpenAI Responses 协议的模型才能读取，本次已跳过` }
       const buf = await fs.readFile(abs)
       if (buf.length > MAX_PDF) return { note: `PDF 过大已忽略：${name}` }
-      return {
-        part: { type: 'document', mediaType: 'application/pdf', data: buf.toString('base64'), name }
-      }
+      return { part: pdfAttachmentPart(name, buf) }
     }
     if (kind === 'text') {
       const buf = await fs.readFile(abs)
       if (buf.length > MAX_TEXT) return { note: `文本过大已忽略：${name}` }
-      return {
-        part: { type: 'text', text: `${ATTACH_TEXT_PREFIX}${name}\n\`\`\`\n${buf.toString('utf8')}\n\`\`\`` }
-      }
+      return { part: textAttachmentPart(name, buf.toString('utf8')) }
     }
     return { note: `已忽略不支持的文件：${name}` }
   } catch {

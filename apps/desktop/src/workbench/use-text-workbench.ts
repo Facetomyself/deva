@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { attachmentTurnIssue, createAttachmentDrafts, readyAttachmentIds, type BrowserFiles } from './attachment-drafts'
 import { createChatStream, type ChatProjection } from './chat-stream'
-import type { ChatSummary, ChatTransport, TurnRequest } from './chat-transport'
+import { sameTurnDraft, type ChatSummary, type ChatTransport, type TurnRequest } from './chat-transport'
 import { HttpFailure } from './transport'
 
 type ListIssue = 'listFailure' | 'createFailure'
@@ -16,7 +17,7 @@ function remember(id: string | null): void {
   } catch { /* storage availability does not affect selection in the current page */ }
 }
 
-export function useTextWorkbench(api: ChatTransport, beforeWrite: () => Promise<void>, onExpired: () => void) {
+export function useTextWorkbench(api: ChatTransport, beforeWrite: () => Promise<void>, onExpired: () => void, uploadsEnabled: boolean) {
   const [sessions, setSessions] = useState<ChatSummary[]>([])
   const [selected, setSelected] = useState<string | null>(null)
   const selectedRef = useRef<string | null>(null)
@@ -33,6 +34,8 @@ export function useTextWorkbench(api: ChatTransport, beforeWrite: () => Promise<
   const drafts = useRef(new Map<string, string>()).current
   const retrySend = useRef(new Map<string, TurnRequest>()).current
   const [turnIssues, setTurnIssues] = useState<Record<string, TurnIssue | undefined>>({})
+  const attachments = useMemo(() => uploadsEnabled ? createAttachmentDrafts(api, onExpired, beforeWrite) : undefined,
+    [uploadsEnabled, api, beforeWrite, onExpired])
 
   const select = useCallback((id: string | null) => {
     if (selectedRef.current === id) return
@@ -124,16 +127,29 @@ export function useTextWorkbench(api: ChatTransport, beforeWrite: () => Promise<
     operations.current.delete(sid)
     setPending(Object.fromEntries(operations.current))
   }
+  function addAttachments(sid: string, files: BrowserFiles, locked: boolean): void {
+    if (!attachments || selectedRef.current !== sid || (!files.files.length && !files.issues.length)) return
+    const projection = current(sid)?.current()
+    if (locked || projection?.status !== 'ready' || !projection.snapshot?.state.writable || projection.snapshot.state.active || operations.current.has(sid)) {
+      attachments.warn(sid, { code: 'unavailable' })
+      return
+    }
+    attachments.add(sid, files)
+  }
   async function send(sid: string, text: string, model: string): Promise<boolean> {
     const projection = current(sid)?.current()
-    if (projection?.status !== 'ready' || !projection.snapshot?.state.writable || projection.snapshot.state.active || !begin(sid, 'send')) return false
+    if (projection?.status !== 'ready' || !projection.snapshot?.state.writable || projection.snapshot.state.active) return false
+    const ids = attachments ? readyAttachmentIds(attachments.get(sid)) : []
+    if (!ids || (!text && !ids.length) || !begin(sid, 'send')) return false
     const previous = retrySend.get(sid)
-    const request = previous?.text === text && previous.model === model ? previous : { clientRequestId: crypto.randomUUID(), text, model }
+    const draft = { text, model, ...(ids.length ? { attachments: ids } : {}) }
+    const request = previous && sameTurnDraft(previous, draft) ? previous : { clientRequestId: crypto.randomUUID(), ...draft }
     try {
       await beforeWrite()
       retrySend.set(sid, request)
       const ack = await api.send(sid, request)
       retrySend.delete(sid)
+      if (ids.length) attachments?.committed(sid, ids)
       if (drafts.get(sid)?.trim() === text) drafts.delete(sid)
       const stream = current(sid)
       const state = stream?.current().snapshot?.state
@@ -145,7 +161,9 @@ export function useTextWorkbench(api: ChatTransport, beforeWrite: () => Promise<
         const code = e instanceof HttpFailure ? e.code : undefined
         const issue = code === 'role_unavailable' ? 'roleUnavailable' : code === 'turn_in_progress' ? 'busy' : ['provider_not_found', 'not_chat_provider', 'model_not_enabled', 'chat_model_unavailable'].includes(code ?? '') ? 'modelFailure' : 'turnFailure'
         if (e instanceof HttpFailure && e.status < 500 && e.status !== 408) retrySend.delete(sid)
-        setTurnIssues((issues) => ({ ...issues, [sid]: issue }))
+        const uploadIssue = ids.length ? attachmentTurnIssue(e) : undefined
+        if (uploadIssue) attachments?.reportTurn(sid, ids, uploadIssue)
+        else setTurnIssues((issues) => ({ ...issues, [sid]: issue }))
         const stream = current(sid)
         if (stream?.current().status === 'ready') void stream.refresh()
       }
@@ -166,6 +184,6 @@ export function useTextWorkbench(api: ChatTransport, beforeWrite: () => Promise<
     }
   }
   return { sessions, selected, select, projection: view?.sid === selected ? view?.projection : undefined, listIssue, listLoading,
-    refreshList, create, createPending, pending: selected ? pending[selected] : undefined, drafts, send, stop,
+    refreshList, create, createPending, pending: selected ? pending[selected] : undefined, drafts, attachments, addAttachments, send, stop,
     turnIssue: selected ? turnIssues[selected] : undefined }
 }

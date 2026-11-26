@@ -1,4 +1,4 @@
-import { ChevronDown, FolderPlus, Square } from 'lucide-react'
+import { ChevronDown, FolderPlus, Paperclip, Square } from 'lucide-react'
 import type { ComposerEditor } from './composer-editor'
 import { useI18n } from '../i18n/i18n'
 
@@ -16,6 +16,13 @@ export function ComposerDraftInput({ editor, height, placeholder, onFocus, onBlu
       onFocus={onFocus} onBlur={onBlur} />
     {editor.empty && <div className="cf-draft__ph">{placeholder}</div>}
   </div>
+}
+
+export function ComposerAttachmentButton({ onClick, disabled, testId }: { onClick: () => void; disabled?: boolean; testId?: string }): React.JSX.Element {
+  const { t } = useI18n()
+  const label = t('cf.attach')
+  return <button className="cf-iconbtn" type="button" title={label} aria-label={label} disabled={disabled}
+    onClick={onClick} data-testid={testId}><Paperclip size={16} aria-hidden="true" /></button>
 }
 
 export function ComposerWorkspaceButton({ label, title, onClick, testId }: {

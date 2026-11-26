@@ -5,8 +5,8 @@ export function ChatSurface({ className, ...props }: ComponentPropsWithoutRef<'d
   return <div className={`cf-shell${className ? ` ${className}` : ''}`} {...props} />
 }
 
-export function ConversationSurface({ children }: { children: ReactNode }): React.JSX.Element {
-  return <main className="cf-conv">{children}</main>
+export function ConversationSurface({ className, ...props }: ComponentPropsWithoutRef<'main'>): React.JSX.Element {
+  return <main className={`cf-conv${className ? ` ${className}` : ''}`} {...props} />
 }
 
 export function ConversationHeader({ children }: { children: ReactNode }): React.JSX.Element {

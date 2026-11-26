@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import { Paperclip, Plus, Search } from 'lucide-react'
+import { Plus, Search } from 'lucide-react'
 import { useI18n } from '../renderer/src/i18n/i18n'
 import { findActive, useModels } from '../renderer/src/store/models'
 import { ChatSurface, ConversationHeader, ConversationScroller, ConversationSurface } from '../renderer/src/redesign/ChatSurface'
@@ -10,6 +10,8 @@ import { ComposerDraftInput, ComposerJump, ComposerSendButton, ComposerWorkspace
 import { useComposerEditor } from '../renderer/src/redesign/composer-editor'
 import { modelGroups, ModelSelectButton } from '../renderer/src/redesign/ModelMenu'
 import { clampComposer, clampSidebar, COMPOSER_DEFAULT, ICONRAIL_W, ResizeHandle, SIDEBAR_DEFAULT, useViewport } from '../renderer/src/redesign/resizable'
+import { browserFiles, readyAttachmentIds, type AttachmentDraft, type BrowserFiles } from './attachment-drafts'
+import { attachmentCard, AttachmentDraftCards, AttachmentHint, AttachmentIssues, AttachmentPicker, useAttachmentDrafts } from './attachment-ui'
 import { chatCopy, turnLabel, type ChatCopy } from './chat-copy'
 import { createChatTransport, inputBytes, MAX_TEXT_INPUT, type ChatState } from './chat-transport'
 import { createLibrary, type Roster } from './library-transport'
@@ -34,7 +36,7 @@ export default function TextWorkbench({ transport, bootstrap, beforeWrite, onExp
   const { t, locale } = useI18n()
   const c = chatCopy(locale)
   const api = useMemo(() => createChatTransport(transport, bootstrap.csrf), [transport, bootstrap.csrf])
-  const wk = useTextWorkbench(api, beforeWrite, onExpired)
+  const wk = useTextWorkbench(api, beforeWrite, onExpired, bootstrap.capabilities?.attachments === true)
   const supported = bootstrap.capabilities?.library === true
   const library = useMemo(() => supported ? createLibrary(transport, libraryQueue) : undefined, [supported, transport, libraryQueue])
   const [panel, setPanel] = useState<LibraryPanel>()
@@ -69,7 +71,14 @@ export default function TextWorkbench({ transport, bootstrap, beforeWrite, onExp
     return { id: id ?? 'general', name: role?.name ?? id ?? t('cf.assistant'), desc: role?.description ?? '', avatar: role?.avatar ?? '' }
   }
   const personaId = state?.personaId ?? selectedEntry?.personaId
-  const scope = library ? c.libraryScope : c.scope
+  const scope = wk.attachments ? (locale === 'zh-CN' ? '文本对话与手动上传附件' : 'Text chat with manual attachment uploads') : library ? c.libraryScope : c.scope
+  const sid = wk.selected
+  const dropFiles = wk.attachments && sid ? (event: React.DragEvent<HTMLElement>): void => {
+    if (!event.dataTransfer.types.includes('Files') || !event.currentTarget.contains(event.target as Node)) return
+    event.preventDefault()
+    event.stopPropagation()
+    wk.addAttachments(sid, browserFiles(event.dataTransfer), locked)
+  } : undefined
   useEffect(() => {
     const preventFileDrop = (e: DragEvent): void => { if (e.dataTransfer?.types.includes('Files')) e.preventDefault() }
     window.addEventListener('dragover', preventFileDrop)
@@ -113,7 +122,12 @@ export default function TextWorkbench({ transport, bootstrap, beforeWrite, onExp
           </div>
         </>}
       </aside>
-      <ConversationSurface>
+      <ConversationSurface data-testid={dropFiles ? 'workbench-attachment-drop' : undefined} onDrop={dropFiles}
+        onDragOver={dropFiles ? (event) => {
+          if (!event.dataTransfer.types.includes('Files') || !event.currentTarget.contains(event.target as Node)) return
+          event.preventDefault()
+          event.dataTransfer.dropEffect = !locked && wk.projection?.status === 'ready' && state?.writable && !state.active && !wk.pending ? 'copy' : 'none'
+        } : undefined}>
         <ConversationHeader>
           <span className="cf-idbtn__name wb-chat__title">{state?.title || selectedEntry?.title || (wk.selected ? t('chat.untitled') : t('cf.tabChats'))}</span>
           {personaId && <span className="wb-chat__persona" data-testid="workbench-chat-persona"><Avatar persona={appearance(personaId)} size={22} plain />{appearance(personaId).name}</span>}
@@ -157,6 +171,10 @@ function TextThread({ sid, wk, c, locked, preferred, onPick, openSettings, openF
   const active = state?.active
   const last = state?.lastTurn
   const messages = state?.messages ?? EMPTY
+  const uploads = wk.attachments
+  const attachmentDraft = useAttachmentDrafts(uploads, sid)
+  const add = uploads ? (files: BrowserFiles) => wk.addAttachments(sid, files, locked) : undefined
+  const remove = uploads && !locked && !wk.pending ? (key: string) => void uploads.remove(sid, key) : undefined
   const [windowSize, setWindowSize] = useState(PAGE)
   const scroll = useRef<HTMLDivElement>(null)
   const following = useRef(true)
@@ -174,7 +192,7 @@ function TextThread({ sid, wk, c, locked, preferred, onPick, openSettings, openF
       scroll.current.scrollTop = scroll.current.scrollHeight - anchor.current
       anchor.current = undefined
     } else if (following.current) jump()
-  }, [messages, active, windowSize])
+  }, [messages, active, windowSize, attachmentDraft])
   const older = (): void => {
     const el = scroll.current
     if (el) anchor.current = el.scrollHeight - el.scrollTop
@@ -182,6 +200,9 @@ function TextThread({ sid, wk, c, locked, preferred, onPick, openSettings, openF
     setWindowSize((n) => n + PAGE)
   }
   const start = Math.max(0, messages.length - windowSize)
+  const visibleMessages = useMemo(() => messages.slice(start).map((message) => ({ message,
+    cards: uploads ? message.attachments?.map((entry) => attachmentCard(sid, entry)) : undefined
+  })), [messages, start, uploads, sid])
   const writeBanner = state?.compatibility === 'unsupported' ? c.unsupported : state?.compatibility === 'legacy_text' ? c.readOnly
     : state?.writeBlockReason === 'role_unavailable' ? c.roleUnavailable
       : state?.writeBlockReason === 'session_turn_limit' ? c.limit : state && !state.writable ? c.locked : undefined
@@ -196,7 +217,8 @@ function TextThread({ sid, wk, c, locked, preferred, onPick, openSettings, openF
         {writeBanner && <p className="cf-empty wb-chat__notice" role="status">{writeBanner}</p>}
         {link === 'missing' && <p className="cf-empty wb-chat__notice" role="alert">{c.missing}</p>}
         {!messages.length && !writeBanner && link === 'ready' && <div className="cf-empty">{c.empty}</div>}
-        {messages.slice(start).map((m, index) => <TextConversationMessage key={start + index} role={m.role} text={m.content} />)}
+        {visibleMessages.map(({ message, cards }, index) => <TextConversationMessage key={start + index} role={message.role}
+          text={message.content} attachments={cards} />)}
         {active?.text && <TextConversationMessage key={active.turnId} role="assistant" text={active.text} streaming />}
         {link !== 'ready' && link !== 'missing' && <p className="cf-empty wb-chat__notice" role="status">{c[link === 'reconnecting' ? 'reconnecting' : 'loading']}</p>}
         {active && <p className="cf-empty wb-chat__notice" role="status">{active.text ? c.running : c.reading}</p>}
@@ -206,18 +228,21 @@ function TextThread({ sid, wk, c, locked, preferred, onPick, openSettings, openF
         {wk.turnIssue && <p className="cf-empty wb-chat__notice" role="alert">{c[wk.turnIssue]}</p>}
       </ConversationScroller>
     </div>
+    {uploads && <AttachmentIssues draft={attachmentDraft} dismiss={() => uploads.dismiss(sid)} />}
     {(state?.writable || active) && <TextComposer sid={sid} model={(preferred ?? '')} onPick={onPick} openSettings={openSettings}
       draft={wk.drafts} writeLocked={locked || link !== 'ready' || !state?.writable || !!wk.pending}
       stopping={link !== 'ready' || !!wk.pending} active={active} send={wk.send} stop={wk.stop} c={c}
-      jump={!atBottom ? jump : undefined} openFiles={openFiles} workspaceLabel={workspaceLabel} />}
+      jump={!atBottom ? jump : undefined} openFiles={openFiles} workspaceLabel={workspaceLabel}
+      attachmentDraft={attachmentDraft} add={add} remove={remove} />}
     {state?.turnLimit && state.writable && <p className="wb-chat__limits">{c.limits.replace('{turns}', String(state.turnLimit))}</p>}
   </>
 }
 
-function TextComposer({ sid, draft, model, onPick, openSettings, writeLocked, stopping, active, send, stop, c, jump, openFiles, workspaceLabel }: {
+function TextComposer({ sid, draft, model, onPick, openSettings, writeLocked, stopping, active, send, stop, c, jump, openFiles, workspaceLabel,
+  attachmentDraft, add, remove }: {
   sid: string; draft: Map<string, string>; model: string; onPick: (id: string) => void; openSettings: () => void
   writeLocked: boolean; stopping: boolean; active: ChatState['active'] | undefined; send: Workspace['send']; stop: Workspace['stop']; c: ChatCopy; jump?: () => void
-  openFiles?: () => void; workspaceLabel: string
+  openFiles?: () => void; workspaceLabel: string; attachmentDraft: AttachmentDraft; add?: (files: BrowserFiles) => void; remove?: (key: string) => void
 }): React.JSX.Element {
   const { t } = useI18n()
   const { ready, providers, activeModelId } = useModels()
@@ -228,11 +253,12 @@ function TextComposer({ sid, draft, model, onPick, openSettings, writeLocked, st
   const groups = modelGroups(providers)
   const picked = findActive(groups.map((g) => ({ ...g.p, models: g.models })), model || activeModelId)
   const over = inputBytes(text) > MAX_TEXT_INPUT
+  const ids = readyAttachmentIds(attachmentDraft)
   const mounted = useRef(false)
   const submit = (): void => {
     if (writeLocked || active || !ready || !picked) return
     const sent = editor.getText().trim()
-    if (!sent || inputBytes(sent) > MAX_TEXT_INPUT) return
+    if (!ids || (!sent && !ids.length) || inputBytes(sent) > MAX_TEXT_INPUT) return
     void send(sid, sent, `${picked.provider.id}:${picked.model.id}`).then((ok) => {
       if (ok && mounted.current && editor.getText().trim() === sent) {
         editor.setText('')
@@ -243,6 +269,14 @@ function TextComposer({ sid, draft, model, onPick, openSettings, writeLocked, st
   const editor = useComposerEditor({
     onChange: (value) => { setText(value); if (value) draft.set(sid, value); else draft.delete(sid) },
     mentionNames: [],
+    onPaste: add ? (event) => {
+      if (!event.clipboardData) return false
+      const files = browserFiles(event.clipboardData)
+      if (!files.files.length && !files.issues.length) return false
+      event.preventDefault()
+      add(files)
+      return true
+    } : undefined,
     onKey: (key, e) => {
       if (key !== 'enter' || e.shiftKey || e.ctrlKey || e.altKey) return false
       e.preventDefault()
@@ -272,9 +306,10 @@ function TextComposer({ sid, draft, model, onPick, openSettings, writeLocked, st
         <ResizeHandle axis="y" className="cf-resizer--box" value={clampComposer(height, viewport.h)} title={t('cf.resizeComposer')}
           onChange={(value) => setHeight(clampComposer(value, viewport.h))} onCommit={() => setHeight((v) => clampComposer(v, viewport.h))}
           onReset={() => setHeight(COMPOSER_DEFAULT)} />
+        {add && <AttachmentDraftCards sid={sid} draft={attachmentDraft} remove={remove} />}
         <ComposerDraftInput editor={editor} height={clampComposer(height, viewport.h)} placeholder={c.input} />
         <div className="cf-box__bar">
-          <button className="cf-iconbtn" type="button" title={c.unavailable} aria-label={t('cf.attach')} disabled><Paperclip size={16} /></button>
+          {add && <AttachmentPicker add={add} disabled={writeLocked || !!active} />}
           <ComposerWorkspaceButton label={openFiles ? workspaceLabel : t('cf.mountWorkspace')} title={openFiles ? workspaceLabel : c.unavailable}
             onClick={openFiles} testId={openFiles ? WORKSPACE_OPEN : undefined} />
           <div className="cf-mp">
@@ -283,9 +318,10 @@ function TextComposer({ sid, draft, model, onPick, openSettings, writeLocked, st
               onToggle={() => setOpen((value) => !value)} onPick={(pid, mid) => { onPick(`${pid}:${mid}`); setOpen(false) }} /></div>
           </div>
           {active ? <ComposerSendButton stop disabled={stopping} onClick={() => void stop(sid, active.turnId)} />
-            : <ComposerSendButton disabled={writeLocked || !ready || !picked || !text.trim() || over} onClick={submit} />}
+            : <ComposerSendButton disabled={writeLocked || !ready || !picked || !ids || (!text.trim() && !ids.length) || over} onClick={submit} />}
         </div>
       </div>
+      {add && <AttachmentHint />}
     </div>
   </div>
 }

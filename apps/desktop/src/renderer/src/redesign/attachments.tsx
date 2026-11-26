@@ -25,10 +25,11 @@ import type { AttachKind } from '../store/chat'
  *
  * 图片字节不进渲染层的状态：缩略图与原图都按需向主进程要 data URI——输入框里与刚发出的按本地路径
  * （主进程只认用户亲手选中 / 粘贴 / 拖入的），重载的对话记录按主进程给的 ref。
+ * Web 工作台使用经过资源 ID 校验的同源图片预览地址，浏览器登录态负责授权。
  */
 
 /** 图片从哪取。 */
-export type ImageSource = { path: string } | { sessionId: string; ref: string }
+export type ImageSource = { path: string } | { sessionId: string; ref: string } | { previewUrl: string }
 
 /** 一张可点开的图片。 */
 export interface ViewerItem {
@@ -48,10 +49,11 @@ const thumbDone = new Map<string, string | null>()
 const ratios = new Map<string, number>()
 
 function sourceKey(src: ImageSource): string {
-  return 'path' in src ? `p:${src.path}` : `r:${src.sessionId}:${src.ref}`
+  return 'previewUrl' in src ? `w:${src.previewUrl}` : 'path' in src ? `p:${src.path}` : `r:${src.sessionId}:${src.ref}`
 }
 
 function fetchImage(src: ImageSource, full: boolean): Promise<string | null> {
+  if ('previewUrl' in src) return Promise.resolve(src.previewUrl)
   const p =
     'path' in src
       ? window.deva.fs.attachmentImage(src.path, full)
@@ -88,6 +90,7 @@ function useThumb(src: ImageSource): string | null | undefined {
     thumbDone.has(key) ? { key, url: thumbDone.get(key) ?? null } : null
   )
   useEffect(() => {
+    if ('previewUrl' in src) return // Let the image request use the current browser login; never cache Web URLs here.
     if (thumbDone.has(key)) {
       setGot({ key, url: thumbDone.get(key) ?? null })
       return
@@ -101,7 +104,7 @@ function useThumb(src: ImageSource): string | null | undefined {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [key])
-  return got?.key === key ? got.url : undefined
+  return 'previewUrl' in src ? src.previewUrl : got?.key === key ? got.url : undefined
 }
 
 // ---------------- 小工具 ----------------
@@ -232,6 +235,8 @@ function Thumb({
   const { t } = useI18n()
   const key = sourceKey(item.src)
   const url = useThumb(item.src)
+  const web = 'previewUrl' in item.src
+  const [failedKey, setFailedKey] = useState<string>()
   const [ratio, setRatio] = useState(() => ratios.get(key))
   const width =
     variant === 'sent' ? Math.round(Math.min(240, Math.max(64, 112 * (ratio ?? ratios.get(key) ?? 1)))) : undefined
@@ -239,9 +244,12 @@ function Thumb({
   const title = meta ? `${item.name}\n${meta}` : item.name
   return (
     <span className={`cf-att cf-att--${variant}`}>
-      {url === null ? (
-        <span className="cf-att__thumb is-broken" style={{ width }} title={title}>
-          <ImageIcon size={variant === 'sent' ? 22 : 18} strokeWidth={1.8} />
+      {url === null || failedKey === key ? (
+        <span className="cf-att__thumb is-broken" style={{ width }} role={web ? 'img' : undefined}
+          aria-label={web ? `${item.name}: ${t('cf.viewer.failed')}` : undefined}
+          title={web ? `${title}\n${t('cf.viewer.failed')}` : title}>
+          {web ? <span className="wb-attachment__preview-failed">{t('cf.viewer.failed')}</span>
+            : <ImageIcon size={variant === 'sent' ? 22 : 18} strokeWidth={1.8} />}
         </span>
       ) : (
         <button
@@ -257,10 +265,13 @@ function Thumb({
               src={url}
               alt=""
               draggable={false}
+              loading={web && variant === 'sent' ? 'lazy' : undefined}
+              referrerPolicy={web ? 'no-referrer' : undefined}
+              onError={web ? () => setFailedKey(key) : undefined}
               onLoad={(e) => {
                 const { naturalWidth: w, naturalHeight: h } = e.currentTarget
                 if (w && h) {
-                  ratios.set(key, w / h)
+                  if (!web) ratios.set(key, w / h)
                   setRatio(w / h)
                 }
               }}
@@ -326,6 +337,7 @@ export interface AttachEntry {
   title?: string
   /** 图片的来源；没有（如旧数据的图片）则按文件卡片画。 */
   src?: ImageSource
+  removable?: boolean
 }
 
 /**
@@ -335,11 +347,13 @@ export interface AttachEntry {
 export function AttachmentList({
   entries,
   variant,
-  onRemove
+  onRemove,
+  testId
 }: {
   entries: AttachEntry[]
   variant: 'composer' | 'sent'
   onRemove?: (id: string) => void
+  testId?: string
 }): React.JSX.Element | null {
   const [viewing, setViewing] = useState<number | null>(null)
   const images = entries.filter((e): e is AttachEntry & { src: ImageSource } => e.kind === 'image' && !!e.src)
@@ -353,7 +367,7 @@ export function AttachmentList({
       item={items[i]}
       variant={variant}
       onOpen={() => setViewing(i)}
-      onRemove={onRemove ? () => onRemove(e.id) : undefined}
+      onRemove={onRemove && e.removable !== false ? () => onRemove(e.id) : undefined}
     />
   ))
   const cards = files.map((e) => (
@@ -364,7 +378,7 @@ export function AttachmentList({
       size={e.size}
       title={e.title}
       sent={variant === 'sent'}
-      onRemove={onRemove ? () => onRemove(e.id) : undefined}
+      onRemove={onRemove && e.removable !== false ? () => onRemove(e.id) : undefined}
     />
   ))
   const viewer =
@@ -374,14 +388,14 @@ export function AttachmentList({
 
   if (variant === 'composer')
     return (
-      <div className="cf-composer__files">
+      <div className="cf-composer__files" data-testid={testId}>
         {thumbs}
         {cards}
         {viewer}
       </div>
     )
   return (
-    <div className="cf-sent">
+    <div className="cf-sent" data-testid={testId}>
       {thumbs.length > 0 && <div className="cf-sent__row">{thumbs}</div>}
       {cards.length > 0 && <div className="cf-sent__row is-files">{cards}</div>}
       {viewer}
@@ -429,9 +443,11 @@ export function ImageViewer({
         return
       }
       const probe = new Image()
-      probe.onload = probe.onerror = () => {
+      if ('previewUrl' in target.src) probe.referrerPolicy = 'no-referrer'
+      probe.onload = () => {
         if (alive) setShown({ i: at, url, full: !!full, w: probe.naturalWidth, h: probe.naturalHeight })
       }
+      probe.onerror = () => { if (alive) setShown({ i: at, url: null, full: false, w: 0, h: 0 }) }
       probe.src = url
     })()
     return () => {
@@ -504,7 +520,9 @@ export function ImageViewer({
       {shown && cur && (
         <>
           {shown.url ? (
-            <img className="cf-viewer__img" src={shown.url} alt={cur.name} draggable={false} />
+            <img className="cf-viewer__img" src={shown.url} alt={cur.name} draggable={false}
+              referrerPolicy={'previewUrl' in cur.src ? 'no-referrer' : undefined}
+              onError={'previewUrl' in cur.src ? () => setShown((old) => old === shown ? { ...shown, url: null } : old) : undefined} />
           ) : (
             <div className="cf-viewer__failed">
               <ImageIcon size={28} strokeWidth={1.6} />
