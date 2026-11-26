@@ -1,0 +1,331 @@
+{
+  "schemaVersion": 1,
+  "preload": "apps/desktop/src/preload/index.ts",
+  "baseline": {"groups":21,"methods":186,"subscriptions":18,"values":1},
+  "groups": [
+    {
+      "name": "window",
+      "host": "apps/desktop/src/main/index.ts",
+      "methods": [
+        {"name":"minimize","kind":"invoke","channel":"window:minimize","desktop":{"surface":"bridge-only","use":"主进程最小化 Electron 主窗口"},"web":{"status":"desktop-only","target":"desktop","semantic":"Web 页签由浏览器控制，服务端无最小化入口。"}},
+        {"name":"toggleMaximize","kind":"invoke","channel":"window:toggle-maximize","desktop":{"surface":"bridge-only","use":"主进程切换 Electron 主窗口的最大化"},"web":{"status":"desktop-only","target":"desktop","semantic":"保留宿主窗口行为；浏览器全屏与窗口最大化是两种不同状态。"}},
+        {"name":"close","kind":"invoke","channel":"window:close","desktop":{"surface":"bridge-only","use":"主进程关闭 Electron 主窗口"},"web":{"status":"desktop-only","target":"desktop","semantic":"关闭 Web 页签与关停宿主分离，用户离开页面时只清理自身连接。"}},
+        {"name":"isFullScreen","kind":"invoke","channel":"window:is-fullscreen","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/redesign/ChatFirstShell.tsx","use":"聊天外壳查询原生全屏以调整 macOS 红绿灯留白"},"web":{"status":"pending","target":"client","semantic":"Web 用 document.fullscreenElement 初始化当前页面全屏状态，布局独立于 Electron 主窗口。"}},
+        {"name":"onFullScreen","kind":"subscription","channel":"window:fullscreen","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/redesign/ChatFirstShell.tsx","use":"聊天外壳随 Electron 全屏进出更新标题栏留白"},"web":{"status":"pending","target":"client","semantic":"以 fullscreenchange 同步当前页面自己的全屏状态，离开组件时移除监听。"}},
+        {"name":"setOverlaySymbolColor","kind":"invoke","channel":"window:set-overlay","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/theme/ThemeContext.tsx","use":"主题同步 Electron 标题栏原生控件配色"},"web":{"status":"desktop-only","target":"desktop","semantic":"页面主题影响 CSS，浏览器自带窗口控件由用户代理绘制。"}}
+      ]
+    },
+    {
+      "name": "fs",
+      "host": "apps/desktop/src/main/services/workspace.ts",
+      "methods": [
+        {"name":"openFolder","kind":"invoke","channel":"fs:open-folder","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/redesign/Composer.tsx","use":"输入区挂载系统对话框选出的工作目录"},"web":{"status":"pending","target":"rpc","semantic":"从已授权宿主工作区选择目录，浏览器文件选择结果从来只是用户本地文件。"}},
+        {"name":"revealFolder","kind":"invoke","channel":"fs:reveal-folder","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/redesign/GitWidget.tsx","use":"已挂载目录菜单在系统文件管理器显示路径"},"web":{"status":"pending","target":"client","semantic":"在 Web 工作区侧栏定位该授权目录并展开父节点；不唤起操作系统文件管理器。"}},
+        {"name":"readDir","kind":"invoke","channel":"fs:read-dir","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/store/workspace.tsx","use":"资源树读取目录的一层子项"},"web":{"status":"pending","target":"rpc","semantic":"按授权根和相对位置列单层目录，区分文件与子目录并拒绝越界。"}},
+        {"name":"readFile","kind":"invoke","channel":"fs:read-file","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/store/workspace.tsx","use":"工作区状态加载编辑区文本"},"web":{"status":"pending","target":"rpc","semantic":"范围内读取有限正文，保留二进制与过大标记。"}},
+        {"name":"writeFile","kind":"invoke","channel":"fs:write-file","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/store/workspace.tsx","use":"编辑区保存当前文本"},"web":{"status":"pending","target":"rpc","semantic":"保存回授权工作区，验证会话/路径及写权限，并明确保存失败。"}},
+        {"name":"pickAttachments","kind":"invoke","channel":"fs:pick-attachments","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/redesign/Composer.tsx","host":"apps/desktop/src/main/services/attachments.ts","use":"输入框经系统多选对话框添加附件描述"},"web":{"status":"pending","target":"upload","semantic":"使用浏览器多选 File 走上传并获得可供发送的附件引用；支持能力与拒收原因须可呈现。"}},
+        {"name":"pasteAttachment","kind":"invoke","channel":"fs:paste-attachment","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/redesign/Composer.tsx","host":"apps/desktop/src/main/services/attachments.ts","use":"输入框将剪贴板文件字节临时落盘并授权"},"web":{"status":"pending","target":"upload","semantic":"粘贴 File/Blob 复用上传，保留 MIME、体积和超限反馈，可取消且不信任文件名。"}},
+        {"name":"attachmentImage","kind":"invoke","channel":"fs:attachment-image","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/redesign/attachments.tsx","host":"apps/desktop/src/main/services/attachments.ts","use":"输入框未发送的图片附件预览"},"web":{"status":"pending","target":"download","semantic":"上传引用仅对归属用户有效，区分缩略图与原图。"}},
+        {"name":"droppedEntries","kind":"invoke","channel":"fs:dropped-entries","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/redesign/Composer.tsx","host":"apps/desktop/src/main/services/attachments.ts","use":"输入区经 webUtils 识别拖入的真实路径和目录"},"web":{"status":"pending","target":"upload","semantic":"拖入浏览器文件走字节上传；目录移交 workbench 的授权选择流程，不接管客户端绝对路径。"}}
+      ]
+    },
+    {
+      "name": "config",
+      "host": "apps/desktop/src/main/services/config.ts",
+      "methods": [
+        {"name":"getSync","kind":"sendSync","channel":"config:get-sync","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/theme/ThemeContext.tsx","use":"首帧读主题、语言、布局等避免闪烁"},"web":{"status":"pending","target":"bootstrap","semantic":"启动时在首个可见渲染前取得允许公开的主题和语言；不用同步 IPC 或整份账户配置模拟首帧。"}},
+        {"name":"get","kind":"invoke","channel":"config:get","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/store/models.tsx","use":"模型设置加载当前配置与活跃模型"},"web":{"status":"pending","target":"rpc","semantic":"按设置用途返回投影；密钥不进入配置快照。"}},
+        {"name":"set","kind":"invoke","channel":"config:set","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/store/models.tsx","use":"模型、主题等设置以顶层补丁持久化"},"web":{"status":"pending","target":"rpc","semantic":"允许写入的配置键应明确；区分省略、删除和设置，回读验证持久结果。"}}
+      ]
+    },
+    {
+      "name": "skills",
+      "host": "apps/desktop/src/main/services/skills.ts",
+      "methods": [
+        {"name":"list","kind":"invoke","channel":"skills:list","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/store/extensions.tsx","use":"扩展列表加载技能记录"},"web":{"status":"pending","target":"rpc","semantic":"列出技能来源、启停及可用角色，以区别内置和自定义条目。"}},
+        {"name":"get","kind":"invoke","channel":"skills:get","desktop":{"surface":"bridge-only","use":"按 ID 读取单条技能记录的桥接"},"web":{"status":"pending","target":"rpc","semantic":"详情按 ID 查询，保留已删除或不存在的空结果。"}},
+        {"name":"import","kind":"invoke","channel":"skills:import","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/store/extensions.tsx","use":"扩展页使用原生文件选择导入技能"},"web":{"status":"pending","target":"upload","semantic":"按技能包格式上传并交宿主验证；保留导入错误码与成功记录。"}},
+        {"name":"remove","kind":"invoke","channel":"skills:remove","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/store/extensions.tsx","use":"移除自定义技能并按结果刷新列表"},"web":{"status":"pending","target":"rpc","semantic":"删除保留来源校验和失败反馈，界面不提前隐藏移除失败的技能。"}},
+        {"name":"setEnabled","kind":"invoke","channel":"skills:set-enabled","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/store/extensions.tsx","use":"扩展列表切换自定义技能启用态"},"web":{"status":"pending","target":"rpc","semantic":"写入启停后刷新有效状态，并保留内置技能限制。"}},
+        {"name":"setRoles","kind":"invoke","channel":"skills:set-roles","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/store/extensions.tsx","use":"扩展页设置技能可用角色范围"},"web":{"status":"pending","target":"rpc","semantic":"区分全角色、仅选定角色和空名单；内置项保持只读。"}},
+        {"name":"onChanged","kind":"subscription","channel":"skills:changed","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/store/extensions.tsx","use":"技能目录变化后更新扩展页全量列表"},"web":{"status":"pending","target":"events","semantic":"订阅列表失效或全快照，断线重连后重新拉取技能目录。"}}
+      ]
+    },
+    {
+      "name": "profile",
+      "host": "apps/desktop/src/main/services/profile.ts",
+      "methods": [
+        {"name":"get","kind":"invoke","channel":"profile:get","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/store/profile.tsx","use":"个人资料状态载入头像样式与自定义图片"},"web":{"status":"pending","target":"bootstrap","semantic":"首屏头像资料对当前用户投影，不暴露图片的宿主路径。"}},
+        {"name":"setAvatar","kind":"invoke","channel":"profile:set-avatar","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/store/profile.tsx","use":"个人资料保存生成头像样式"},"web":{"status":"pending","target":"rpc","semantic":"校验头像样式并持久化，其他客户端能刷新到新样式。"}},
+        {"name":"setAvatarImage","kind":"invoke","channel":"profile:set-avatar-image","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/store/profile.tsx","use":"个人资料更换或清除头像图片"},"web":{"status":"pending","target":"upload","semantic":"上传并校验图片；清除为独立操作，返回最终可显示的头像。"}}
+      ]
+    },
+    {
+      "name": "memory",
+      "host": "apps/desktop/src/main/services/memory.ts",
+      "methods": [
+        {"name":"list","kind":"invoke","channel":"memory:list","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/redesign/memory-editor.ts","use":"记忆面板加载选定作用域的清单与预算"},"web":{"status":"pending","target":"rpc","semantic":"按全局、角色或工作区授权投影条目、字数和写入上限。"}},
+        {"name":"write","kind":"invoke","channel":"memory:write","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/redesign/MemoryDetail.tsx","use":"记忆详情提交新增或修改字段"},"web":{"status":"pending","target":"rpc","semantic":"新增与更新明确区分，保留预算、长度、类型及重复条目的错误码。"}},
+        {"name":"remove","kind":"invoke","channel":"memory:delete","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/redesign/MemoryDetail.tsx","use":"记忆详情确认删除单条记忆"},"web":{"status":"pending","target":"rpc","semantic":"按作用域与条目 ID 删除，返回最新快照。"}},
+        {"name":"clear","kind":"invoke","channel":"memory:clear","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/redesign/memory-editor.ts","use":"记忆面板确认清空当前作用域"},"web":{"status":"pending","target":"rpc","semantic":"界面确认后仅清空选中范围，回显剩余额度；与逐条删除区分。"}}
+      ]
+    },
+    {
+      "name": "personas",
+      "host": "apps/desktop/src/main/services/personas.ts",
+      "methods": [
+        {"name":"list","kind":"invoke","channel":"personas:list","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/store/extensions.tsx","use":"角色花名册重建角色、模型偏好和状态"},"web":{"status":"pending","target":"bootstrap","semantic":"启动快照应含启用状态和显示资料，管理视图按权限补充详细字段。"}},
+        {"name":"get","kind":"invoke","channel":"personas:get","desktop":{"surface":"bridge-only","use":"按 ID 读取某角色的桥接"},"web":{"status":"pending","target":"rpc","semantic":"角色深链或详情按 ID 获取，区分已删除与已停用。"}},
+        {"name":"upsert","kind":"invoke","channel":"personas:upsert","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/store/extensions.tsx","use":"花名册新增角色或编辑名称、提示词和模型"},"web":{"status":"pending","target":"rpc","semantic":"创建与更新分别校验 ID 与工作区授权，成功返回最终角色记录。"}},
+        {"name":"remove","kind":"invoke","channel":"personas:remove","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/store/extensions.tsx","use":"角色管理移除特定角色"},"web":{"status":"pending","target":"rpc","semantic":"让用户确认角色移除，刷新花名册并明确与既有会话历史的关系。"}},
+        {"name":"setEnabled","kind":"invoke","channel":"personas:set-enabled","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/store/extensions.tsx","use":"角色列表切换启用态"},"web":{"status":"pending","target":"rpc","semantic":"保留已停用角色在管理视图的可见性和新会话选择约束。"}},
+        {"name":"reorder","kind":"invoke","channel":"personas:reorder","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/store/extensions.tsx","use":"花名册拖拽或置顶后保存完整 ID 顺序"},"web":{"status":"pending","target":"rpc","semantic":"以稳定角色 ID 持久化排序，重连后重新拉取，避免静默覆盖并发编辑。"}},
+        {"name":"setAvatarImage","kind":"invoke","channel":"personas:set-avatar-image","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/store/extensions.tsx","use":"编辑角色后更新该角色的自定义头像"},"web":{"status":"pending","target":"upload","semantic":"先创角色再按 ID 上传并验证图片，只返回可显示引用。"}},
+        {"name":"clearAvatarImage","kind":"invoke","channel":"personas:clear-avatar-image","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/store/extensions.tsx","use":"角色编辑清除自定义头像并回退生成图"},"web":{"status":"pending","target":"rpc","semantic":"清除覆盖图后返回最新角色，恢复生成头像的预览。"}}
+      ]
+    },
+    {
+      "name": "mcp",
+      "host": "apps/desktop/src/main/services/mcp.ts",
+      "methods": [
+        {"name":"list","kind":"invoke","channel":"mcp:list","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/store/extensions.tsx","use":"扩展页加载 MCP 连接和工具清单"},"web":{"status":"pending","target":"rpc","semantic":"投影连接状态、缺失字段和发现的工具；密钥值留在宿主。"}},
+        {"name":"get","kind":"invoke","channel":"mcp:get","desktop":{"surface":"bridge-only","use":"按 ID 读取配置（与运行视图分离）的桥接"},"web":{"status":"pending","target":"rpc","semantic":"编辑表单按 ID 加载允许配置的字段，以脱敏引用表示已配置秘密。"}},
+        {"name":"upsert","kind":"invoke","channel":"mcp:upsert","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/store/extensions.tsx","use":"扩展页提交新增或编辑服务配置"},"web":{"status":"pending","target":"rpc","semantic":"验证 transport 和所需字段，只在宿主对账连接；配置变更与实际连通分开反馈。"}},
+        {"name":"remove","kind":"invoke","channel":"mcp:remove","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/store/extensions.tsx","use":"扩展列表移除自定义 MCP 服务"},"web":{"status":"pending","target":"rpc","semantic":"删除配置后宿主释放连接并刷新状态；按服务 ID 作用。"}},
+        {"name":"setEnabled","kind":"invoke","channel":"mcp:set-enabled","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/store/extensions.tsx","use":"扩展页切换启用状态触发宿主对账"},"web":{"status":"pending","target":"rpc","semantic":"返回启用意图及连接中/错误等实际状态，区分两者。"}},
+        {"name":"setRoles","kind":"invoke","channel":"mcp:set-roles","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/store/extensions.tsx","use":"扩展页调整服务对角色的可用范围"},"web":{"status":"pending","target":"rpc","semantic":"保留全角色/指定角色的语义；只改变可用范围，不重连服务。"}},
+        {"name":"retry","kind":"invoke","channel":"mcp:retry","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/store/extensions.tsx","use":"连接错误时扩展页重试当前配置"},"web":{"status":"pending","target":"rpc","semantic":"按服务 ID 对账并返回最新状态，不新建服务。"}},
+        {"name":"setSecret","kind":"invoke","channel":"mcp:set-secret","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/store/extensions.tsx","use":"扩展设置填写或清除服务秘密字段"},"web":{"status":"pending","target":"rpc","semantic":"仅写入授权的秘密字段；仅返回配置结果与存储状态，不回显明文。"}},
+        {"name":"hasSecret","kind":"invoke","channel":"mcp:has-secret","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/redesign/SettingsPane.tsx","use":"服务编辑页为秘密字段显示已设置提示"},"web":{"status":"pending","target":"rpc","semantic":"按单一字段返回布尔状态，保留没有权限和未配置的区别。"}},
+        {"name":"onStatus","kind":"subscription","channel":"mcp:status","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/store/extensions.tsx","use":"扩展列表合并单服务状态广播"},"web":{"status":"pending","target":"events","semantic":"按服务 ID 合并，重连先取服务全量快照补齐漏掉的变更。"}}
+      ]
+    },
+    {
+      "name": "secrets",
+      "host": "apps/desktop/src/main/services/secrets.ts",
+      "methods": [
+        {"name":"set","kind":"invoke","channel":"secrets:set","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/store/models.tsx","use":"模型设置向宿主写入 provider API 密钥"},"web":{"status":"pending","target":"rpc","semantic":"仅写或清除，校验 provider 身份和管理权限，日志及响应不得回显值。"}},
+        {"name":"has","kind":"invoke","channel":"secrets:has","desktop":{"surface":"bridge-only","use":"查询单一 provider 是否已有密钥的桥接"},"web":{"status":"pending","target":"rpc","semantic":"针对可管理的 provider 返回存在标记；无权范围应被隔离。"}},
+        {"name":"delete","kind":"invoke","channel":"secrets:delete","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/store/models.tsx","use":"移除模型服务商时删除密钥"},"web":{"status":"pending","target":"rpc","semantic":"按 provider 标识删除秘密而不回显值，随后刷新配置状态。"}},
+        {"name":"list","kind":"invoke","channel":"secrets:list","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/store/models.tsx","use":"模型设置初始化已配置密钥的 provider ID"},"web":{"status":"pending","target":"rpc","semantic":"只返回当前可见的已配置标识；不带密钥内容。"}},
+        {"name":"available","kind":"invoke","channel":"secrets:available","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/store/models.tsx","use":"模型设置探测系统加密存储可用性"},"web":{"status":"pending","target":"rpc","semantic":"对当前宿主呈现秘密存储是否可写，不能用浏览器本地存储冒充。"}}
+      ]
+    },
+    {
+      "name": "provider",
+      "host": "apps/desktop/src/main/services/provider.ts",
+      "methods": [
+        {"name":"listModels","kind":"invoke","channel":"provider:list-models","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/features/settings/ModelSettings.tsx","use":"模型设置在主进程探测 provider 的模型列表"},"web":{"status":"pending","target":"rpc","semantic":"从宿主以受控配置探测，返回模型名和失败分类，凭据不离开宿主。"}}
+      ]
+    },
+    {
+      "name": "chat",
+      "host": "apps/desktop/src/main/services/chat.ts",
+      "methods": [
+        {"name":"send","kind":"invoke","channel":"chat:send","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/store/chat.tsx","use":"聊天状态把首条消息、附件和模型配置交给回合运行器"},"web":{"status":"pending","target":"rpc","semantic":"返回可追踪的回合标识；上传引用绑定会话和调用者，断线重试不能重复开轮。"}},
+        {"name":"insert","kind":"invoke","channel":"chat:insert","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/store/chat.tsx","use":"聊天状态向正在运行的同一回合插入消息"},"web":{"status":"pending","target":"rpc","semantic":"保留进入待送达队列/本轮已结束的区别；按会话记录插入顺序。"}},
+        {"name":"withdrawInserts","kind":"invoke","channel":"chat:withdraw-inserts","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/store/chat.tsx","use":"输入框撤回仍未送达的插入项恢复草稿"},"web":{"status":"pending","target":"rpc","semantic":"仅取回尚在队列的消息和附件；与已送达的历史区分。"}},
+        {"name":"compact","kind":"invoke","channel":"chat:compact","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/store/chat.tsx","use":"聊天状态发起手动历史压缩并观察完成"},"web":{"status":"pending","target":"rpc","semantic":"尊重历史锁，返回压缩回合 ID 并发压缩完成事件，不误触发下一轮。"}},
+        {"name":"createSession","kind":"invoke","channel":"chat:create-session","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/store/chat.tsx","use":"聊天外壳在首发消息前建立空会话"},"web":{"status":"pending","target":"rpc","semantic":"按角色/工作区创建并落盘；重试复用会话标识，初始列表立即可见。"}},
+        {"name":"setModel","kind":"invoke","channel":"chat:set-model","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/store/chat.tsx","use":"会话模型选择器立即保存模型引用"},"web":{"status":"pending","target":"rpc","semantic":"按会话持久化模型引用，支持跟随默认，模型变化向其他连接同步。"}},
+        {"name":"setEffort","kind":"invoke","channel":"chat:set-effort","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/store/chat.tsx","use":"会话思考等级选择器立即落盘"},"web":{"status":"pending","target":"rpc","semantic":"保存会话独立思考等级并校验当前生效模型的能力。"}},
+        {"name":"setFocus","kind":"invoke","channel":"chat:set-focus","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/store/chat.tsx","use":"聊天状态为当前会话挂载或卸载聚焦目录"},"web":{"status":"pending","target":"rpc","semantic":"选择授权宿主目录或明确卸载，两种结果都持久化且能重连恢复。"}},
+        {"name":"renameSession","kind":"invoke","channel":"chat:rename-session","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/store/chat.tsx","use":"对话菜单持久化标题并刷新展示"},"web":{"status":"pending","target":"rpc","semantic":"区分自定义标题、清空恢复自动标题、会话不存在。"}},
+        {"name":"setArchived","kind":"invoke","channel":"chat:set-archived","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/store/chat.tsx","use":"聊天外壳执行归档与取消归档"},"web":{"status":"pending","target":"rpc","semantic":"保留列表顺序和归档导航，跨连接同步归档状态。"}},
+        {"name":"abort","kind":"invoke","channel":"chat:abort","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/store/chat.tsx","use":"输入框停止当前 turnId 对应的回合"},"web":{"status":"pending","target":"rpc","semantic":"仅停止目标活跃回合；重复停止是安全的，结束事件用于收敛 UI。"}},
+        {"name":"stopSubagent","kind":"invoke","channel":"chat:stop-subagent","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/store/chat.tsx","use":"会话里停止由工具卡标识的子智能体任务"},"web":{"status":"pending","target":"rpc","semantic":"按会话和工具使用 ID 精确停止仍在运行的子任务，不停止整个主回合。"}},
+        {"name":"listSessions","kind":"invoke","channel":"chat:list-sessions","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/store/chat.tsx","use":"会话状态刷新聚焦工作区或全局会话表"},"web":{"status":"pending","target":"bootstrap","semantic":"启动时拉取按工作区过滤、排序的可见会话，区分归档和成员会话。"}},
+        {"name":"loadSession","kind":"invoke","channel":"chat:load-session","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/store/chat.tsx","use":"聊天状态从已落盘记录重建气泡"},"web":{"status":"pending","target":"rpc","semantic":"稳定分页读取历史，返回展示视图；最新历史和活跃流拼接时不能重影。"}},
+        {"name":"attachmentImage","kind":"invoke","channel":"chat:attachment-image","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/redesign/attachments.tsx","use":"历史聊天气泡按消息引用显示图片"},"web":{"status":"pending","target":"download","semantic":"按会话和附件引用受权读取缩略图或原图，不接收文件路径。"}},
+        {"name":"attachSession","kind":"invoke","channel":"chat:attach-session","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/store/chat.tsx","use":"切换会话时原子取历史、turnId 与开始时刻"},"web":{"status":"pending","target":"bootstrap","semantic":"同一快照返回历史与运行锚点；随后能接续事件，避免快照与订阅之间丢消息。"}},
+        {"name":"deleteSession","kind":"invoke","channel":"chat:delete-session","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/store/chat.tsx","use":"聊天删除主会话并带走成员会话"},"web":{"status":"pending","target":"rpc","semantic":"按会话标识确认删除，验证进行中/并发状态；所有连接从列表移除。"}},
+        {"name":"removeMember","kind":"invoke","channel":"chat:remove-member","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/store/chat.tsx","use":"成员栏移除成员并停止其任务，保留历史"},"web":{"status":"pending","target":"rpc","semantic":"禁止再派任务且保留成员会话历史，主会话可继续运行。"}},
+        {"name":"deleteTurns","kind":"invoke","channel":"chat:delete-turns","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/store/chat.tsx","use":"聊天状态按轮批量删除并重建展示"},"web":{"status":"pending","target":"rpc","semantic":"尊重历史锁；按稳定的轮边界重建视图，不在忙碌时先行删 UI。"}},
+        {"name":"todos","kind":"invoke","channel":"chat:todos","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/store/chat.tsx","use":"聊天状态切换时拉取当前会话待办清单"},"web":{"status":"pending","target":"rpc","semantic":"获取作用域为会话的清单与进度，以快照接续后续待办事件。"}},
+        {"name":"contextUsage","kind":"invoke","channel":"chat:context-usage","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/redesign/context-usage.ts","host":"apps/desktop/src/main/services/context-usage.ts","use":"上下文指示器查模型窗口、占用和压缩线"},"web":{"status":"pending","target":"rpc","semantic":"以当前生效模型计算窗口和占用；模型无法解析时明确为空。"}},
+        {"name":"cancelTodoList","kind":"invoke","channel":"chat:todo-cancel","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/store/chat.tsx","use":"聊天胶囊取消当前清单，下一次回合通知模型"},"web":{"status":"pending","target":"rpc","semantic":"保留忙碌限制，返回已取消状态并在后续轮持久传达取消意图。"}},
+        {"name":"rewindList","kind":"invoke","channel":"chat:rewind-list","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/redesign/RewindModal.tsx","use":"回滚对话框加载每轮改动量和撤销能力"},"web":{"status":"pending","target":"rpc","semantic":"按会话回传检查点、改动摘要和当前可撤销状态。"}},
+        {"name":"rewindPreview","kind":"invoke","channel":"chat:rewind-preview","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/redesign/RewindModal.tsx","use":"回滚对话框预览文件计划和无法撤销的命令"},"web":{"status":"pending","target":"rpc","semantic":"只读获取冲突、超限及命令副作用，界面不能自行推导执行计划。"}},
+        {"name":"rewindApply","kind":"invoke","channel":"chat:rewind-apply","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/store/chat.tsx","use":"批准后按模式回滚，宿主重算文件计划"},"web":{"status":"pending","target":"rpc","semantic":"保持历史锁、强制覆盖范围与冲突结果；用结果重建历史而非假定全部成功。"}},
+        {"name":"rewindUndo","kind":"invoke","channel":"chat:rewind-undo","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/store/chat.tsx","use":"撤销上次回滚并覆盖展示快照"},"web":{"status":"pending","target":"rpc","semantic":"给出可撤销前提和部分失败，后续已改历史时按真实状态拒绝撤销。"}},
+        {"name":"resolveProposal","kind":"invoke","channel":"chat:resolve-proposal","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/store/chat.tsx","use":"角色名片接受或拒绝后记录终态"},"web":{"status":"pending","target":"rpc","semantic":"以会话和工具使用 ID 幂等落定，不因重连再次建同一角色。"}},
+        {"name":"resolveAutotask","kind":"invoke","channel":"chat:resolve-autotask","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/store/chat.tsx","use":"任务确认名片创建或忽略自动任务"},"web":{"status":"pending","target":"rpc","semantic":"提交完整任务授权并绑定卡片；创建成功返回任务 ID，重复点击不得再创建。"}},
+        {"name":"respondAsk","kind":"invoke","channel":"chat:ask-response","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/store/chat.tsx","use":"交互卡提交答案或取消"},"web":{"status":"pending","target":"rpc","semantic":"决议绑定未决卡片 key 和对应会话；区分自由文本、选项、取消及过期卡。"}},
+        {"name":"respondPlan","kind":"invoke","channel":"chat:plan-response","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/store/chat.tsx","use":"计划审阅批准执行或退回继续完善"},"web":{"status":"pending","target":"rpc","semantic":"同一未决卡片只落一次决议，保留反馈文本；过期与并发提交可辨。"}},
+        {"name":"respondMount","kind":"invoke","channel":"chat:mount-response","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/store/chat.tsx","use":"挂载卡确认已选目录或跳过"},"web":{"status":"pending","target":"rpc","semantic":"卡片决议只接收已验证的宿主工作区引用或跳过，不因本地浏览器选择绕过授权。"}},
+        {"name":"onEvent","kind":"subscription","channel":"chat:event","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/store/chat.tsx","use":"聊天状态订阅会话回合、流式内容和卡片事件"},"web":{"status":"pending","target":"events","semantic":"按会话和回合路由，验证事件顺序、去重、断线补偿、终止和取消订阅。"}},
+        {"name":"onSessionsChanged","kind":"subscription","channel":"chat:sessions-changed","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/store/chat.tsx","use":"外部新建会话后刷新桌面列表"},"web":{"status":"pending","target":"events","semantic":"列表失效触发重拉；事件丢失时用启动或重连快照补齐。"}},
+        {"name":"markRead","kind":"invoke","channel":"chat:mark-read","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/store/remote-sync.ts","host":"apps/desktop/src/main/services/read-sync.ts","use":"前台查看时同步手机与桌面未读"},"web":{"status":"pending","target":"rpc","semantic":"仅对当前用户和会话推进已读标记，不覆盖后到的更新。"}},
+        {"name":"onRemoteChange","kind":"subscription","channel":"chat:remote-change","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/store/remote-sync.ts","host":"apps/desktop/src/main/services/read-sync.ts","use":"收到手机等设备发来的已读/删除/归档/模型变化"},"web":{"status":"pending","target":"events","semantic":"按字段合并跨客户端会话更新，恢复时用服务器状态防止本地陈旧覆盖。"}}
+      ]
+    },
+    {
+      "name": "terminal",
+      "host": "apps/desktop/src/main/services/terminal.ts",
+      "methods": [
+        {"name":"listShells","kind":"invoke","channel":"terminal:list-shells","desktop":{"surface":"legacy-bridge","use":"历史终端桥探测本机 shell 配置"},"web":{"status":"pending","target":"rpc","semantic":"列出当前授权工作区的宿主允许 shell，仅返回选择所需的标签与标识。"}},
+        {"name":"create","kind":"invoke","channel":"terminal:create","desktop":{"surface":"legacy-bridge","use":"历史桥经 Utility Process 开启带 cwd 和尺寸的 PTY"},"web":{"status":"pending","target":"rpc","semantic":"由私有 PTY worker 在已授权工作区创建有所有者的会话，校验 shell、目录与初始尺寸。"}},
+        {"name":"write","kind":"send","channel":"terminal:input","desktop":{"surface":"legacy-bridge","use":"历史桥按 PTY ID 发送按键数据"},"web":{"status":"pending","target":"rpc","semantic":"只向当前所有者仍存活的 PTY 会话写入有序输入，并限制缓冲和速率。"}},
+        {"name":"resize","kind":"send","channel":"terminal:resize","desktop":{"surface":"legacy-bridge","use":"历史桥按 PTY ID 调整行列"},"web":{"status":"pending","target":"rpc","semantic":"仅调整当前所有者的会话尺寸，校验行列边界并合并高频变更。"}},
+        {"name":"dispose","kind":"send","channel":"terminal:dispose","desktop":{"surface":"legacy-bridge","use":"历史桥按 PTY ID 销毁已创建进程"},"web":{"status":"pending","target":"rpc","semantic":"由会话所有者关闭 PTY；安全处理重复关闭和连接异常后的资源回收。"}},
+        {"name":"onData","kind":"subscription","channel":"terminal:data","desktop":{"surface":"legacy-bridge","use":"历史 PTY 数据事件推送输出片段"},"web":{"status":"pending","target":"events","semantic":"按 PTY 会话与所有者过滤输出，处理背压、顺序和断线续接，禁止跨用户串流。"}},
+        {"name":"onExit","kind":"subscription","channel":"terminal:exit","desktop":{"surface":"legacy-bridge","use":"历史 PTY 退出事件推送退出码"},"web":{"status":"pending","target":"events","semantic":"向该 PTY 所有者发送一次含真实退出码的终止事件，区分正常退出与宿主故障。"}}
+      ]
+    },
+    {
+      "name": "git",
+      "host": "apps/desktop/src/main/services/git.ts",
+      "methods": [
+        {"name":"available","kind":"invoke","channel":"git:available","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/redesign/GitWidget.tsx","use":"聚焦工作区 Git 小组件探测系统 Git"},"web":{"status":"pending","target":"rpc","semantic":"以宿主能力判定是否显示 Git UI，避免暴露 Git 可执行文件物理路径。"}},
+        {"name":"status","kind":"invoke","channel":"git:status","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/redesign/GitWidget.tsx","use":"Git 菜单和提交面板显示分支、合并与改动状态"},"web":{"status":"pending","target":"rpc","semantic":"受信工作区返回分支/upstream、ahead/behind 和冲突分组。"}},
+        {"name":"diff","kind":"invoke","channel":"git:diff","desktop":{"surface":"bridge-only","use":"仓库文件 diff IPC：暂存、工作树或未跟踪文件"},"web":{"status":"pending","target":"rpc","semantic":"若接入变更详情，明确三类 diff 的比较基线并限制输出体积。"}},
+        {"name":"stage","kind":"invoke","channel":"git:stage","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/redesign/GitWidget.tsx","use":"提交面板提交前重新读取状态并暂存全部未暂存改动"},"web":{"status":"pending","target":"rpc","semantic":"在授权仓库基于提交时的状态暂存工作树变更；出现冲突即停止，暂存成功后才能提交。"}},
+        {"name":"unstage","kind":"invoke","channel":"git:unstage","desktop":{"surface":"bridge-only","use":"批量移出暂存区的 IPC"},"web":{"status":"pending","target":"rpc","semantic":"索引撤销不改工作树，记录操作后状态并保留原文件。"}},
+        {"name":"discard","kind":"invoke","channel":"git:discard","desktop":{"surface":"bridge-only","use":"恢复跟踪文件或删除未跟踪文件的 IPC"},"web":{"status":"pending","target":"rpc","semantic":"将还原与删除分开列出并明确确认范围；宿主复核选择与路径归属。"}},
+        {"name":"commit","kind":"invoke","channel":"git:commit","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/redesign/GitWidget.tsx","use":"提交面板发送已编辑的提交消息"},"web":{"status":"pending","target":"rpc","semantic":"以真实索引为准，保留空提交、冲突及缺身份错误。"}},
+        {"name":"setConfig","kind":"invoke","channel":"git:set-config","desktop":{"surface":"bridge-only","use":"Git 作者姓名与邮箱写入桥（repo/global）"},"web":{"status":"pending","target":"rpc","semantic":"仓库身份与宿主全局身份要独立授权；明确写入目标，勿误作 Web 账户资料。"}},
+        {"name":"branches","kind":"invoke","channel":"git:branches","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/redesign/GitWidget.tsx","use":"分支菜单加载本地与远程分支以及上游"},"web":{"status":"pending","target":"rpc","semantic":"以完整分支身份呈现当前分支、远程和跟踪关系。"}},
+        {"name":"checkout","kind":"invoke","channel":"git:checkout","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/redesign/GitWidget.tsx","use":"分支菜单切换已有本地分支"},"web":{"status":"pending","target":"rpc","semantic":"保留脏工作树被阻止的状态并在切换后更新 Git 卡。"}},
+        {"name":"createBranch","kind":"invoke","channel":"git:create-branch","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/redesign/GitWidget.tsx","use":"分支菜单创建并切换新分支"},"web":{"status":"pending","target":"rpc","semantic":"校验分支名，对是否切换有明确意图，回显最终分支。"}},
+        {"name":"checkoutRemote","kind":"invoke","channel":"git:checkout-remote","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/redesign/GitWidget.tsx","use":"分支菜单把远程分支检出为本地跟踪分支"},"web":{"status":"pending","target":"rpc","semantic":"区分检出现有本地分支与创建跟踪分支，避免名称歧义。"}},
+        {"name":"merge","kind":"invoke","channel":"git:merge","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/redesign/GitWidget.tsx","use":"分支菜单合并到当前分支并显示冲突"},"web":{"status":"pending","target":"rpc","semantic":"以当前分支为目标，合并冲突须保留宿主操作状态供处理。"}},
+        {"name":"mergeAbort","kind":"invoke","channel":"git:merge-abort","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/redesign/GitWidget.tsx","use":"合并冲突操作撤销正在进行的合并"},"web":{"status":"pending","target":"rpc","semantic":"仅中止真实存在的合并，重拉工作树和冲突状态。"}},
+        {"name":"deleteBranch","kind":"invoke","channel":"git:delete-branch","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/redesign/GitWidget.tsx","use":"分支菜单删除本地分支，未合并时二次确认"},"web":{"status":"pending","target":"rpc","semantic":"保留未合并提交数与显式强删；不把失败自动转成强删。"}},
+        {"name":"renameBranch","kind":"invoke","channel":"git:rename-branch","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/redesign/GitWidget.tsx","use":"分支菜单重命名本地分支"},"web":{"status":"pending","target":"rpc","semantic":"用稳定原分支名和校验后的新名称执行，随后刷新当前分支。"}},
+        {"name":"deleteRemoteBranch","kind":"invoke","channel":"git:delete-remote-branch","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/redesign/GitWidget.tsx","use":"分支菜单确认后删除远程分支"},"web":{"status":"pending","target":"rpc","semantic":"确认远程与该分支组合；成功后同步远程引用列表。"}},
+        {"name":"log","kind":"invoke","channel":"git:log","desktop":{"surface":"bridge-only","use":"按深度读取提交历史的 IPC"},"web":{"status":"pending","target":"rpc","semantic":"限制历史条数，投影提交标识、作者和摘要。"}},
+        {"name":"init","kind":"invoke","channel":"git:init","desktop":{"surface":"bridge-only","use":"在选定工作区初始化仓库的 IPC"},"web":{"status":"pending","target":"rpc","semantic":"如果提供建仓入口，只允许操作授权目录，结果回到真实状态。"}},
+        {"name":"fetch","kind":"invoke","channel":"git:fetch","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/redesign/GitWidget.tsx","use":"Git 菜单取回上游引用"},"web":{"status":"pending","target":"rpc","semantic":"只刷新远程追踪和状态；不把 fetch 等同于 pull。"}},
+        {"name":"pull","kind":"invoke","channel":"git:pull","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/redesign/GitWidget.tsx","use":"Git 菜单拉取更新"},"web":{"status":"pending","target":"rpc","semantic":"返回鉴权、网络、脏工作树或冲突分类，不自动吞并错误。"}},
+        {"name":"push","kind":"invoke","channel":"git:push","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/redesign/GitWidget.tsx","use":"Git 菜单推送，首次推送时传新上游分支"},"web":{"status":"pending","target":"rpc","semantic":"保留首推设置上游与常规推送的差别，凭据交宿主 Git 管理。"}},
+        {"name":"generateCommitMessage","kind":"invoke","channel":"git:generate-commit-message","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/redesign/GitWidget.tsx","use":"提交窗口让模型根据待提交改动生成消息"},"web":{"status":"pending","target":"rpc","semantic":"请求 ID 串联进度和最终文本；使用配置好的服务端模型，不返回凭据或自动提交。"}},
+        {"name":"cancelCommitMessage","kind":"invoke","channel":"git:cancel-commit-message","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/redesign/GitWidget.tsx","use":"提交窗口关闭或停止时中断生成"},"web":{"status":"pending","target":"rpc","semantic":"只停止当前请求的生成，保留已生成文本且不影响仓库状态。"}},
+        {"name":"onCommitMessageDelta","kind":"subscription","channel":"git:commit-gen-delta","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/redesign/GitWidget.tsx","use":"提交窗口按请求 ID 替换正在生成的文本"},"web":{"status":"pending","target":"events","semantic":"按请求隔离片段顺序，停止或离开时释放订阅，最终文本由结果收敛。"}}
+      ]
+    },
+    {
+      "name": "tasks",
+      "host": "apps/desktop/src/main/services/tasks.ts",
+      "methods": [
+        {"name":"list","kind":"invoke","channel":"tasks:list","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/store/tasks.tsx","use":"任务状态载入任务面板和绑定对话关系"},"web":{"status":"pending","target":"bootstrap","semantic":"启动投影任务日程、启停、最近结果和对话关系，并依当前用户/宿主权限过滤。"}},
+        {"name":"get","kind":"invoke","channel":"tasks:get","desktop":{"surface":"bridge-only","use":"供按 ID 读取单条任务记录的 IPC；任务面板从列表取得详情"},"web":{"status":"pending","target":"rpc","semantic":"详情含最近执行与下次触发，处理已删除条目。"}},
+        {"name":"create","kind":"invoke","channel":"tasks:create","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/store/tasks.tsx","use":"任务管理表单创建经确认的定时任务"},"web":{"status":"pending","target":"rpc","semantic":"提交明确的日程、角色与模型授权；一次性和周期任务保留校验差别。"}},
+        {"name":"update","kind":"invoke","channel":"tasks:update","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/store/tasks.tsx","use":"任务管理更新日程、设置或绑定会话"},"web":{"status":"pending","target":"rpc","semantic":"补丁区分解绑与保持不变；无效日程不能静默替换现有计划。"}},
+        {"name":"remove","kind":"invoke","channel":"tasks:delete","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/store/tasks.tsx","use":"任务管理移除定时任务"},"web":{"status":"pending","target":"rpc","semantic":"取消后续触发并同步列表；任务历史和关联对话按宿主既有语义处理。"}},
+        {"name":"setStatus","kind":"invoke","channel":"tasks:set-status","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/store/tasks.tsx","use":"任务面板切换任务状态"},"web":{"status":"pending","target":"rpc","semantic":"明确暂停、恢复和完成各自的调度影响，回传最终状态。"}},
+        {"name":"runNow","kind":"invoke","channel":"tasks:run-now","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/store/tasks.tsx","use":"任务面板按 ID 手动运行"},"web":{"status":"pending","target":"rpc","semantic":"回传已入队/已经排队/正在执行，避免重复入队。"}},
+        {"name":"preview","kind":"invoke","channel":"tasks:preview","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/features/chat/TaskConfirmCard.tsx","use":"任务确认名片实时校验日程并生成下次触发预览"},"web":{"status":"pending","target":"rpc","semantic":"保留时区、文案语言、展示已过期一次性任务和编辑严格判定的区别。"}},
+        {"name":"onChanged","kind":"subscription","channel":"tasks:changed","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/store/tasks.tsx","use":"任务状态接收任务列表全量广播"},"web":{"status":"pending","target":"events","semantic":"任务变更推送与启动快照对齐，重连恢复错过的运行结果。"}},
+        {"name":"onNavigate","kind":"subscription","channel":"tasks:navigate","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/redesign/ChatFirstShell.tsx","host":"apps/desktop/src/main/index.ts","use":"系统通知或托盘唤起指定会话或任务面板"},"web":{"status":"pending","target":"client","semantic":"本地 Web 导航处理受信任务深链，校验目标是否存在；托盘跳转不变成远程命令。"}}
+      ]
+    },
+    {
+      "name": "clipboard",
+      "host": "apps/desktop/src/main/services/clipboard.ts",
+      "methods": [
+        {"name":"readText","kind":"invoke","channel":"clipboard:read-text","desktop":{"surface":"bridge-only","use":"主进程纯文本剪贴板读取桥"},"web":{"status":"pending","target":"client","semantic":"若需粘贴，浏览器用户手势或 paste 事件读取客户端剪贴板，宿主不代读。"}},
+        {"name":"writeText","kind":"invoke","channel":"clipboard:write-text","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/redesign/Conversation.tsx","use":"文本复制交给 Electron 原生剪贴板"},"web":{"status":"pending","target":"client","semantic":"用浏览器剪贴板写入当前客户端，区分权限失败和实际写入成功。"}}
+      ]
+    },
+    {
+      "name": "deliverables",
+      "host": "apps/desktop/src/main/services/deliverables.ts",
+      "methods": [
+        {"name":"inspect","kind":"invoke","channel":"deliverables:inspect","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/features/chat/DeliverablesCard.tsx","use":"交付卡用会话和工具使用 ID 查询实际交付项"},"web":{"status":"pending","target":"rpc","semantic":"从授权历史定位文件，投影名称和可打开性；绝不接收任意文件路径。"}},
+        {"name":"thumbnail","kind":"invoke","channel":"deliverables:thumbnail","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/features/chat/DeliverablesCard.tsx","use":"交付卡请求缩略图或系统文件图标"},"web":{"status":"pending","target":"download","semantic":"以受权的交付项索引取缩略图，缺图用 Web 图标，避免透露宿主绝对路径。"}},
+        {"name":"open","kind":"invoke","channel":"deliverables:open","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/features/chat/DeliverablesCard.tsx","use":"交付卡用宿主默认应用打开成品文件"},"web":{"status":"pending","target":"download","semantic":"Web 提供同一授权条目的预览或下载；保护不安全文件类型，不远程唤起桌面应用。"}},
+        {"name":"reveal","kind":"invoke","channel":"deliverables:reveal","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/features/chat/DeliverablesCard.tsx","use":"交付卡在系统文件管理器选中成品"},"web":{"status":"pending","target":"client","semantic":"在授权工作区树定位并选择交付项；工作区外的交付回到该对话交付卡。"}}
+      ]
+    },
+    {
+      "name": "workspace",
+      "host": "apps/desktop/src/main/services/role-home.ts",
+      "methods": [
+        {"name":"roleHome","kind":"invoke","channel":"workspace:role-home","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/redesign/PersonaFolderField.tsx","use":"角色的工作区设置显示默认目录及是否存在"},"web":{"status":"pending","target":"rpc","semantic":"显示角色默认工作区标签和可用性；以授权引用替代直接泄露服务器路径。"}}
+      ]
+    },
+    {
+      "name": "browser",
+      "host": "apps/desktop/src/main/services/browser/host.ts",
+      "methods": [
+        {"name":"getState","kind":"invoke","channel":"browser:state","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/features/browser/shared.tsx","use":"浏览器胶囊共享 hook 拉取自动化浏览器状态"},"web":{"status":"pending","target":"rpc","semantic":"按授权会话投影标签、当前操作和接管等待，不暴露其他会话。"}},
+        {"name":"ready","kind":"invoke","channel":"browser:ready","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/features/browser/BrowserChrome.tsx","use":"浏览器外框初始化通知宿主并拉状态"},"web":{"status":"pending","target":"bootstrap","semantic":"Workbench 浏览器面板用准备完成后的初始状态接续订阅；无 Electron 外框 ready 信号。"}},
+        {"name":"onState","kind":"subscription","channel":"browser:state","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/features/browser/BrowserChrome.tsx","use":"浏览器外框订阅标签、操作和接管状态"},"web":{"status":"pending","target":"events","semantic":"状态事件按会话作用域分发；重连取最新状态而非继续显示旧接管卡。"}},
+        {"name":"open","kind":"invoke","channel":"browser:open","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/features/browser/BrowserCapsule.tsx","use":"聊天胶囊打开独立浏览器窗口的指定标签"},"web":{"status":"pending","target":"rpc","semantic":"打开授权标签的工作台查看/接管面板，不能当作打开桌面的原生窗口。"}},
+        {"name":"dock","kind":"invoke","channel":"browser:dock","desktop":{"surface":"bridge-only","use":"原生浏览器挂靠后继续在后台运行的桥"},"web":{"status":"pending","target":"client","semantic":"收起工作台视图不终止宿主标签或正在运行的操作。"}},
+        {"name":"closeSession","kind":"invoke","channel":"browser:close-session","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/features/browser/shared.tsx","use":"关闭胶囊对应会话的网页"},"web":{"status":"pending","target":"rpc","semantic":"按会话关闭其标签；处于用户接管时必须返回不可关闭状态。"}},
+        {"name":"setPreviewPinned","kind":"invoke","channel":"browser:preview-pinned","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/features/browser/BrowserCapsule.tsx","use":"胶囊固定标签预览以延缓宿主回收"},"web":{"status":"pending","target":"rpc","semantic":"为当前授权预览建立短期保活，关闭或失联应解除保活。"}},
+        {"name":"liveStart","kind":"invoke","channel":"browser:live-start","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/features/browser/BrowserCapsule.tsx","use":"悬停胶囊打开某标签实时画面"},"web":{"status":"pending","target":"rpc","semantic":"开启授权标签画面订阅，定义同一观看者的切换、节流和容量。"}},
+        {"name":"liveStop","kind":"invoke","channel":"browser:live-stop","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/features/browser/BrowserCapsule.tsx","use":"胶囊预览消失时停止传送实时画面"},"web":{"status":"pending","target":"rpc","semantic":"只释放当前观看者的预览资源；关闭视图或断开连接同样清理。"}},
+        {"name":"onLiveFrame","kind":"subscription","channel":"browser:live-frame","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/features/browser/BrowserCapsule.tsx","host":"apps/desktop/src/main/services/browser/live.ts","use":"胶囊接收带标签 ID 的 JPEG 帧"},"web":{"status":"pending","target":"events","semantic":"按已授权标签过滤和限速；断线关闭流，不把过时帧覆盖当前标签。"}},
+        {"name":"pin","kind":"invoke","channel":"browser:pin","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/features/browser/BrowserChrome.tsx","use":"浏览器外框切换原生窗口总在最前"},"web":{"status":"pending","target":"client","semantic":"在 Workbench 内保持接管面板可见并允许解除固定；仅作用于当前客户端。"}},
+        {"name":"activate","kind":"invoke","channel":"browser:activate","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/features/browser/BrowserChrome.tsx","use":"浏览器外框切换当前活动标签"},"web":{"status":"pending","target":"rpc","semantic":"只允许操作会话可见标签，成功后协调当前标签投影。"}},
+        {"name":"closeTab","kind":"invoke","channel":"browser:close-tab","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/features/browser/BrowserChrome.tsx","use":"浏览器外框点击关闭或中键关指定标签"},"web":{"status":"pending","target":"rpc","semantic":"按会话授权关闭标签，保持有待接管时的限制，并更新活动项。"}},
+        {"name":"nav","kind":"invoke","channel":"browser:nav","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/features/browser/BrowserChrome.tsx","use":"浏览器外框对活动标签发出后退等导航指令"},"web":{"status":"pending","target":"rpc","semantic":"导航动作用固定白名单区分前进、后退、刷新和停止加载。"}},
+        {"name":"menu","kind":"invoke","channel":"browser:menu","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/features/browser/BrowserChrome.tsx","use":"外框用坐标弹出系统原生菜单"},"web":{"status":"pending","target":"client","semantic":"改为浏览器 DOM 菜单，以受控导航能力和浏览器剪贴板实现相同行为。"}},
+        {"name":"thumbnail","kind":"invoke","channel":"browser:thumbnail","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/features/browser/BrowserCapsule.tsx","use":"胶囊在实时帧到达前展示标签缩略图"},"web":{"status":"pending","target":"download","semantic":"按授权标签获取受限体积图像，返回空时可回退占位图。"}},
+        {"name":"handoff","kind":"invoke","channel":"browser:handoff","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/features/browser/BrowserChrome.tsx","use":"外框接管条上的完成继续或跳过"},"web":{"status":"pending","target":"rpc","semantic":"决议绑定正在等待的会话及接管实例，重复/过期决定不能继续别的操作。"}},
+        {"name":"stop","kind":"invoke","channel":"browser:stop","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/features/browser/BrowserChrome.tsx","use":"外框操作状态条停止该会话回合"},"web":{"status":"pending","target":"rpc","semantic":"与会话停止共享宿主状态；须明确目标会话和当前回合结果。"}}
+      ]
+    },
+    {
+      "name": "update",
+      "host": "apps/desktop/src/main/services/updater.ts",
+      "methods": [
+        {"name":"getState","kind":"invoke","channel":"update:get-state","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/redesign/UpdateSection.tsx","use":"关于面板读取 Electron 客户端更新状态"},"web":{"status":"pending","target":"rpc","semantic":"关于设置显示当前部署版本和受限部署助手的检查、下载、安装结果；区分浏览器壳与宿主版本。"}},
+        {"name":"check","kind":"invoke","channel":"update:check","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/redesign/UpdateSection.tsx","use":"关于面板触发 Electron 更新检查"},"web":{"status":"pending","target":"rpc","semantic":"通过受限部署助手查询配置的版本来源，返回可用版本、权限错误或无需更新。"}},
+        {"name":"download","kind":"invoke","channel":"update:download","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/redesign/UpdateSection.tsx","use":"关于面板下载桌面安装包或打开系统直链"},"web":{"status":"pending","target":"rpc","semantic":"由有管理权限的用户请求部署助手获取已审定版本产物；显示校验与下载进度。"}},
+        {"name":"install","kind":"invoke","channel":"update:install","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/redesign/UpdateSection.tsx","use":"关于面板触发桌面安装并重启应用"},"web":{"status":"pending","target":"rpc","semantic":"由有管理权限的用户明确确认安装已校验版本；按部署助手流程安装并在服务恢复后展示结果。"}},
+        {"name":"onState","kind":"subscription","channel":"update:state","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/redesign/UpdateSection.tsx","use":"关于面板接收桌面更新的下载和安装状态"},"web":{"status":"pending","target":"events","semantic":"订阅受限部署助手的检查、下载与安装状态，重连回补进度和部署终态。"}}
+      ]
+    },
+    {
+      "name": "remote",
+      "host": "apps/desktop/src/main/services/remote/index.ts",
+      "methods": [
+        {"name":"getState","kind":"invoke","channel":"remote:get-state","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/redesign/BotsPane.tsx","use":"机器人管理载入已配置的机器人和用户"},"web":{"status":"pending","target":"rpc","semantic":"返回允许管理的通道、状态和用户摘要，不回传 bot token。"}},
+        {"name":"scanStart","kind":"invoke","channel":"remote:scan-start","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/redesign/BotsPane.tsx","use":"机器人管理开始飞书/Telegram 的设备授权流程"},"web":{"status":"pending","target":"rpc","semantic":"按平台启动有时限授权；秘密仅送宿主，授权状态与二维码分开投影。"}},
+        {"name":"scanCancel","kind":"invoke","channel":"remote:scan-cancel","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/redesign/BotsPane.tsx","use":"退出扫码面板时取消登记流程"},"web":{"status":"pending","target":"rpc","semantic":"按当前可管理的 scanId 作废未完成流程，重试不能沿用旧票据。"}},
+        {"name":"setEnabled","kind":"invoke","channel":"remote:set-enabled","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/redesign/BotsPane.tsx","use":"机器人详情打开或关闭通道"},"web":{"status":"pending","target":"rpc","semantic":"启用意图与实际连接状态分别显示，包含失败反馈。"}},
+        {"name":"setReplyMode","kind":"invoke","channel":"remote:set-reply-mode","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/redesign/BotsPane.tsx","use":"机器人详情配置流式或完整回复"},"web":{"status":"pending","target":"rpc","semantic":"按 bot 保存并回读 stream/final 的通道投递策略，不修改 Workbench 自己的流协议。"}},
+        {"name":"setScope","kind":"invoke","channel":"remote:set-scope","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/redesign/BotsPane.tsx","use":"机器人详情配置所有会话、角色或会话白名单"},"web":{"status":"pending","target":"rpc","semantic":"校验作用域和可见会话，保留切换模式时的名单语义。"}},
+        {"name":"deleteBot","kind":"invoke","channel":"remote:delete-bot","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/redesign/BotsPane.tsx","use":"确认后移除机器人及其通道"},"web":{"status":"pending","target":"rpc","semantic":"删除前确认实际 bot，宿主释放连接并同步列表。"}},
+        {"name":"pairCode","kind":"invoke","channel":"remote:pair-code","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/redesign/BotsPane.tsx","use":"机器人详情签发短时配对码"},"web":{"status":"pending","target":"rpc","semantic":"仅管理者能签发，与当前 bot、到期时间和撤销状态绑定。"}},
+        {"name":"pairCancel","kind":"invoke","channel":"remote:pair-cancel","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/redesign/BotsPane.tsx","use":"关闭配对流程时作废未使用配对码"},"web":{"status":"pending","target":"rpc","semantic":"只作废当前 bot 的待配对票据，不踢出既有用户。"}},
+        {"name":"removeUser","kind":"invoke","channel":"remote:remove-user","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/redesign/BotsPane.tsx","use":"机器人详情移除一个已配对用户"},"web":{"status":"pending","target":"rpc","semantic":"按 bot 和用户 ID 撤销访问，将该用户从可见列表移除。"}},
+        {"name":"onChanged","kind":"subscription","channel":"remote:changed","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/redesign/BotsPane.tsx","use":"机器人管理同步通道全状态"},"web":{"status":"pending","target":"events","semantic":"推送管理投影或失效事件，重连取状态快照且保护 bot 归属。"}},
+        {"name":"onScan","kind":"subscription","channel":"remote:scan","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/redesign/BotsPane.tsx","use":"扫码面板按 scanId 得知扫码最终结果"},"web":{"status":"pending","target":"events","semantic":"过滤为当前授权的扫码流程，新连接不能读到另一用户的扫码状态。"}}
+      ]
+    },
+    {
+      "name": "phone",
+      "host": "apps/desktop/src/main/services/remote/web/phone.ts",
+      "methods": [
+        {"name":"getState","kind":"invoke","channel":"phone:get-state","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/redesign/PhonePane.tsx","use":"手机面板显示通道、在线状态和设备"},"web":{"status":"pending","target":"rpc","semantic":"配对管理投影须与 Workbench 自身握手分离，只允许管理已授权宿主。"}},
+        {"name":"add","kind":"invoke","channel":"phone:add","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/redesign/BotsPane.tsx","use":"机器人页创建唯一的 Deva 手机版通道"},"web":{"status":"pending","target":"rpc","semantic":"创建时保持唯一性和重复提交幂等，返回真实通道状态。"}},
+        {"name":"remove","kind":"invoke","channel":"phone:remove","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/redesign/PhonePane.tsx","use":"手机面板确认删除所有手机连接通道"},"web":{"status":"pending","target":"rpc","semantic":"确认范围后撤销已连手机；Workbench 登录或通道生命周期不得被误删。"}},
+        {"name":"setEnabled","kind":"invoke","channel":"phone:set-enabled","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/redesign/PhonePane.tsx","use":"手机面板启停手机访问"},"web":{"status":"pending","target":"rpc","semantic":"区分外部访问状态与本地 Workbench 会话的可用性。"}},
+        {"name":"retry","kind":"invoke","channel":"phone:retry","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/redesign/PhonePane.tsx","use":"手机面板重新连接错误的通道"},"web":{"status":"pending","target":"rpc","semantic":"重试指定手机链路，错误仅改变该链路的状态。"}},
+        {"name":"qr","kind":"invoke","channel":"phone:qr","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/redesign/PhonePane.tsx","use":"手机面板签发限时一次性配对二维码"},"web":{"status":"pending","target":"rpc","semantic":"二维码管理与 Workbench 会话引导分离；票据须短时、单次、有通道绑定。"}},
+        {"name":"link","kind":"invoke","channel":"phone:link","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/redesign/PhonePane.tsx","use":"手机面板复制网页版一次性配对链接"},"web":{"status":"pending","target":"rpc","semantic":"仅管理者签发可过期单次链接；不能把旧手机版链接当 Workbench 登录凭据。"}},
+        {"name":"qrCancel","kind":"invoke","channel":"phone:qr-cancel","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/redesign/PhonePane.tsx","use":"收起手机二维码时废弃未使用票据"},"web":{"status":"pending","target":"rpc","semantic":"撤销现有未消费票据并保留已经绑定的设备。"}},
+        {"name":"removeDevice","kind":"invoke","channel":"phone:remove-device","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/redesign/PhonePane.tsx","use":"手机面板按设备 ID 踢出设备"},"web":{"status":"pending","target":"rpc","semantic":"撤销受管设备的连接和恢复凭据，不影响其他设备。"}},
+        {"name":"onChanged","kind":"subscription","channel":"phone:changed","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/redesign/PhonePane.tsx","use":"手机面板刷新通道状态与设备清单"},"web":{"status":"pending","target":"events","semantic":"推送更新设备管理视图，重连重新取快照，避免显示已移除设备。"}},
+        {"name":"onPaired","kind":"subscription","channel":"phone:paired","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/redesign/PhonePane.tsx","use":"二维码对话框更新为设备已连接"},"web":{"status":"pending","target":"events","semantic":"按票据与已授权视图关联配对结果，不以二维码本身当成已配对证明。"}}
+      ]
+    }
+  ],
+  "values": [
+    {"name":"platform","expression":"process.platform","desktop":{"surface":"ui","host":"apps/desktop/src/preload/index.ts","entry":"apps/desktop/src/renderer/src/redesign/shell-common.tsx","use":"聊天外壳以宿主平台决定 macOS 控件留白与 Windows 路径比较。"},"web":{"status":"pending","target":"bootstrap","semantic":"启动投影显式给出实际宿主平台（容器部署为 Linux），供工作区路径与宿主 shell 语义使用；显示和快捷键独立采用客户端语义。"}}
+  ],
+  "flows": [
+    {"id":"bootstrap","methods":["config.getSync","profile.get","personas.list","chat.listSessions","tasks.list"],"precedent":"apps/desktop/src/main/services/remote/web/adapter.ts","expectation":"新连接先建立身份及协议版本，再返回当前授权范围的初始状态；首帧主题无闪烁，启动投影的宿主平台独立于客户端显示和快捷键。"},
+    {"id":"reconnect","methods":["chat.attachSession","chat.loadSession","chat.onEvent","chat.onSessionsChanged","chat.onRemoteChange"],"precedent":"apps/desktop/src/main/services/remote/web/adapter.ts","expectation":"正在流式回复时断开再连：复用身份，重取历史和运行锚点，补齐错过的已持久事件；终态消息仅展示一次，释放旧订阅；拒绝已被撤销的连接。"},
+    {"id":"upload","methods":["fs.pickAttachments","fs.pasteAttachment","fs.droppedEntries","fs.attachmentImage","chat.send","chat.attachmentImage"],"precedent":"apps/desktop/src/main/services/remote/web/files.ts","expectation":"选择、拖放或粘贴字节得到有归属的上传引用；测试分段、超限、取消、过期、跨用户误用和发送后历史预览。浏览器提供的路径不能成为宿主授权。"},
+    {"id":"approvals","methods":["chat.onEvent","chat.respondAsk","chat.respondPlan","chat.respondMount","chat.resolveProposal","chat.resolveAutotask","browser.handoff"],"precedent":"apps/desktop/src/main/services/remote/web/adapter.ts","expectation":"重连时恢复未决卡；取消、退回、批准分别回写真实终态。重复、过期、跨会话决定应被识别；定时任务仅创建一次，挂载只接受已授权目录。"},
+    {"id":"git-widget","methods":["git.status","git.branches","git.merge","git.mergeAbort","git.stage","git.commit","git.generateCommitMessage","git.onCommitMessageDelta","git.cancelCommitMessage"],"expectation":"从已授权的聚焦工作区进入 Git UI，能处理中止合并和错误反馈；拟生成提交消息的片段按请求隔离，关闭面板清理订阅，生成文本不触发提交。"},
+    {"id":"deliverables","methods":["deliverables.inspect","deliverables.thumbnail","deliverables.open"],"precedent":"apps/desktop/src/main/services/remote/web/files.ts","expectation":"按会话、工具调用和交付索引下载可见文件；伪造索引或跨会话引用失败，网页操作不唤起远端桌面默认应用。"},
+    {"id":"private-pty","methods":["terminal.listShells","terminal.create","terminal.write","terminal.resize","terminal.dispose","terminal.onData","terminal.onExit"],"precedent":"apps/desktop/src/main/services/terminal.ts","expectation":"经私有 worker 创建 PTY，输入和事件只对所有者有效；测试非法尺寸、退出通知、断线重连策略、背压和资源回收。历史桌面桥只用于核对语义。"}
+  ]
+}
