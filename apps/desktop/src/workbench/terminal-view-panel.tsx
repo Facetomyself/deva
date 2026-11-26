@@ -1,4 +1,4 @@
-import { useId, useLayoutEffect, useRef, useSyncExternalStore } from 'react'
+import { useId, useLayoutEffect, useRef, useSyncExternalStore, type ReactNode } from 'react'
 import { useI18n } from '../renderer/src/i18n/i18n'
 import { sameTerminalTarget, type TerminalView, type TerminalViewState } from './terminal-view-controller'
 import { TERMINAL_COMPACT_SIZE, TERMINAL_DEFAULT_SIZE, type TerminalKey, type TerminalTarget } from './terminal-view-transport'
@@ -10,7 +10,9 @@ const copy = {
     snapshot: '磁盘快照', revision: '版本', loading: '正在打开查看器…', active: '只读文本查看器已连接。',
     pending: '正在等待查看器确认…', reconnecting: '正在重新连接到此查看器…',
     keys: '在查看器内使用方向键、Page Up、Page Down、Home、End 或 Q。', resize: '调整为',
-    position: '行偏移 / 列偏移 / 总行数', exitTitle: '查看器已退出', code: '退出码', signal: '信号',
+    viewport: '视口', firstColumn: '起始列',
+    rowRange: (first: number, last: number, total: number) => `第 ${first === last ? first : `${first}–${last}`} 行，共 ${total} 行`,
+    navigate: '查看器导航', moreNavigation: '更多导航', exitTitle: '查看器已退出', code: '退出码', signal: '信号',
     navigation: { up: '上移', down: '下移', left: '左移', right: '右移', 'page-up': '上一页', 'page-down': '下一页', home: '开头', end: '末尾', quit: '退出查看器' },
     reasons: { quit: '手动退出', disposed: '已关闭', fault: '查看器故障', 'worker-lost': '查看进程连接丢失' },
     issues: {
@@ -28,7 +30,9 @@ const copy = {
     snapshot: 'Disk snapshot', revision: 'Revision', loading: 'Opening the viewer…', active: 'Read-only text viewer connected.',
     pending: 'Waiting for the viewer to confirm…', reconnecting: 'Reconnecting to this viewer…',
     keys: 'In the viewer, use the arrow keys, Page Up, Page Down, Home, End or Q.', resize: 'Resize to',
-    position: 'Row offset / column offset / total lines', exitTitle: 'Viewer exited', code: 'Exit code', signal: 'Signal',
+    viewport: 'Viewport', firstColumn: 'First visible column',
+    rowRange: (first: number, last: number, total: number) => first === last ? `Row ${first} of ${total}` : `Rows ${first}–${last} of ${total}`,
+    navigate: 'Viewer navigation', moreNavigation: 'More navigation', exitTitle: 'Viewer exited', code: 'Exit code', signal: 'Signal',
     navigation: { up: 'Up', down: 'Down', left: 'Left', right: 'Right', 'page-up': 'Previous page', 'page-down': 'Next page', home: 'Top', end: 'Bottom', quit: 'Quit viewer' },
     reasons: { quit: 'Quit', disposed: 'Closed', fault: 'Viewer fault', 'worker-lost': 'Viewer process disconnected' },
     issues: {
@@ -47,23 +51,37 @@ const keyboard = new Map<string, TerminalKey>([
   ['ArrowUp', 'up'], ['ArrowDown', 'down'], ['ArrowLeft', 'left'], ['ArrowRight', 'right'], ['PageUp', 'page-up'],
   ['PageDown', 'page-down'], ['Home', 'home'], ['End', 'end'], ['q', 'quit'], ['Q', 'quit']
 ])
-const controls = [
-  ['page-up', 'workbench-tty-previous'], ['page-down', 'workbench-tty-next'], ['up', 'workbench-tty-up'], ['down', 'workbench-tty-down'],
-  ['left', 'workbench-tty-left'], ['right', 'workbench-tty-right'], ['home', 'workbench-tty-home'], ['end', 'workbench-tty-end'], ['quit', 'workbench-tty-quit']
+const moreControls = [
+  ['up', 'workbench-tty-up'], ['down', 'workbench-tty-down'], ['left', 'workbench-tty-left'], ['right', 'workbench-tty-right'],
+  ['home', 'workbench-tty-home'], ['end', 'workbench-tty-end']
 ] as const
+const closedView = { phase: 'closed' } as const
+const emptyView = () => closedView
+const emptySubscribe = () => () => {}
 
-export function TerminalViewer({ api, target }: { api: TerminalView; target: TerminalTarget }): React.JSX.Element {
-  const view = useSyncExternalStore(api.subscribe, api.snapshot, api.snapshot)
+export function TerminalViewer({ api, target, children }: { api?: TerminalView; target?: TerminalTarget; children: ReactNode }): React.JSX.Element {
+  const view = useSyncExternalStore(api?.subscribe ?? emptySubscribe, api?.snapshot ?? emptyView, api?.snapshot ?? emptyView)
   const c = copy[useI18n().locale === 'zh-CN' ? 'zh-CN' : 'en']
   const launch = useRef<HTMLButtonElement>(null)
+  const restoreLaunchFocus = useRef(false)
   const id = useId()
-  const opened = view.phase !== 'closed' && sameTerminalTarget(view.target, target)
-  function close(): void { api.dismiss(); launch.current?.focus() }
-  return <div className="wb-tty" data-workspace-tty="">
-    <button type="button" className="cf-btn" ref={launch} data-testid="workbench-tty-open" aria-expanded={opened}
-      aria-controls={opened ? id : undefined} onClick={(event) => { if (event.nativeEvent.isTrusted) void api.open(target) }}>{c.open}</button>
-    {opened && <ViewerPanel {...{ api, id, view, c, close }} />}
-  </div>
+  const opened = !!api && !!target && view.phase !== 'closed' && sameTerminalTarget(view.target, target)
+  useLayoutEffect(() => {
+    if (!opened && restoreLaunchFocus.current) {
+      restoreLaunchFocus.current = false
+      launch.current?.focus()
+    }
+  }, [opened])
+  function close(): void { restoreLaunchFocus.current = true; api?.dismiss() }
+  return <>
+    {api && target && <div className="wb-tty" data-workspace-tty="">
+      {opened ? <ViewerPanel {...{ api, id, view, c, close }} /> :
+        <button type="button" className="cf-btn" ref={launch} data-testid="workbench-tty-open"
+          onClick={(event) => { if (event.nativeEvent.isTrusted) void api.open(target) }}>{c.open}</button>}
+    </div>}
+    {/* Keep the closed editor in one reconciliation slot as clean/dirty eligibility changes. */}
+    {!opened && children}
+  </>
 }
 
 function ViewerPanel({ api, id, view, c, close }: {
@@ -91,6 +109,10 @@ function ViewerPanel({ api, id, view, c, close }: {
     TERMINAL_DEFAULT_SIZE : TERMINAL_COMPACT_SIZE
   const message = issue ? c.issues[issue] : exit ? `${c.exitTitle} · ${c.reasons[exit.reason]} · ${c.code}: ${exit.code} · ${c.signal}: ${exit.signal}` :
     phase === 'loading' || phase === 'active' || phase === 'pending' || phase === 'reconnecting' ? c[phase] : undefined
+  const tabIndex = screen && phase !== 'exited' ? undefined : -1
+  const keyButton = (key: TerminalKey, testId: string): React.JSX.Element =>
+    <button key={key} type="button" className="cf-btn" data-testid={testId} aria-disabled={!active} tabIndex={tabIndex}
+      onClick={(event) => { if (active && event.nativeEvent.isTrusted) void api.key(key) }}>{c.navigation[key]}</button>
   return <section className="wb-tty__panel" id={id} aria-labelledby={`${id}-title`} data-testid="workbench-tty-panel" onKeyDown={(event) => {
     if (event.defaultPrevented || !event.nativeEvent.isTrusted || event.nativeEvent.isComposing || event.altKey || event.ctrlKey || event.metaKey) return
     if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); close(); return }
@@ -104,21 +126,31 @@ function ViewerPanel({ api, id, view, c, close }: {
       <h3 id={`${id}-title`}>{c.title}</h3>
       <button type="button" className="cf-btn" ref={closeButton} data-testid="workbench-tty-close" onClick={close}>{c.close}</button>
     </header>
-    <p className="wb-tty__detail">{c.snapshot}: <bdi>{target.path}</bdi> · {c.revision}: <code>{target.revision}</code></p>
+    <p className="wb-tty__detail">{c.snapshot}: <bdi>{target.path}</bdi> · <span aria-hidden="true">{c.revision}: </span>
+      <code role="group" title={target.revision} aria-label={`${c.revision}: ${target.revision}`}>
+        <span aria-hidden="true">{target.revision.slice(0, 14)}…</span>
+      </code></p>
     <p className="wb-tty__detail" role={issue ? 'alert' : 'status'} data-testid="workbench-tty-status" data-status={phase} data-issue={issue}
       data-code={exit ? String(exit.code) : undefined} data-signal={exit ? String(exit.signal) : undefined} data-reason={exit?.reason}>{message}</p>
+    <div className="wb-tty__controls" role="group" aria-label={c.navigate}>
+      {keyButton('page-up', 'workbench-tty-previous')}
+      {keyButton('page-down', 'workbench-tty-next')}
+      <button type="button" className="cf-btn" data-testid="workbench-tty-size" aria-disabled={!active} tabIndex={tabIndex}
+        onClick={(event) => { if (active && event.nativeEvent.isTrusted) void api.resize(size) }}>{c.resize} {size.cols} × {size.rows}</button>
+      {keyButton('quit', 'workbench-tty-quit')}
+    </div>
     {screen && <>
-      <pre ref={screenElement} className="wb-tty__screen" tabIndex={0} role="region" aria-label={c.screen} aria-describedby={`${id}-keys`} dir="ltr"
+      <pre ref={screenElement} className="wb-tty__screen" tabIndex={0} role="region" aria-label={c.screen} aria-describedby={`${id}-receipt ${id}-keys`} dir="ltr"
         data-testid="workbench-tty-screen" data-cols={screen.cols} data-rows={screen.rows} data-top={screen.top} data-left={screen.left}
         data-total-lines={screen.totalLines}>{screen.lines.join('\n')}</pre>
-      <p className="wb-tty__detail" data-testid="workbench-tty-receipt">{screen.cols} × {screen.rows} · {c.position}: {screen.top} / {screen.left} / {screen.totalLines}</p>
+      <p id={`${id}-receipt`} className="wb-tty__detail wb-tty__receipt" data-testid="workbench-tty-receipt">
+        {c.viewport} {screen.cols} × {screen.rows} · {c.rowRange(screen.top + 1, screen.top + screen.lines.length, screen.totalLines)} · {c.firstColumn}: {screen.left + 1}
+      </p>
     </>}
     <p id={`${id}-keys`} className="wb-tty__detail">{c.keys}</p>
-    <div className="wb-tty__controls">
-      {controls.map(([key, testId]) => <button key={key} type="button" className="cf-btn" data-testid={testId} aria-disabled={!active} tabIndex={screen && phase !== 'exited' ? undefined : -1}
-        onClick={(event) => { if (active && event.nativeEvent.isTrusted) void api.key(key) }}>{c.navigation[key]}</button>)}
-      <button type="button" className="cf-btn" data-testid="workbench-tty-size" aria-disabled={!active} tabIndex={screen && phase !== 'exited' ? undefined : -1}
-        onClick={(event) => { if (active && event.nativeEvent.isTrusted) void api.resize(size) }}>{c.resize} {size.cols} × {size.rows}</button>
-    </div>
+    <details className="wb-tty__more">
+      <summary>{c.moreNavigation}</summary>
+      <div className="wb-tty__controls">{moreControls.map(([key, testId]) => keyButton(key, testId))}</div>
+    </details>
   </section>
 }

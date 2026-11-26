@@ -401,8 +401,10 @@ test('workspace details gate the actual bilingual viewer and render escaped, nam
   assert.doesNotMatch(render(files), /workbench-tty-open/)
   assert.doesNotMatch(render(files, f.viewer, false), /workbench-tty-open/)
   assert.match(render(files, f.viewer), /workbench-tty-open.*Open TTY viewer/)
+  assert.match(render(files, f.viewer), /workbench-workspace-editor[^>]*>editor text<\/textarea>/)
   assert.doesNotMatch(render(files, f.viewer), /workbench-tty-panel/)
   files.edit('unsaved')
+  assert.match(render(files, f.viewer), /workbench-workspace-editor[^>]*>unsaved<\/textarea>/)
   assert.doesNotMatch(render(files, f.viewer), /workbench-tty-open/)
   await files.openFile('binary')
   assert.doesNotMatch(render(files, f.viewer), /workbench-tty-open/)
@@ -412,19 +414,80 @@ test('workspace details gate the actual bilingual viewer and render escaped, nam
   locale = 'zh-CN'
   try {
     assert.match(render(files, f.viewer), /打开 TTY 查看器/)
-    await f.viewer.open(target)
+    const opening = f.viewer.open(target)
+    const loading = render(files, f.viewer)
+    assert.match(loading, /data-status="loading"/)
+    assert.doesNotMatch(loading, /workbench-(tty-open|workspace-editor)/)
+    await opening
     const html = render(files, f.viewer)
     for (const id of ['panel', 'screen', 'size', 'next', 'previous', 'quit', 'close', 'status']) assert.ok(html.includes(`data-testid="workbench-tty-${id}"`), id)
     assert.match(html, /<pre[^>]+tabindex="0"[^>]+role="region"[^>]+aria-label="TTY 文本屏幕"/)
     assert.match(html, /data-cols="80" data-rows="12" data-top="0" data-left="0" data-total-lines="90"/)
-    assert.match(html, /80 × 12.*调整为 64 × 8/s)
-    assert.match(html, /磁盘快照:.*docs\/名字 &lt;snapshot&gt;\.txt.*版本:.*r_[a-f0-9]{64}/)
+    assert.match(html, /调整为 64 × 8.*视口 80 × 12 · 第 1–3 行，共 90 行 · 起始列: 1/s)
+    assert.match(html, new RegExp(`<code role="group" title="${revision}" aria-label="版本: ${revision}"><span aria-hidden="true">${revision.slice(0, 14)}…</span></code>`))
+    assert.match(html, /磁盘快照:.*docs\/名字 &lt;snapshot&gt;\.txt.*版本:/)
     assert.match(html, /&lt;img src=x&gt;.*&lt;script&gt;plain&lt;\/script&gt;.*https:\/\/example.invalid\//s)
-    assert.doesNotMatch(html, /<img src=x>|<script>|href=|contenteditable/)
-    f.polls[0].resolve(batch(2, [exitEvent(2, quit)]))
+    assert.doesNotMatch(html, /<img src=x>|<script>|href=|contenteditable|workbench-(tty-open|workspace-editor)/)
+    const screenAt = html.indexOf('data-testid="workbench-tty-screen"')
+    for (const id of ['previous', 'next', 'size', 'quit']) assert.ok(html.indexOf(`data-testid="workbench-tty-${id}"`) < screenAt, id)
+    assert.match(html, /<details class="wb-tty__more"><summary>更多导航<\/summary>.*workbench-tty-up.*workbench-tty-end.*<\/details>/)
+    f.polls[0].resolve(batch(2, [screenEvent(2, { ...resized, lines: ['screen from resize', 'next visible row'] })]))
     await flush()
-    assert.match(render(files, f.viewer), /data-status="exited" data-code="17" data-signal="null" data-reason="quit".*退出码: 17/)
+    locale = 'en'
+    assert.match(render(files, f.viewer), /Viewport 64 × 8 · Rows 13–14 of 90 · First visible column: 4/)
+    assert.match(render(files, f.viewer), /<summary>More navigation<\/summary>/)
+    locale = 'zh-CN'
+    f.polls[1].resolve(batch(3, [exitEvent(3, quit)]))
+    await flush()
+    const exited = render(files, f.viewer)
+    assert.match(exited, /data-status="exited" data-code="17" data-signal="null" data-reason="quit".*退出码: 17/)
+    assert.doesNotMatch(exited, /workbench-(tty-open|workspace-editor)/)
+    f.viewer.dismiss()
+    const closed = render(files, f.viewer)
+    assert.match(closed, /打开 TTY 查看器/)
+    assert.match(closed, /workbench-workspace-editor[^>]*>editor text<\/textarea>/)
+    assert.doesNotMatch(closed, /workbench-tty-panel/)
   } finally { locale = 'en'; unbind() }
+})
+
+test('dismiss returns focus after the launch button commits; closed eligibility changes keep the editor slot', async () => {
+  const refs = []
+  let nextRef = 0, effects = [], focused = 0
+  // Model the commit order without a DOM: React assigns the button ref before layout effects run.
+  const { TerminalViewer } = await load('terminal-view-panel.tsx', {
+    '../renderer/src/i18n/i18n': i18n, './terminal-view-controller': controller, './terminal-view-transport': wire, './terminal-view.css': {},
+    react: {
+      useId: () => 'viewer', useSyncExternalStore: (_subscribe, snapshot) => snapshot(),
+      useRef: (initial) => { const index = nextRef++; return refs[index] ?? (refs[index] = { current: initial }) },
+      useLayoutEffect: (effect) => effects.push(effect)
+    }
+  })
+  const { viewer } = fixture()
+  const editor = React.createElement('textarea', { defaultValue: 'draft stays in the same slot' })
+  function commit(selection) {
+    nextRef = 0; effects = []
+    const children = TerminalViewer({ api: viewer, target: selection, children: editor }).props.children
+    const node = children[0]?.props?.children
+    refs[0].current = node?.type === 'button' ? { focus: () => { focused++ } } : null
+    effects.forEach(effect => effect())
+    return children
+  }
+  assert.equal(commit(undefined)[1], editor)
+  viewer.selectTarget(target)
+  assert.equal(commit(target)[1], editor)
+  assert.equal(focused, 0)
+  await viewer.open(target)
+  const opened = commit(target)
+  assert.equal(opened[1], false)
+  opened[0].props.children.props.close()
+  assert.equal(focused, 0)
+  const closed = commit(target)
+  assert.equal(closed[0].props.children.props['data-testid'], 'workbench-tty-open')
+  assert.equal(closed[1], editor)
+  assert.equal(focused, 1)
+  viewer.selectTarget(undefined)
+  assert.equal(commit(undefined)[1], editor)
+  assert.equal(focused, 1)
 })
 
 test('explicit open distinguishes size, encoding and source-rule failures in both locales without staging text', async () => {

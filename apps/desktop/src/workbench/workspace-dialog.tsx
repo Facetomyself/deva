@@ -168,9 +168,10 @@ function FileDetails({ file, view, api, labels, terminal }: {
     </div>
     {status && !view.issue && <p className={file.issue && file.issue !== 'readonly' ? 'wb-workspace__alert' : 'wb-workspace__muted'}
       role={file.issue && file.issue !== 'readonly' ? 'alert' : 'status'} data-testid="workbench-workspace-status" data-status={status}>{labels[status]}</p>}
-    {terminal && target && <TerminalViewer api={terminal} target={target} />}
-    {file.text !== undefined && <textarea className="input wb-workspace__editor" data-testid="workbench-workspace-editor"
-      aria-label={labels.editor} spellCheck={false} value={file.text} readOnly={!editing} onChange={(event) => api.edit(workspaceEditorText(file.text ?? '', event.currentTarget.value))} />}
+    <TerminalViewer api={terminal} target={target}>
+      {file.text !== undefined && <textarea className="input wb-workspace__editor" data-testid="workbench-workspace-editor"
+        aria-label={labels.editor} spellCheck={false} value={file.text} readOnly={!editing} onChange={(event) => api.edit(workspaceEditorText(file.text ?? '', event.currentTarget.value))} />}
+    </TerminalViewer>
     {file.review && file.disk?.kind === 'text' && !view.issue && <div className="wb-workspace__review">
       <label>{labels.disk}<textarea className="input wb-workspace__editor" aria-label={labels.disk} value={file.disk.content} readOnly /></label>
       <div className="wb-workspace__review-actions">

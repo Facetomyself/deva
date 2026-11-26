@@ -181,19 +181,24 @@ async function captureSynthetic({ browser, expected }) {
     expected.lines.length === terminalExpected.lines.length && expected.lines.every((line, i) => line === terminalExpected.lines[i]),
   'Screenshot capture requires the known synthetic terminal fixture')
   check(await browser.execute(`
-    const [dialogSelector, screenSelector, receiptSelector, login] = arguments;
+    const [dialogSelector, screenSelector, receiptSelector, login, primaryControls, editorSelector, launchSelector] = arguments;
     const dialog = document.querySelector(dialogSelector);
     const screen = document.querySelector(screenSelector), receipt = document.querySelector(receiptSelector);
     if (!dialog?.open || !screen || !receipt || document.querySelector(login)) return false;
     const bounds = dialog.getBoundingClientRect();
     const clear = element => {
-      const { top, bottom, width, height } = element.getBoundingClientRect();
-      return width > 0 && height > 0 && top >= Math.max(0, bounds.top) && bottom <= Math.min(innerHeight, bounds.bottom);
+      if (!element) return false;
+      const { top, bottom, left, right, width, height } = element.getBoundingClientRect();
+      return width > 0 && height > 0 && top >= Math.max(0, bounds.top) && bottom <= Math.min(innerHeight, bounds.bottom) &&
+        left >= Math.max(0, bounds.left) - 1 && right <= Math.min(innerWidth, bounds.right) + 1;
     };
-    return clear(screen) && clear(receipt) && getComputedStyle(receipt).color !== getComputedStyle(screen).color &&
+    return clear(screen) && clear(receipt) && primaryControls.every(selector=>clear(dialog.querySelector(selector))) &&
+      !dialog.querySelector(editorSelector) && !dialog.querySelector(launchSelector) &&
+      getComputedStyle(receipt).color !== getComputedStyle(screen).color &&
       ![...document.querySelectorAll('input')].some(field => field.value && field.getClientRects().length > 0);
-  `, dialog, inDialog(tty('screen')), inDialog(tty('receipt')), login),
-  'Screenshot requires the full numbered screen and muted receipt with no visible populated inputs')
+  `, dialog, inDialog(tty('screen')), inDialog(tty('receipt')), login,
+    ['previous','next','size','quit'].map(tty), workspace('editor'), tty('open')),
+  'Screenshot requires the full numbered screen, primary navigation and native receipt without a duplicate editor or launch action')
   const directory = dirname(fileURLToPath(captureFile)), root = dirname(directory)
   await mkdir(root, { recursive: true, mode: 0o700 })
   check((await lstat(root)).isDirectory(), 'The fixed screenshot root must be an ordinary directory')
@@ -329,6 +334,9 @@ async function firstViewer(ctx, openedAt) {
   await ui.click(inDialog(tty('close')), 'explicitly close the exited viewer panel')
   await ui.gone(tty('panel'), 'viewer panel removed after its close button')
   await ui.visible(dialog, 'closing the viewer panel preserves the native workspace dialog')
+  const launch = await ui.visible(inDialog(tty('open')), 'launch control restored after closing viewer')
+  await ui.until(() => browser.execute(`return document.activeElement===arguments[0] && document.querySelector(arguments[1])?.value===arguments[2];`,
+    launch, inDialog(workspace('editor')), `${ctx.expected.lines.join('\n')}\n`), 'focus returns to the launch control and the saved editor is restored')
   await waitForDispose(ctx, id, closingAt)
   return id
 }

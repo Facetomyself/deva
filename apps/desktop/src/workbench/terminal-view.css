@@ -2,7 +2,6 @@
 .wb-tty__panel {
   display: grid;
   gap: var(--space-2);
-  margin-block-start: var(--space-2);
   padding: var(--space-2);
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
@@ -16,6 +15,10 @@
 .wb-tty__header h3 { flex: 1; margin: 0; font-size: 14px; }
 .wb-tty__detail { margin: 0; color: var(--fg-muted); font-size: 12px; overflow-wrap: anywhere; }
 .wb-tty__detail[role='alert'] { color: var(--danger); }
+.wb-tty__receipt { font-variant-numeric: tabular-nums; }
+.wb-tty__more { color: var(--fg-muted); font-size: 12px; }
+.wb-tty__more summary { width: fit-content; cursor: pointer; }
+.wb-tty__more .wb-tty__controls { margin-block-start: var(--space-1); }
 .wb-tty__screen {
   margin: 0;
   padding: var(--space-2);
