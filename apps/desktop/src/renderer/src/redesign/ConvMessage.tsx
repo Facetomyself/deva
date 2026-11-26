@@ -178,7 +178,13 @@ export function quotePlain(quote: string, full = false): string {
  * 有引用（右键「引用」带进来的 `> ` 段）时按引用切段：引用单独成块（竖线 + 弱化字色，折叠到
  * {@link USER_QUOTE_LINES} 行），正文各段照常折叠；任一段超出都给展开按钮，一起展开。
  */
-function UserText({ text }: { text: string }): React.JSX.Element {
+const selectableTextProps = {
+  tabIndex: 0,
+  'data-testid': 'workbench-message-text',
+  'aria-haspopup': 'menu' as const
+}
+
+function UserText({ text, selectable }: { text: string; selectable?: boolean }): React.JSX.Element {
   const { t } = useI18n()
   const refs = useRef<(HTMLDivElement | null)[]>([])
   const [expanded, setExpanded] = useState(false)
@@ -201,7 +207,7 @@ function UserText({ text }: { text: string }): React.JSX.Element {
 
   return (
     <>
-      <div className="cf-msg__text">
+      <div className="cf-msg__text" {...(selectable ? selectableTextProps : undefined)}>
         {/* 折叠盒必须无内边距：气泡的下内边距会让被截断的下一行漏出「半个字」，详见 CSS 注释。 */}
         {segs.map((s, i) => (
           <div
@@ -273,9 +279,11 @@ export function MemberInlineFace({ persona }: { persona: Persona }): React.JSX.E
  * 单条消息。包 memo：流式输出时只有末条在变，前面的消息 props 不变就不重渲染
  * （msg 未变的消息对象引用不变，见 store/chat.tsx updateLastAssistant）。
  */
-function UserBubble({ text, children, dataTurn }: { text: string; children?: React.ReactNode; dataTurn?: number }): React.JSX.Element {
+function UserBubble({ text, children, dataTurn, selectable }: {
+  text: string; children?: React.ReactNode; dataTurn?: number; selectable?: boolean
+}): React.JSX.Element {
   return <div className="cf-msg is-user" data-turn={dataTurn} data-role="user">
-    <div className="cf-msg__body">{children}{text && <UserText text={text} />}</div>
+    <div className="cf-msg__body">{children}{text && <UserText text={text} selectable={selectable} />}</div>
     <Avatar user size={32} />
   </div>
 }
@@ -290,15 +298,15 @@ function AssistantBubble({ face, header, children, dataTurn, streaming }: {
 }
 
 /** Workbench projection of the desktop bubbles, with display-only attachment metadata. */
-export const TextConversationMessage = memo(function TextConversationMessage({ role, text, streaming, attachments }: {
-  role: 'user' | 'assistant'; text: string; streaming?: boolean; attachments?: AttachEntry[]
+export const TextConversationMessage = memo(function TextConversationMessage({ role, text, streaming, attachments, selectable }: {
+  role: 'user' | 'assistant'; text: string; streaming?: boolean; attachments?: AttachEntry[]; selectable?: boolean
 }): React.JSX.Element {
   const { t } = useI18n()
   const files = attachments?.length ? <AttachmentList variant="sent" entries={attachments} testId="workbench-message-attachments" /> : null
-  if (role === 'user') return <UserBubble text={text}>{files}</UserBubble>
+  if (role === 'user') return <UserBubble text={text} selectable={selectable}>{files}</UserBubble>
   const name = t('cf.assistant')
   return <AssistantBubble face={<Avatar persona={{ id: 'general', name, desc: '', avatar: '' }} size={32} plain />} header={<span className="cf-msg__name">{name}</span>} streaming={streaming}>
-    <div className="msg__content">{files}{text && <div className="msg__text"><Markdown text={text} textOnly /></div>}</div>
+    <div className="msg__content">{files}{text && <div className="msg__text" {...(selectable ? selectableTextProps : undefined)}><Markdown text={text} textOnly /></div>}</div>
   </AssistantBubble>
 })
 
