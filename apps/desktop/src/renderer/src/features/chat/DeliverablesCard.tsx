@@ -1,15 +1,5 @@
 import { useEffect, useState } from 'react'
-import {
-  Check,
-  ChevronDown,
-  ChevronRight,
-  ChevronUp,
-  Copy,
-  ExternalLink,
-  File,
-  FolderOpen,
-  Package
-} from 'lucide-react'
+import { DeliverablesView, formatDeliverableSize, type DeliverableViewRow } from './DeliverablesView'
 import { useI18n } from '../../i18n/i18n'
 import { type ChatBlock, useChatState } from '../../store/chat'
 import { useToast } from '../../components/ToastProvider'
@@ -23,16 +13,6 @@ import type { DeliverableInfo } from '../../../../shared/deliverables'
 
 // 缩略图按「对话:调用:序号」缓存：滚动 / 重渲染时不反复向系统要图。
 const thumbCache = new Map<string, string | null>()
-
-/** 文件多于 FOLD_PREVIEW + 1 个时折叠，只显示前 FOLD_PREVIEW 个（免得出现「展开其余 1 个」）。 */
-const FOLD_PREVIEW = 5
-
-function formatSize(n: number): string {
-  if (n < 1024) return `${n} B`
-  if (n < 1024 * 1024) return `${Math.round(n / 1024)} KB`
-  if (n < 1024 * 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)} MB`
-  return `${(n / 1024 / 1024 / 1024).toFixed(1)} GB`
-}
 
 /**
  * 主进程信息到达前，先按调用参数画出文件名，避免卡片高度跳动。参数是模型原样发出的（可能是相对路径、
@@ -60,9 +40,6 @@ export function DeliverablesCard({
   const [loaded, setLoaded] = useState(false)
   const [thumbs, setThumbs] = useState<Record<number, string | null>>({})
   const [copied, setCopied] = useState<number | null>(null)
-  const [expanded, setExpanded] = useState(false)
-  // 整张卡收起（点标题）：默认展开——交付物就是这一轮的结果；收起状态不保存，重开对话恢复展开。
-  const [cardOpen, setCardOpen] = useState(true)
 
   useEffect(() => {
     let alive = true
@@ -145,121 +122,42 @@ export function DeliverablesCard({
         ? 'chat.deliver.revealMac'
         : 'chat.deliver.revealOther'
   )
-  const count = t(files.length === 1 ? 'chat.deliver.countOne' : 'chat.deliver.count').replace(
-    '{n}',
-    String(files.length)
-  )
-  const foldable = files.length > FOLD_PREVIEW + 1
-  // 从头截取，行序号即文件在交付清单里的序号（IPC 按它取路径）。
-  const shown = foldable && !expanded ? files.slice(0, FOLD_PREVIEW) : files
-  // 收起时标题带上首个文件名与总数，不展开也知道交付了什么。
-  const summary =
-    files.length === 0
-      ? ''
-      : files.length === 1
-        ? files[0].name
-        : t('chat.deliver.collapsedMany')
-            .replace('{name}', files[0].name)
-            .replace('{n}', String(files.length))
-            .replace('{rest}', String(files.length - 1))
+  // 保留原始序号：打开、定位和复制仍由 Electron 的上下文与 IPC 完成。
+  const rows = files.map((f, i): DeliverableViewRow => {
+    const missing = loaded && f.size === null
+    const available = loaded && !missing
+    const canOpen = available && f.openable
+    const actions: DeliverableViewRow['actions'][number][] = []
+    if (canOpen) actions.push({ id: 'open', label: t('chat.deliver.open'), onClick: () => open(i) })
+    actions.push(
+      { id: 'locate', label: revealLabel, onClick: () => reveal(i), disabled: !available },
+      { id: 'copy', label: t('chat.deliver.copyPath'), onClick: () => copyPath(i, f.path), copied: copied === i }
+    )
+    return {
+      key: f.path,
+      index: i,
+      name: f.name,
+      title: f.path,
+      thumb: thumbs[i],
+      missing,
+      detail: missing ? t('chat.deliver.missing') : loaded ? `${formatDeliverableSize(f.size ?? 0)} · ${dirLabel(f)}` : dirLabel(f),
+      // 点整行：能打开就打开，否则在文件夹中显示（可执行 / 脚本类文件不直接打开）。
+      primary: available ? () => canOpen ? open(i) : reveal(i) : undefined,
+      actions
+    }
+  })
 
   return (
-    <div className={`card deliv${cardOpen ? ' is-open' : ''}`}>
-      <button
-        type="button"
-        className="card__head deliv__head"
-        onClick={() => setCardOpen((v) => !v)}
-        aria-expanded={cardOpen}
-      >
-        <ChevronRight size={13} className="deliv__caret" />
-        <span className="card__head-icon">
-          <Package size={14} />
-        </span>
-        <span className="card__title">
-          {t('chat.deliver.title')}
-          {!cardOpen && summary && <span className="deliv__summary"> · {summary}</span>}
-        </span>
-        {cardOpen && <span className="deliv__count">{count}</span>}
-      </button>
-      <div className="deliv__list" hidden={!cardOpen}>
-        {shown.map((f, i) => {
-          const missing = loaded && f.size === null
-          const canOpen = loaded && !missing && f.openable
-          const thumb = thumbs[i]
-          // 点整行：能打开就打开，否则在文件夹中显示（可执行 / 脚本类文件不直接打开）。
-          const primary = (): void => (canOpen ? open(i) : reveal(i))
-          return (
-            <div key={f.path} className={`deliv__item${missing ? ' is-missing' : ''}`}>
-              <button
-                type="button"
-                className="deliv__main"
-                onClick={primary}
-                disabled={!loaded || missing}
-                title={f.path}
-              >
-                <span className="deliv__thumb">
-                  {thumb ? <img src={thumb} alt="" draggable={false} /> : <File size={20} />}
-                </span>
-                <span className="deliv__meta">
-                  <span className="deliv__name">{f.name}</span>
-                  <span className="deliv__sub">
-                    {missing
-                      ? t('chat.deliver.missing')
-                      : loaded
-                        ? `${formatSize(f.size ?? 0)} · ${dirLabel(f)}`
-                        : dirLabel(f)}
-                  </span>
-                </span>
-              </button>
-              <span className="deliv__actions">
-                {canOpen && (
-                  <button
-                    type="button"
-                    className="deliv__act"
-                    onClick={() => open(i)}
-                    title={t('chat.deliver.open')}
-                    aria-label={t('chat.deliver.open')}
-                  >
-                    <ExternalLink size={14} />
-                  </button>
-                )}
-                <button
-                  type="button"
-                  className="deliv__act"
-                  onClick={() => reveal(i)}
-                  disabled={!loaded || missing}
-                  title={revealLabel}
-                  aria-label={revealLabel}
-                >
-                  <FolderOpen size={14} />
-                </button>
-                <button
-                  type="button"
-                  className="deliv__act"
-                  onClick={() => copyPath(i, f.path)}
-                  title={t('chat.deliver.copyPath')}
-                  aria-label={t('chat.deliver.copyPath')}
-                >
-                  {copied === i ? <Check size={14} /> : <Copy size={14} />}
-                </button>
-              </span>
-            </div>
-          )
-        })}
-      </div>
-      {cardOpen && foldable && (
-        <button
-          type="button"
-          className="deliv__more"
-          onClick={() => setExpanded((v) => !v)}
-          aria-expanded={expanded}
-        >
-          {expanded ? <ChevronUp size={13} /> : <ChevronDown size={13} />}
-          {expanded
-            ? t('chat.deliver.collapse')
-            : t('chat.deliver.expand').replace('{n}', String(files.length - FOLD_PREVIEW))}
-        </button>
-      )}
-    </div>
+    <DeliverablesView
+      title={t('chat.deliver.title')}
+      labels={{
+        count: (n) => t(n === 1 ? 'chat.deliver.countOne' : 'chat.deliver.count').replace('{n}', String(n)),
+        collapsed: (name, n) => t('chat.deliver.collapsedMany')
+          .replace('{name}', name).replace('{n}', String(n)).replace('{rest}', String(n - 1)),
+        expand: (remaining) => t('chat.deliver.expand').replace('{n}', String(remaining)),
+        collapse: t('chat.deliver.collapse')
+      }}
+      rows={rows}
+    />
   )
 }

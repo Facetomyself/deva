@@ -7,6 +7,7 @@ import { checkRoleBindings } from './role-bindings.mjs'
 import { openWorkspaceCatalog } from './workspace-catalog.mjs'
 import { openWorkspaceFiles } from '../files/workspace-files.mjs'
 import { workspaceFileRoutes } from '../files/workspace-routes.mjs'
+import { openDeliveryFiles } from '../files/delivery-files.mjs'
 
 const rolePath = /^\/api\/v1\/personas\/([A-Za-z0-9][A-Za-z0-9_.-]{0,63})(?:\/(enabled|avatar-image))?$/
 const memoryPath = /^\/api\/v1\/memory\/(global|role|project)(?:\/([A-Za-z0-9][A-Za-z0-9_.-]{0,127}))?$/
@@ -94,6 +95,7 @@ export async function openLibrary({ dataDir, workspaceRoot, workspaceWritable = 
   }
   return {
     workspaceFilesEnabled: Boolean(fileCommands),
+    deliveryFiles: workspaceRoot ? openDeliveryFiles({ catalog }) : undefined,
     resolveRole: id => serial(() => enabledRole(id)),
     withRoleForChat: (id, action) => serial(async () => action(await enabledRole(id))),
     async handle(req, res, { auth, policy }) {

@@ -1,7 +1,11 @@
 import { createHash } from 'node:crypto'
 import { openSync, opendirSync, realpathSync } from 'node:fs'
 import { isAbsolute, join, relative, resolve, sep } from 'node:path'
-import { DIRECTORY, close, fdPath, mountId, openAbsoluteDirectory, sameInode, stat, visibleName } from '../files/workspace-files-fd.mjs'
+import { DIRECTORY, close, fdPath, mountId, openAbsoluteDirectory, sameInode, stat, validWorkspaceName, visibleName, workspacePathParts } from '../files/workspace-files-fd.mjs'
+
+const deliverySystemRoots = ['/boot', '/usr', '/bin', '/sbin', '/lib', '/lib64', '/var/log', '/var/cache', '/var/spool', '/var/backups']
+const privateDeliveryName = /^(?:credentials?|secrets?|private[-_ ]?keys?|api[-_ ]?keys?|(?:access[-_ ]?|refresh[-_ ]?)tokens?|id[-_](?:rsa|dsa|ecdsa|ed25519)|known_hosts|authorized_keys|passwd|shadow)(?:[._ -]|$)|\.(?:pem|key|p12|pfx|kdbx)(?:\.|$)/iu
+const hiddenDeliveryName = name => privateDeliveryName.test(name) || /[\p{Cf}\p{Zl}\p{Zp}]/u.test(name)
 
 const unavailable = () => Object.assign(Error('Workspace is unavailable'), { code: 'ERR_WORKSPACE_UNAVAILABLE', status: 404, statusCode: 404 })
 const validId = id => typeof id === 'string' && /^w_[a-f0-9]{32}$/.test(id)
@@ -25,11 +29,18 @@ function overlapsReserved(base, path) {
 /** Only first-level real directories of an explicitly mounted root are choices. resolveRoot
  * serves memory's canonical project-key calculation; file consumers own a pinProject lease. */
 export function openWorkspaceCatalog({ root, privateRoots = [] }) {
-  if (root == null || root === '') return Object.freeze({ list: () => [], resolveRoot: () => undefined, pinProject() { throw unavailable() }, close() {} })
+  if (root == null || root === '') return Object.freeze({
+    list: () => [], resolveRoot: () => undefined, resolveDeliveryPath: () => null,
+    pinProject() { throw unavailable() }, close() {},
+  })
   if (typeof root !== 'string' || !isAbsolute(root) || root.includes('\0')) throw unavailable()
   const base = resolve(root)
   const reserved = [...privateRoots, '/proc', '/dev', '/sys', '/etc', '/run', '/root']
   if (base === '/' || reserved.some(path => overlapsReserved(base, path))) throw unavailable()
+  // Apply the extra system-directory exclusion to native deliveries only. Workspace browsing
+  // and project identifiers keep their existing contract.
+  const deliveryEnabled = !deliverySystemRoots.some(path => overlapsReserved(base, path))
+  const deliveryPrefix = base + sep
   let fd, rootInfo, rootMount
   try {
     fd = openAbsoluteDirectory(base)
@@ -88,6 +99,26 @@ export function openWorkspaceCatalog({ root, privateRoots = [] }) {
     resolveRoot(id) {
       if (!validId(id)) return undefined
       return items().find(item => item.id === id)?.path
+    },
+    // Server-read native history only. No absolute path is opened here: derive the
+    // catalog ID from an actual direct child. The caller must still pin that ID and
+    // verify every intermediate directory and leaf before claiming the item.
+    resolveDeliveryPath(absolute) {
+      if (!deliveryEnabled || typeof absolute !== 'string' || absolute.length > 4095 ||
+          !absolute.startsWith(deliveryPrefix) || Buffer.byteLength(absolute) > 4095) return null
+      const split = absolute.indexOf(sep, deliveryPrefix.length)
+      if (split < 0) return null
+      const name = absolute.slice(deliveryPrefix.length, split)
+      const path = absolute.slice(split + 1)
+      const parts = workspacePathParts(path)
+      if (!validWorkspaceName(name) || hiddenDeliveryName(name) || !parts || parts.some(hiddenDeliveryName)) return null
+      let item
+      try {
+        assertRoot()
+        item = openChild(name)
+        assertRoot()
+        return { id: projectId(item.path, item.info), path }
+      } catch { return null } finally { close(item?.sub) }
     },
     pinProject(id) {
       if (!validId(id)) throw unavailable()

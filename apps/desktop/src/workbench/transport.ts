@@ -14,7 +14,7 @@ export interface Bootstrap {
   config: RecordValue
   csrf: string
   expiresAt: number
-  capabilities?: { textChat?: true; library?: true; workspaceFiles?: true; attachments?: true; browserPanel?: true; sessionPreferences?: true }
+  capabilities?: { textChat?: true; library?: true; workspaceFiles?: true; attachments?: true; browserPanel?: true; sessionPreferences?: true; deliveries?: true }
 }
 
 export type SessionScreen = { mode: 'authenticated'; bootstrap: Bootstrap } | { mode: 'claim' | 'login' }
@@ -107,6 +107,7 @@ export function createTransport(send: Fetch = fetch) {
       if (result.capabilities.attachments === true) capabilities.attachments = true
       if (result.capabilities.browserPanel === true) capabilities.browserPanel = true
       if (result.capabilities.sessionPreferences === true) capabilities.sessionPreferences = true
+      if (result.capabilities.deliveries === true) capabilities.deliveries = true
     }
     return { protocol, version, platform, config, csrf, expiresAt, ...(Object.keys(capabilities).length ? { capabilities } : {}) }
   }
@@ -130,8 +131,32 @@ export function createTransport(send: Fetch = fetch) {
     return response
   }
 
+  async function deliveryRequest(path: string, signal: AbortSignal, options: {
+    accept: string; ifMatch?: string; post?: { csrf: string; body: unknown }
+  }): Promise<Response> {
+    const headers: Record<string, string> = { accept: options.accept }
+    const post = options.post
+    if (options.ifMatch) headers['if-match'] = options.ifMatch
+    if (post) {
+      if (!post.csrf) throw new Error('Delivery session closed')
+      headers[csrfHeader] = post.csrf
+      headers['content-type'] = 'application/json'
+    }
+    const response = await send(prefix + path, {
+      method: post ? 'POST' : 'GET', headers, signal,
+      body: post ? JSON.stringify(post.body) : undefined, credentials: 'same-origin',
+      mode: 'same-origin', redirect: 'error', cache: 'no-store', referrerPolicy: 'same-origin'
+    })
+    if (!response.ok) {
+      const failure: unknown = await response.json().catch(() => undefined)
+      const code = record(failure) ? failure.error ?? failure.code : undefined
+      throw new HttpFailure(response.status, typeof code === 'string' ? code : undefined)
+    }
+    return response
+  }
+
   return {
-    request, uploadAttachment, browserRequest,
+    request, uploadAttachment, browserRequest, deliveryRequest,
     async inspect(): Promise<SessionScreen> {
       try {
         return { mode: 'authenticated', bootstrap: await bootstrap() }

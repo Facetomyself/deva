@@ -49,7 +49,8 @@ export function sessionRoutes({ auth, policy, version, getConfig, capabilities }
         json(res, 200, { protocol: 1, version, platform: process.platform, config, csrf, expiresAt,
           capabilities: { textChat: capabilities?.textChat === true, library: capabilities?.library === true,
             workspaceFiles: capabilities?.workspaceFiles === true, attachments: capabilities?.attachments === true,
-            browserPanel: capabilities?.browserPanel === true, sessionPreferences: capabilities?.sessionPreferences === true } })
+            browserPanel: capabilities?.browserPanel === true, sessionPreferences: capabilities?.sessionPreferences === true,
+            deliveries: capabilities?.deliveries === true } })
         return true
       }
       if (path === '/api/v1/auth/logout') {

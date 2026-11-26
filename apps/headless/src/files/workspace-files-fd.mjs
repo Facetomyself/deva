@@ -39,6 +39,12 @@ export function validWorkspaceName(name) {
   return typeof name === 'string' && name.length > 0 && name.isWellFormed() && !name.startsWith('.') &&
     !/^[a-z]:/i.test(name) && !/[\u0000-\u001f\u007f-\u009f/\\]/.test(name) && Buffer.byteLength(name) <= 255
 }
+export function workspacePathParts(path, directory = false) {
+  if (directory && path === '') return []
+  if (typeof path !== 'string' || path.length > 4095 || Buffer.byteLength(path) > 4095) return null
+  const parts = path.split('/')
+  return parts.length <= 16 && parts.every(validWorkspaceName) ? parts : null
+}
 export function visibleName(bytes) {
   try {
     const name = decodeUtf8(bytes)

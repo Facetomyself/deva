@@ -1,6 +1,7 @@
 import { connectProvider } from './model-connection.mjs'
 import { openUploadStore } from '../attachments/upload-store.mjs'
 import { attachmentRoutes } from '../attachments/routes.mjs'
+import { deliveryRoutes } from '../deliveries/routes.mjs'
 import { createEventJournal } from '../events/index.mjs'
 import { createChatWebSocket } from '../events/websocket.mjs'
 import { createTextTurns } from '../chat/text-turns.mjs'
@@ -51,7 +52,7 @@ export async function openBusiness({ dataDir, vault, auth, version, allowedOrigi
   try {
     library = await openLibrary({ dataDir, workspaceRoot, workspaceWritable, privateRoots })
     uploads = await openUploadStore({ dataDir })
-    turns = createTextTurns({ dataDir, settings, journal, ...opts, resolveRole: library.resolveRole, uploads })
+    turns = createTextTurns({ dataDir, settings, journal, ...opts, resolveRole: library.resolveRole, uploads, deliveries: true })
     // The Unix client is loaded only when the operator mounted a private worker socket.
     if (browserRunDir) {
       const { createManualBrowser } = await import('../browser/manual-browser.mjs')
@@ -61,6 +62,7 @@ export async function openBusiness({ dataDir, vault, auth, version, allowedOrigi
   const handleBrowser = browserRoutes(browser)
   const chats = chatRoutes(turns, { withRoleForChat: library.withRoleForChat })
   const attachments = attachmentRoutes({ uploads, turns })
+  const deliveries = deliveryRoutes({ turns, files: library.deliveryFiles })
   function beginShutdown() {
     lifetime.abort(); attachments.close()
     if (browser && !closingBrowser) { closingBrowser = Promise.resolve(browser.close()); void closingBrowser.catch(() => {}) }
@@ -68,13 +70,15 @@ export async function openBusiness({ dataDir, vault, auth, version, allowedOrigi
   return {
     beginShutdown,
     capabilities: Object.freeze({ textChat: true, library: true, workspaceFiles: library.workspaceFilesEnabled, attachments: true,
-      browserPanel: !!browser, sessionPreferences: typeof turns.patchPreferences === 'function' && typeof journal.watchSessions === 'function' }),
+      browserPanel: !!browser, deliveries: typeof turns.deliverySnapshot === 'function',
+      sessionPreferences: typeof turns.patchPreferences === 'function' && typeof journal.watchSessions === 'function' }),
     createRealtime: ({ auth, policy }) => createChatWebSocket({ turns, journal, auth, policy }),
     getConfig: () => settings.getPublicConfig(),
     async handle(req, res, { auth, policy }) {
       const path = (req.url ?? '').split('?', 1)[0]
       if (path.includes('/browser') && await handleBrowser(req, res, { auth, policy })) return true
       if (path === '/api/v1/chats' || path.startsWith('/api/v1/chats/')) {
+        if (path.includes('/deliveries') && await deliveries(req, res, { auth, policy })) return true
         if (path.includes('/attachments') && await attachments.handle(req, res, { auth, policy })) return true
         return chats(req, res, { auth, policy })
       }

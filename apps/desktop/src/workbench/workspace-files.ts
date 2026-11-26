@@ -120,8 +120,8 @@ export function createWorkspaceFiles(api: WorkspaceTransport) {
     directories = new Map(directories).set(path, state)
     emit()
   }
-  async function list(path: string): Promise<void> {
-    if (!projectId || projectIssue() || directories.get(path)?.pending || directories.get(path)?.data) return
+  async function list(path: string, refresh = false): Promise<void> {
+    if (!projectId || projectIssue() || directories.get(path)?.pending || (!refresh && directories.get(path)?.data)) return
     const id = projectId
     const generation = dirGeneration
     directory(path, { pending: true })
@@ -194,6 +194,38 @@ export function createWorkspaceFiles(api: WorkspaceTransport) {
     return !view.file?.disk && !view.file?.issue ? reload() : undefined
   }
 
+  // Reuse the same project, directory and reader checks as the manual file panel.
+  async function reveal(id: string, path: string, signal: AbortSignal): Promise<boolean> {
+    if (signal.aborted) return false
+    await loadProjects()
+    if (signal.aborted || !projects.data?.some((project) => project.id === id)) return false
+    await (select(id) ?? list(''))
+    const current = (): boolean => !signal.aborted && projectId === id && !projectIssue()
+    if (!current()) return false
+    const segments = path.split('/')
+    let parent = ''
+    for (const [index, name] of segments.entries()) {
+      const target = parent ? `${parent}/${name}` : name
+      const last = index === segments.length - 1
+      let entry = directories.get(parent)?.data?.entries.find((node) => node.path === target)
+      if (!entry) {
+        // Manual browsing may have cached the directory before this file was produced.
+        await list(parent, true)
+        if (!current()) return false
+        entry = directories.get(parent)?.data?.entries.find((node) => node.path === target)
+      }
+      if (entry?.type !== (last ? 'file' : 'dir')) return false
+      if (last) {
+        await openFile(target)
+        return current() && view.file?.path === target && !!view.file.disk && !view.file.issue
+      }
+      await (expanded.has(target) ? list(target) : toggle(target))
+      if (!current()) return false
+      parent = target
+    }
+    return false
+  }
+
   function edit(text: string): void {
     const file = view.file
     if (!view.writable || file?.disk?.kind !== 'text' || file.pending === 'read') return
@@ -236,7 +268,7 @@ export function createWorkspaceFiles(api: WorkspaceTransport) {
   return {
     snapshot: () => view,
     subscribe(notify: () => void): () => void { listeners.add(notify); return () => { listeners.delete(notify) } },
-    loadProjects, select, list, toggle, openFile, reload, edit, review, canSave, save
+    loadProjects, select, list, toggle, openFile, reveal, reload, edit, review, canSave, save
   }
 }
 

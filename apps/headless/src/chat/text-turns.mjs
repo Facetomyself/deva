@@ -4,6 +4,7 @@ import { consumeModelStep, createChatStore, isValidSessionId, modelMessages } fr
 import { connectProvider } from '../business/model-connection.mjs'
 import { chatScope } from '../events/index.mjs'
 import { HttpError } from '../http/policy.mjs'
+import { createDeliveryRecords } from './delivery-records.mjs'
 import { confirmPreferenceStorage, preflightPreferenceStorage } from './session-preferences-storage.mjs'
 import {
   PREFERENCES_META, checkPreferenceRevision, firstTitle, listPreferenceFields, managedModel, preferenceChanges,
@@ -185,7 +186,7 @@ function appendNotice(notices, after, status, reason, text) {
 
 /** One instance per data directory and journal. The owner closes the journal after awaiting close().
  * resolveRole only reads trusted library state and returns the current enabled role projection. */
-export function createTextTurns({ dataDir, settings, journal, version, allowedOrigins, resolveRole, uploads }) {
+export function createTextTurns({ dataDir, settings, journal, version, allowedOrigins, resolveRole, uploads, deliveries }) {
   if (typeof settings?.getProvider !== 'function' || !['snapshot', 'snapshotAndSubscribe', 'publishChat', 'publishSessionsChanged']
     .every(fn => typeof journal?.[fn] === 'function')) throw new TypeError('Text turns require settings and an event journal')
   if (resolveRole !== undefined && typeof resolveRole !== 'function') throw new TypeError('resolveRole must be a function')
@@ -202,12 +203,14 @@ export function createTextTurns({ dataDir, settings, journal, version, allowedOr
   const active = new Map()
   const unconfirmed = new Map() // Quarantine ambiguous writes until restart; never replay a charged request.
   const hidden = new Set() // A failed create may leave a session only in the core's cache.
+  const deliverySessions = deliveries === true ? new Map() : undefined
   let closing
 
   function lookupSession(sid) {
     warned = false
     const s = hidden.has(sid) ? undefined : store.getSession(sid)
     if (s && warned) incomplete.add(s)
+    if (s && Object.hasOwn(s, META)) deliverySessions?.set(sid, s)
     return s
   }
 
@@ -283,6 +286,7 @@ export function createTextTurns({ dataDir, settings, journal, version, allowedOr
       s = store.ensureSession(id, role ? { personaId: role.id, model: role.model || undefined } : undefined)
       s[META] = { version: 1, messageCount: 0, requests: [] }
       store.saveStrict(id)
+      deliverySessions?.set(id, s)
     } catch {
       hidden.add(id)
       throw storageError()
@@ -657,8 +661,18 @@ export function createTextTurns({ dataDir, settings, journal, version, allowedOr
     const s = lookupSession(sid)
     return !!s && compatibility(s) === 'text'
   }
+  const records = deliverySessions && createDeliveryRecords({
+    dataDir, validSid, ledgerKey: META,
+    active: sid => active.has(sid), closing: () => Boolean(closing),
+    blocked: sid => hidden.has(sid) || unconfirmed.has(sid) || incomplete.has(deliverySessions.get(sid)),
+    cached: sid => deliverySessions.get(sid), classify: compatibility, attachedIndex,
+    hasMedia(cached, source) {
+      const index = attachedIndex(source)
+      return !index || (!mediaUnconfirmed.has(cached) && attachments.available(index))
+    }
+  })
   return Object.freeze({
     create, list, attach, snapshot, send, stop, close, getPreferences, patchPreferences,
-    attachmentScope, describeCommittedAttachment, readCommittedAttachment, hasBrowserSession
+    attachmentScope, describeCommittedAttachment, readCommittedAttachment, hasBrowserSession, ...records
   })
 }
