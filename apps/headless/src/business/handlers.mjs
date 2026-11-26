@@ -5,6 +5,7 @@ import { createEventJournal } from '../events/index.mjs'
 import { createChatWebSocket } from '../events/websocket.mjs'
 import { createTextTurns } from '../chat/text-turns.mjs'
 import { chatRoutes } from '../chat/routes.mjs'
+import { browserRoutes } from '../browser/routes.mjs'
 import { HttpError, json, readJson } from '../http/policy.mjs'
 import { openSettings } from './settings.mjs'
 import { allowedModelOrigins } from './provider-fetch.mjs'
@@ -41,27 +42,37 @@ async function probe(settings, supplied, opts, signal) {
   return connection.listModels()
 }
 
-export async function openBusiness({ dataDir, vault, version, allowedOrigins = [], workspaceRoot, workspaceWritable = false, privateRoots }) {
+export async function openBusiness({ dataDir, vault, auth, version, allowedOrigins = [], workspaceRoot, workspaceWritable = false, privateRoots, browserRunDir }) {
   const opts = { version, allowedOrigins: [...allowedModelOrigins(allowedOrigins)] }
   const settings = await openSettings({ dataDir, vault })
   const lifetime = new AbortController()
   const journal = createEventJournal()
-  let library, turns, uploads
+  let library, turns, uploads, browser, closingBrowser
   try {
     library = await openLibrary({ dataDir, workspaceRoot, workspaceWritable, privateRoots })
     uploads = await openUploadStore({ dataDir })
     turns = createTextTurns({ dataDir, settings, journal, ...opts, resolveRole: library.resolveRole, uploads })
-  } catch (err) { journal.close(); await Promise.allSettled([uploads?.close(), library?.close()]); throw err }
+    // The Unix client is loaded only when the operator mounted a private worker socket.
+    if (browserRunDir) {
+      const { createManualBrowser } = await import('../browser/manual-browser.mjs')
+      browser = createManualBrowser({ runDir: browserRunDir, auth, sessionExists: turns.hasBrowserSession })
+    }
+  } catch (err) { journal.close(); await Promise.allSettled([turns?.close(), uploads?.close(), library?.close()]); throw err }
+  const handleBrowser = browserRoutes(browser)
   const chats = chatRoutes(turns, { withRoleForChat: library.withRoleForChat })
   const attachments = attachmentRoutes({ uploads, turns })
-  function beginShutdown() { lifetime.abort(); attachments.close() }
+  function beginShutdown() {
+    lifetime.abort(); attachments.close()
+    if (browser && !closingBrowser) { closingBrowser = Promise.resolve(browser.close()); void closingBrowser.catch(() => {}) }
+  }
   return {
     beginShutdown,
-    capabilities: Object.freeze({ textChat: true, library: true, workspaceFiles: library.workspaceFilesEnabled, attachments: true }),
+    capabilities: Object.freeze({ textChat: true, library: true, workspaceFiles: library.workspaceFilesEnabled, attachments: true, browserPanel: !!browser }),
     createRealtime: ({ auth, policy }) => createChatWebSocket({ turns, journal, auth, policy }),
     getConfig: () => settings.getPublicConfig(),
     async handle(req, res, { auth, policy }) {
       const path = (req.url ?? '').split('?', 1)[0]
+      if (path.includes('/browser') && await handleBrowser(req, res, { auth, policy })) return true
       if (path === '/api/v1/chats' || path.startsWith('/api/v1/chats/')) {
         if (path.includes('/attachments') && await attachments.handle(req, res, { auth, policy })) return true
         return chats(req, res, { auth, policy })
@@ -110,7 +121,7 @@ export async function openBusiness({ dataDir, vault, version, allowedOrigins = [
       beginShutdown()
       try { await turns.close() } finally {
         journal.close()
-        try { await uploads.close() } finally { await library.close() }
+        try { await closingBrowser } finally { try { await uploads.close() } finally { await library.close() } }
       }
     }
   }

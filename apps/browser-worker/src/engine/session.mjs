@@ -1,0 +1,601 @@
+import { STATUS_CODES } from 'node:http';
+import { setTimeout as delay } from 'node:timers/promises';
+import { connectPipe } from './pipe.mjs';
+import {
+  BOOTSTRAP_URL, ENTRY_EVENTS, PAGE_POLICIES, VIEWPORT, fail, keyParams, publicPageInfo, readFrame, validateInput,
+} from './policy.mjs';
+
+const NAVIGATION_MS = 12_000;
+const PAGE_TARGETS = [{ type: 'page', exclude: false }, { exclude: true }];
+const DISCOVERED_TARGETS = ['page', 'iframe', 'worker', 'shared_worker', 'service_worker']
+  .map((type) => ({ type, exclude: false })).concat({ exclude: true });
+const SHELL_REASONS = new Set(['BROWSER_CLOSED', 'BROWSER_DISCONNECTED']);
+const cloneFrame = (frame) => ({ ...frame, bytes: Buffer.from(frame.bytes) });
+const reportTypes = new Set(['page', 'iframe', 'worker', 'shared_worker', 'service_worker', 'tab', 'browser']);
+const reportType = (type) => type === undefined ? 'missing' : reportTypes.has(type) ? type : 'other';
+function reportUrl(url) {
+  if (url === undefined || url === '') return 'empty';
+  if (url === BOOTSTRAP_URL) return 'blank';
+  if (typeof url !== 'string') return 'other';
+  if (/^https?:\/\//iu.test(url)) return 'http';
+  if (/^chrome-extension:/iu.test(url)) return 'extension';
+  if (/^chrome-untrusted:/iu.test(url)) return 'chrome-untrusted';
+  if (/^chrome:/iu.test(url)) return 'chrome';
+  return 'other';
+}
+const componentExtensionUrl = (url) => typeof url === 'string' && url.length <= 4096 &&
+  /^chrome-extension:\/\/[a-p]{32}\/[!-~]*$/u.test(url);
+
+// Internal controller, with the process/transport boundary explicit for deterministic tests.
+// The exported production facade has only the fixed methods returned at the bottom.
+export async function startChromiumSession({ writer, reader, policy, verifySandbox, shutdown, probeOnly = false,
+  commandMs, handshakeMs, navigationMs = NAVIGATION_MS, signal, abortCode = () => 'BROWSER_ABORTED' }) {
+  let contextId, targetId, sessionId, frameId, attachmentEvent, taskCandidateId;
+  let defaultContextId, defaultTargetId, defaultClosed = false;
+  const startupComponents = new Map();
+  let startupStage = 'version', postNavigation = false, targetLoss;
+  let targetSnapshot = {};
+  let fatalCode = null, closing = null, busy = false, stopping = null, notice = null;
+  let privateInput = false, frameEpoch = 0, stopEpoch = 0, navigationEpoch = 0;
+  let latest = null, location = null;
+  const loaded = new Set();
+  const changed = new Set();
+  const entryTrace = Object.fromEntries(ENTRY_EVENTS.map((name) => [name, 0]));
+  function bump(name) {
+    if (startupStage === 'entry-navigation') entryTrace[name] = Math.min(entryTrace[name] + 1, 256);
+  }
+
+  const notify = () => { for (const fn of changed) fn(); };
+  const invalidate = () => { latest = null; frameEpoch++; };
+  function restrict(code) { notice ??= code; invalidate(); notify(); }
+  function checkNotice() {
+    if (notice) {
+      const code = notice;
+      notice = null;
+      throw fail(code);
+    }
+  }
+  function checkLive() { if (fatalCode || closing) throw fail(fatalCode ?? 'BROWSER_CLOSED', { target: targetLoss }); }
+  function fatal(code) {
+    if (fatalCode || closing) return;
+    fatalCode = code;
+    close();
+  }
+  const pipe = connectPipe(writer, reader, { onEvent, onFailure: fatal, commandMs });
+  const root = (method, args) => pipe.send(method, args);
+  const page = (method, args) => pipe.send(method, args, sessionId);
+
+  function close() {
+    if (closing) return closing;
+    invalidate();
+    // Assign before running Browser.close: recursive EOF/error notification is expected.
+    closing = Promise.resolve().then(async () => {
+      let timer;
+      try {
+        if (!fatalCode) {
+          await Promise.race([root('Browser.close').catch(() => {}), new Promise((resolve) => {
+            timer = setTimeout(resolve, 700);
+          })]);
+        }
+      } finally {
+        clearTimeout(timer);
+        pipe.stop(fatalCode ?? 'BROWSER_CLOSED');
+        await shutdown();
+      }
+    });
+    // Async safety shutdown can originate in a protocol event with no API caller.
+    closing.catch(() => {});
+    notify();
+    return closing;
+  }
+
+  function awaitState(test) {
+    return new Promise((resolve, reject) => {
+      const finish = (callback, value) => { clearTimeout(timer); changed.delete(check); callback(value); };
+      const check = () => {
+        try {
+          checkLive();
+          const result = test();
+          if (result) finish(resolve, result);
+        } catch (error) { finish(reject, error); }
+      };
+      const timer = setTimeout(() => {
+        finish(reject, fail('BROWSER_TIMEOUT'));
+        fatal('BROWSER_TIMEOUT');
+      }, navigationMs);
+      changed.add(check);
+      check();
+    });
+  }
+
+  function sendEventCommand(method, args, id = sessionId) {
+    if (closing) return;
+    const fetchCommand = method === 'Fetch.continueRequest' ? 'continueRequest' :
+      method === 'Fetch.continueResponse' ? 'continueResponse' : null;
+    if (fetchCommand) bump(`${fetchCommand}Sent`);
+    pipe.send(method, args, id).then(() => {
+      if (fetchCommand) bump(`${fetchCommand}Ack`);
+    }, (error) => {
+      if (method.startsWith('Fetch.')) bump('fetchCommandError');
+      fatal(error.code);
+    });
+  }
+
+  function contextRelation(target, expected = contextId) {
+    const observed = target?.browserContextId;
+    if (observed === undefined || observed === null || observed === '') return 'omitted';
+    if (typeof observed !== 'string') return 'invalid';
+    if (!expected) return 'unbound';
+    return observed === expected ? 'same' : 'different';
+  }
+
+  function defaultContextRelation(target) { return contextRelation(target, defaultContextId ?? null); }
+  const validContext = (r) => r !== 'different' && r !== 'invalid';
+  const blankReport = (info) => info?.url === BOOTSTRAP_URL || reportUrl(info?.url) === 'empty';
+  const openerlessPage = (info) => info?.type === 'page' && !info.openerId;
+  const validTargetId = (id) => typeof id === 'string' && id.length > 0 && id.length <= 256;
+  function isDefaultComponent(info) {
+    return !postNavigation && !!startupStage && !!defaultContextId && defaultContextId !== contextId &&
+      info?.type === 'service_worker' && !info.openerId && !info.attached && validTargetId(info.targetId) &&
+      info.targetId !== defaultTargetId && info.targetId !== targetId && info.targetId !== taskCandidateId &&
+      defaultContextRelation(info) === 'same' && componentExtensionUrl(info.url);
+  }
+
+  function ownsTarget(target) {
+    return !!targetId && target?.targetId === targetId && openerlessPage(target) && validContext(contextRelation(target));
+  }
+
+  function targetRole(target) {
+    if (targetId && target?.targetId === targetId) return 'task';
+    if (taskCandidateId && target?.targetId === taskCandidateId) return 'task-candidate';
+    if (defaultTargetId && target?.targetId === defaultTargetId) return 'default-blank';
+    if (startupComponents.has(target?.targetId) || isDefaultComponent(target)) return 'default-component';
+    return 'foreign';
+  }
+
+  function saveTargetSnapshot(targetInfos) {
+    const first = Array.isArray(targetInfos) ? targetInfos[0] : undefined;
+    targetSnapshot = {
+      snapshotCount: Array.isArray(targetInfos) ? Math.min(targetInfos.length, 256) : 0,
+      snapshotType: reportType(first?.type), snapshotUrlKind: reportUrl(first?.url),
+      snapshotContext: typeof first?.browserContextId === 'string' && !!first.browserContextId,
+      snapshotAttached: !!first?.attached, snapshotOpener: !!first?.openerId,
+    };
+  }
+
+  function recordTargetLoss(event, target, id, observedSession, waiting = false) {
+    const knownSession = sessionId ?? attachmentEvent;
+    targetLoss ??= {
+      ...targetSnapshot, event, eventStage: startupStage ?? 'live', type: reportType(target?.type),
+      urlKind: reportUrl(target?.url), context: contextRelation(target), defaultContext: defaultContextRelation(target),
+      role: targetRole(target), root: id === null,
+      sameTarget: !!targetId && target?.targetId === targetId,
+      sameSession: !!knownSession && observedSession === knownSession,
+      opener: !!target?.openerId, postNavigation, waiting: waiting === true,
+    };
+  }
+
+  function loseTarget(event, target, id = null, observedSession, waiting) {
+    recordTargetLoss(event, target, id, observedSession, waiting);
+    fatal('BROWSER_TARGET_LOST');
+  }
+
+  function retireDefaultComponent(info) {
+    if (startupComponents.has(info.targetId) || startupComponents.size >= 8) return loseTarget('created', info);
+    // The clean default profile has never visited a site. Never attach to, resume, or
+    // expose this Chrome-owned service worker; the only command addressed to it is closure.
+    const retired = root('Target.closeTarget', { targetId: info.targetId }).then(({ success }) => {
+      if (success !== true) loseTarget('retire-component', info);
+    }, () => loseTarget('retire-component', info));
+    startupComponents.set(info.targetId, retired);
+  }
+
+  function onTargetCreated(info, id) {
+    if (id !== null || !validTargetId(info?.targetId)) return loseTarget('created', info, id);
+    if (info.targetId === defaultTargetId) {
+      const relation = defaultContextRelation(info);
+      if (!startupStage || postNavigation || defaultClosed || !openerlessPage(info) || !blankReport(info) ||
+          !validContext(relation) || contextRelation(info) === 'same') return loseTarget('created', info, id);
+      if (relation === 'unbound') defaultContextId = info.browserContextId;
+      return;
+    }
+    if (ownsTarget(info) && !postNavigation && blankReport(info)) return;
+    if (startupStage === 'create-task-target' && !taskCandidateId && openerlessPage(info) && !info.attached &&
+        blankReport(info) && contextRelation(info) === 'same') {
+      // An early event is inert until the exact target ID from our create command agrees.
+      taskCandidateId = info.targetId;
+      return;
+    }
+    if (isDefaultComponent(info)) return retireDefaultComponent(info);
+    loseTarget('created', info, id);
+  }
+
+  function trackNavigation(url, loaderId = null) {
+    if (!policy.permits(url)) {
+      if (!location && url === BOOTSTRAP_URL) return;
+      return fatal('BROWSER_NAVIGATION_BLOCKED');
+    }
+    location = { url, loaderId };
+    navigationEpoch++;
+    invalidate();
+    notify();
+  }
+
+  function rejectDocument(requestId, code) {
+    bump('blockedDocument');
+    sendEventCommand('Fetch.failRequest', { requestId, errorReason: 'BlockedByClient' });
+    restrict(code);
+  }
+
+  function onDocument(p) {
+    const { requestId, request, frameId: requestFrame, responseStatusCode: code, responseHeaders: headers = [] } = p;
+    if (code === undefined && !p.responseErrorReason) bump('requestPaused');
+    else bump('responsePaused');
+    if (p.responseErrorReason) bump('responseError');
+    if (typeof requestId !== 'string' || p.resourceType !== 'Document') return fatal('BROWSER_PROTOCOL_INVALID');
+    if (requestFrame !== frameId || !policy.permits(request?.url)) return rejectDocument(requestId, 'BROWSER_NAVIGATION_BLOCKED');
+    if (p.responseErrorReason) return sendEventCommand('Fetch.continueResponse', { requestId });
+    if (code === undefined) return sendEventCommand('Fetch.continueRequest', { requestId, interceptResponse: true });
+    if (!Array.isArray(headers) || !Number.isInteger(code)) return fatal('BROWSER_PROTOCOL_INVALID');
+    const header = (name) => headers.find((item) => item.name.toLowerCase() === name)?.value;
+    if (code >= 300 && code < 400 && header('location')) {
+      let destination;
+      try { destination = new URL(header('location'), request.url).href; } catch { /* reject below */ }
+      if (!policy.permits(destination)) return rejectDocument(requestId, 'BROWSER_NAVIGATION_BLOCKED');
+      return sendEventCommand('Fetch.continueResponse', { requestId });
+    }
+    if (/^\s*attachment\b/iu.test(header('content-disposition') ?? '')) {
+      return rejectDocument(requestId, 'BROWSER_DOWNLOAD_UNSUPPORTED');
+    }
+    if (code === 204 || code === 205) return sendEventCommand('Fetch.continueResponse', { requestId });
+    if (!/^\s*(?:text\/html|application\/xhtml\+xml)(?:\s*;|\s*$)/iu.test(header('content-type') ?? '')) {
+      return rejectDocument(requestId, 'BROWSER_DOCUMENT_UNSUPPORTED');
+    }
+    // Stream the original body. Only the headers are changed; no site bodies are read.
+    sendEventCommand('Fetch.continueResponse', { requestId, responseCode: code,
+      responsePhrase: p.responseStatusText || STATUS_CODES[code] || 'Response', responseHeaders: [...headers, ...PAGE_POLICIES] });
+  }
+
+  function onEvent(method, p, id) {
+    if (closing) return;
+    if (method === 'Target.targetCreated') {
+      bump('targetCreated');
+      return onTargetCreated(p.targetInfo, id);
+    }
+    if (method === 'Target.targetDestroyed') {
+      if (id === null && defaultTargetId && p.targetId === defaultTargetId) defaultClosed = true;
+      if ((targetId && p.targetId === targetId) || (taskCandidateId && p.targetId === taskCandidateId)) {
+        return loseTarget('destroyed', { targetId: p.targetId }, id);
+      }
+    }
+    if (method === 'Target.attachedToTarget') {
+      bump('targetAttach');
+      if (id !== null || !ownsTarget(p.targetInfo) || p.waitingForDebugger || typeof p.sessionId !== 'string' ||
+          !p.sessionId || (sessionId && sessionId !== p.sessionId) || (attachmentEvent && attachmentEvent !== p.sessionId)) {
+        return loseTarget('attached', p.targetInfo, id, p.sessionId, p.waitingForDebugger);
+      }
+      attachmentEvent = p.sessionId;
+      return;
+    }
+    if (method === 'Target.detachedFromTarget') {
+      bump('targetDetach');
+      const knownSession = sessionId ?? attachmentEvent;
+      if (knownSession && p.sessionId === knownSession) return loseTarget('detached', { targetId: p.targetId }, id, p.sessionId);
+    }
+    if (method === 'Browser.downloadWillBegin') return restrict('BROWSER_DOWNLOAD_UNSUPPORTED');
+    if (!sessionId || id !== sessionId) {
+      if (method === 'Fetch.requestPaused') bump('otherSessionFetch');
+      return;
+    }
+    switch (method) {
+      case 'Page.frameNavigated':
+        bump('frameNavigated');
+        if (!p.frame?.parentId && p.frame?.id === frameId) {
+          bump('mainFrameNavigated');
+          const { url, urlFragment, loaderId } = p.frame;
+          trackNavigation(urlFragment && !url.includes('#') ? `${url}${urlFragment}` : url, loaderId);
+        } else if (p.frame && !p.frame.parentId && frameId) {
+          loseTarget('main-frame', { targetId, type: 'page', url: p.frame.url }, id, id);
+        }
+        break;
+      case 'Page.navigatedWithinDocument':
+        if (p.frameId === frameId) {
+          bump('withinDocument');
+          trackNavigation(p.url, location?.loaderId);
+        }
+        break;
+      case 'Page.lifecycleEvent':
+        if (p.frameId === frameId && p.name === 'load') {
+          bump('mainFrameLoad');
+          loaded.add(p.loaderId);
+          if (loaded.size > 16) loaded.delete(loaded.values().next().value);
+          notify();
+        }
+        break;
+      case 'Fetch.requestPaused': onDocument(p); break;
+      case 'Fetch.authRequired':
+        sendEventCommand('Fetch.continueWithAuth', { requestId: p.requestId, authChallengeResponse: { response: 'CancelAuth' } });
+        restrict('BROWSER_HTTP_AUTH_UNSUPPORTED');
+        break;
+      case 'Page.windowOpen': restrict('BROWSER_POPUP_UNSUPPORTED'); break;
+      case 'Page.downloadWillBegin': restrict('BROWSER_DOWNLOAD_UNSUPPORTED'); break;
+      case 'Page.fileChooserOpened': restrict('BROWSER_FILE_CHOOSER_UNSUPPORTED'); break;
+      case 'Page.javascriptDialogOpening':
+        sendEventCommand('Page.handleJavaScriptDialog', { accept: false });
+        restrict('BROWSER_DIALOG_UNSUPPORTED');
+        break;
+      case 'Inspector.targetCrashed': loseTarget('crashed', { targetId, type: 'page' }, id, id); break;
+      default: break;
+    }
+  }
+
+  async function run(operation) {
+    checkLive();
+    if (busy || stopping) throw fail('BROWSER_BUSY');
+    checkNotice();
+    busy = true;
+    try {
+      const result = await operation();
+      checkLive();
+      checkNotice();
+      return result;
+    } catch (error) {
+      checkNotice();
+      throw error;
+    } finally { busy = false; }
+  }
+
+  function waitNavigation(last, stopped, loader = null) {
+    return awaitState(() => {
+      if (stopEpoch !== stopped) throw fail('BROWSER_NAVIGATION_STOPPED');
+      checkNotice();
+      return navigationEpoch > last && (!loader || location?.loaderId === loader) &&
+        (!location?.loaderId || loaded.has(location.loaderId));
+    });
+  }
+
+  async function navigate(url) {
+    return run(async () => {
+      const destination = policy.entry(url);
+      const last = navigationEpoch, stopped = stopEpoch;
+      invalidate();
+      postNavigation = true;
+      bump('navigateSent');
+      const result = await page('Page.navigate', { url: destination });
+      bump('navigateAck');
+      if (stopEpoch !== stopped) throw fail('BROWSER_NAVIGATION_STOPPED');
+      if (result.isDownload) throw fail('BROWSER_DOWNLOAD_UNSUPPORTED');
+      if (result.errorText || result.frameId !== frameId) throw fail('BROWSER_NAVIGATION_FAILED');
+      if (result.loaderId || navigationEpoch > last || !location) await waitNavigation(last, stopped, result.loaderId);
+    });
+  }
+
+  function history(direction) {
+    return run(async () => {
+      const { currentIndex, entries } = await page('Page.getNavigationHistory');
+      const entry = entries?.[currentIndex + direction];
+      if (!entry || !Number.isInteger(entry.id) || !policy.permits(entry.url)) throw fail('BROWSER_HISTORY_UNAVAILABLE');
+      const last = navigationEpoch, stopped = stopEpoch;
+      invalidate();
+      await page('Page.navigateToHistoryEntry', { entryId: entry.id });
+      await waitNavigation(last, stopped);
+    });
+  }
+
+  async function getPageInfo() {
+    return run(async () => {
+      if (privateInput) return { origin: location ? policy.origin : null, title: '' };
+      const { targetInfo } = await root('Target.getTargetInfo', { targetId });
+      if (!ownsTarget(targetInfo)) {
+        loseTarget('get-info', targetInfo);
+        checkLive();
+      }
+      if (!policy.permits(targetInfo.url)) return { origin: null, title: '' };
+      // The last frame event and Target.getTargetInfo may briefly disagree during navigation.
+      if (targetInfo.url.split('#', 1)[0] !== location?.url.split('#', 1)[0]) {
+        return { origin: policy.origin, title: '' };
+      }
+      return publicPageInfo(targetInfo.url.includes('#') ? targetInfo.url : location.url, targetInfo.title, privateInput);
+    });
+  }
+
+  async function screenshot() {
+    const { data } = await page('Page.captureScreenshot', { format: 'png', fromSurface: true,
+      captureBeyondViewport: false, clip: { x: 0, y: 0, ...VIEWPORT, scale: 1 } });
+    return readFrame(data);
+  }
+
+  function captureFrame({ privateView = false } = {}) {
+    return run(async () => {
+      if (privateInput && privateView !== true) throw fail('BROWSER_PRIVACY_ACTIVE');
+      if (!location) throw fail('BROWSER_NAVIGATION_FAILED');
+      const epoch = frameEpoch;
+      const frame = await screenshot();
+      if (epoch !== frameEpoch) throw fail('BROWSER_FRAME_STALE');
+      if (privateView !== true && !privateInput && !notice && !closing) latest = frame;
+      return cloneFrame(frame);
+    });
+  }
+
+  const mouse = (type, params) => page('Input.dispatchMouseEvent', { type, modifiers: 0, ...params });
+  function dispatchInput(value) {
+    return run(async () => {
+      const { type, x, y, deltaX, deltaY, text, key } = validateInput(value);
+      invalidate();
+      if (type === 'text') return void await page('Input.insertText', { text });
+      if (type === 'key') {
+        const keyDown = keyParams(key);
+        const { text: _text, unmodifiedText: _unmodified, ...keyUp } = keyDown;
+        await page('Input.dispatchKeyEvent', { type: key === 'Enter' ? 'keyDown' : 'rawKeyDown', ...keyDown });
+        return void await page('Input.dispatchKeyEvent', { type: 'keyUp', ...keyUp });
+      }
+      if (type === 'scroll') return void await mouse('mouseWheel', { x, y, deltaX, deltaY, button: 'none', buttons: 0 });
+      await mouse('mousePressed', { x, y, button: 'left', buttons: 1, clickCount: 1 });
+      await mouse('mouseReleased', { x, y, button: 'left', buttons: 0, clickCount: 1 });
+    });
+  }
+
+  function setInputPrivacy(active) {
+    checkLive();
+    if (typeof active !== 'boolean') throw fail('BROWSER_INPUT_INVALID');
+    if (active !== privateInput) {
+      privateInput = active;
+      invalidate();
+    }
+  }
+
+  async function stop() {
+    checkLive();
+    if (stopping) return stopping;
+    invalidate();
+    stopEpoch++;
+    notify();
+    stopping = page('Page.stopLoading');
+    try { await stopping; } finally { stopping = null; }
+  }
+
+  async function retireStartupTargets() {
+    if (!defaultClosed) {
+      const { success } = await root('Target.closeTarget', { targetId: defaultTargetId });
+      if (success !== true && !defaultClosed) {
+        loseTarget('retire-default', { targetId: defaultTargetId, type: 'page', url: BOOTSTRAP_URL });
+        checkLive();
+      }
+    }
+    let waiting;
+    for (let attempt = 0; attempt < 12; attempt++) {
+      await Promise.all(startupComponents.values());
+      checkLive();
+      const { targetInfos } = await root('Target.getTargets', { filter: DISCOVERED_TARGETS });
+      checkLive();
+      if (!Array.isArray(targetInfos) || targetInfos.length > 10) break;
+      waiting = null;
+      let taskCount = 0;
+      for (const info of targetInfos) {
+        if (ownsTarget(info) && info.url === BOOTSTRAP_URL) { taskCount++; continue; }
+        if (info?.targetId === defaultTargetId && openerlessPage(info) && blankReport(info) &&
+            validContext(defaultContextRelation(info)) && contextRelation(info) !== 'same') { waiting ??= info; continue; }
+        if (isDefaultComponent(info)) {
+          if (!startupComponents.has(info.targetId)) retireDefaultComponent(info);
+          waiting ??= info;
+          continue;
+        }
+        loseTarget('retirement-incomplete', info);
+        checkLive();
+      }
+      if (taskCount !== 1) break;
+      if (!waiting) { defaultClosed = true; return; }
+      if (attempt < 11) await delay(45, undefined, { signal });
+    }
+    loseTarget('retirement-incomplete', waiting);
+    checkLive();
+  }
+
+  async function setup() {
+    const version = await pipe.send('Browser.getVersion', {}, null, handshakeMs);
+    if (!/^(?:Chromium|Chrome|HeadlessChrome)\/[\d.]+$/u.test(version.product ?? '')) throw fail('BROWSER_START_FAILED');
+    startupStage = 'discover-bootstrap';
+    let initial;
+    for (let attempt = 0; attempt < 8; attempt++) {
+      const { targetInfos } = await root('Target.getTargets', { filter: PAGE_TARGETS });
+      saveTargetSnapshot(targetInfos);
+      if (!Array.isArray(targetInfos) || targetInfos.length > 1) {
+        recordTargetLoss('snapshot', targetInfos?.[0], null);
+        throw fail('BROWSER_TARGET_LOST');
+      }
+      [initial] = targetInfos;
+      if (initial && initial.url !== '') break;
+      if (attempt < 7) await delay(40, undefined, { signal });
+    }
+    if (!openerlessPage(initial) || initial.url !== BOOTSTRAP_URL || initial.attached ||
+        !validTargetId(initial.targetId) || defaultContextRelation(initial) === 'invalid') {
+      recordTargetLoss('snapshot', initial, null);
+      throw fail('BROWSER_TARGET_LOST');
+    }
+    defaultTargetId = initial.targetId;
+    if (defaultContextRelation(initial) === 'unbound') defaultContextId = initial.browserContextId;
+    startupStage = 'create-context';
+    const context = await root('Target.createBrowserContext', { disposeOnDetach: true });
+    if (!validTargetId(context.browserContextId) || context.browserContextId === defaultContextId) {
+      recordTargetLoss('context-result', { browserContextId: context.browserContextId }, null);
+      throw fail('BROWSER_TARGET_LOST');
+    }
+    contextId = context.browserContextId;
+    startupStage = 'watch-targets';
+    // Global discovery remains observation-only: it never adds a debugger wait to
+    // the chosen task renderer or a provisional cross-process navigation.
+    await root('Target.setDiscoverTargets', { discover: true, filter: DISCOVERED_TARGETS });
+    checkLive();
+    startupStage = 'download-guard';
+    await root('Browser.setDownloadBehavior', { behavior: 'deny', browserContextId: contextId, eventsEnabled: true });
+    checkLive();
+    startupStage = 'create-task-target';
+    const created = await root('Target.createTarget', { url: BOOTSTRAP_URL, browserContextId: contextId, background: false });
+    checkLive();
+    if (!validTargetId(created.targetId) || created.targetId === defaultTargetId || startupComponents.has(created.targetId) ||
+        (taskCandidateId && taskCandidateId !== created.targetId)) {
+      recordTargetLoss('task-result', { targetId: created.targetId, browserContextId: contextId }, null);
+      throw fail('BROWSER_TARGET_LOST');
+    }
+    targetId = created.targetId;
+    startupStage = 'attach-bootstrap';
+    const attached = await root('Target.attachToTarget', { targetId, flatten: true });
+    checkLive();
+    if (!validTargetId(attached.sessionId) || (attachmentEvent && attachmentEvent !== attached.sessionId)) {
+      recordTargetLoss('attach-result', { targetId, browserContextId: contextId, type: 'page', url: BOOTSTRAP_URL }, null, attached.sessionId);
+      throw fail('BROWSER_TARGET_LOST');
+    }
+    sessionId = attached.sessionId;
+    startupStage = 'page-controls';
+    await page('Page.enable');
+    await page('Page.setLifecycleEventsEnabled', { enabled: true });
+    await page('Page.setInterceptFileChooserDialog', { enabled: true });
+    await page('Network.setCacheDisabled', { cacheDisabled: true });
+    await page('Network.setBypassServiceWorker', { bypass: true });
+    await page('Emulation.setDeviceMetricsOverride', { ...VIEWPORT, screenWidth: VIEWPORT.width,
+      screenHeight: VIEWPORT.height, deviceScaleFactor: 1, mobile: false });
+    const { frameTree } = await page('Page.getFrameTree');
+    if (frameTree?.frame?.url !== BOOTSTRAP_URL || typeof frameTree.frame.id !== 'string') throw fail('BROWSER_START_FAILED');
+    frameId = frameTree.frame.id;
+    await page('Fetch.enable', { handleAuthRequests: true, patterns: [
+      { urlPattern: '*', resourceType: 'Document', requestStage: 'Request' },
+    ] });
+    // On a cold launch Chromium can defer creating a renderer until it paints.
+    // The internal blank page paints first; no registered site is opened until attested.
+    startupStage = 'bootstrap-png';
+    await screenshot();
+    startupStage = 'sandbox-attest';
+    await verifySandbox(() => root('SystemInfo.getProcessInfo'));
+    startupStage = 'retire-startup';
+    await retireStartupTargets();
+    if (!probeOnly) {
+      startupStage = 'activate-bootstrap';
+      await root('Target.activateTarget', { targetId });
+      startupStage = 'entry-navigation';
+      await navigate(policy.startUrl);
+    }
+  }
+
+  const abort = () => fatal(abortCode());
+  signal?.addEventListener('abort', abort, { once: true });
+  try {
+    if (signal?.aborted) abort();
+    checkLive();
+    await setup();
+    checkLive();
+  } catch (error) {
+    await close();
+    const code = signal?.aborted ? abortCode() : error?.code;
+    const diagnostic = { ...error?.diagnostic, stage: targetLoss?.eventStage ?? startupStage, target: targetLoss,
+      ...(startupStage === 'entry-navigation' ? { entryNavigation: entryTrace } : {}) };
+    if (!SHELL_REASONS.has(code) && code !== 'BROWSER_COMMAND_FAILED' && code?.startsWith('BROWSER_')) throw fail(code, diagnostic);
+    throw fail('BROWSER_START_FAILED', diagnostic);
+  } finally { signal?.removeEventListener('abort', abort); }
+  startupStage = null;
+
+  return Object.freeze({
+    navigate, back: () => history(-1), forward: () => history(1), stop, close, getPageInfo, captureFrame,
+    getLatestFrame: () => latest && !privateInput && !notice && !closing ? cloneFrame(latest) : null,
+    dispatchInput, setInputPrivacy,
+  });
+}

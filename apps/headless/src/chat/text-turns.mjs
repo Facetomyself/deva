@@ -572,5 +572,12 @@ export function createTextTurns({ dataDir, settings, journal, version, allowedOr
     return closing
   }
 
-  return Object.freeze({ create, list, attach, snapshot, send, stop, close, attachmentScope, describeCommittedAttachment, readCommittedAttachment })
+  // Human browser sessions are registered only on confirmed workbench conversations. A
+  // tab does not change the native conversation or grant browser access to the model.
+  function hasBrowserSession(sid) {
+    if (closing || !validSid(sid) || unconfirmed.has(sid) || hidden.has(sid)) return false
+    const s = lookupSession(sid)
+    return !!s && compatibility(s) === 'text'
+  }
+  return Object.freeze({ create, list, attach, snapshot, send, stop, close, attachmentScope, describeCommittedAttachment, readCommittedAttachment, hasBrowserSession })
 }

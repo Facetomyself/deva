@@ -89,6 +89,10 @@ export async function createAuthService({ dataDir }) {
   const claimBudget = failureBudget();
   const loginBudget = failureBudget();
   const sessions = new Map();
+  // Process-local opaque identities for internal resource ownership. These are never cookie
+  // verifiers, never persisted, and never included in HTTP bootstrap or public session data.
+  const ownerId = randomBytes(24).toString('base64url');
+  const revoked = new Set();
 
   function clearClaim() {
     pendingClaim?.verifier.fill(0);
@@ -96,8 +100,13 @@ export async function createAuthService({ dataDir }) {
   }
 
   function removeSession(key) {
-    sessions.get(key)?.csrf.fill(0);
+    const active = sessions.get(key);
+    if (!active) return;
+    active.csrf.fill(0);
     sessions.delete(key);
+    for (const listener of revoked) {
+      try { listener(active.loginSessionId); } catch { /* Revocation must succeed even if a consumer closes badly. */ }
+    }
   }
 
   function openSession() {
@@ -114,7 +123,7 @@ export async function createAuthService({ dataDir }) {
     } while (sessions.has(key));
     const csrf = randomBytes(TOKEN_BYTES);
     const { deadline, expiresAt } = expiration(SESSION_TTL_MS);
-    sessions.set(key, { csrf, deadline, expiresAt });
+    sessions.set(key, { csrf, deadline, expiresAt, loginSessionId: randomBytes(24).toString('base64url') });
     return { session: token.toString('base64url'), csrf: csrf.toString('base64url'), expiresAt };
   }
 
@@ -215,6 +224,32 @@ export async function createAuthService({ dataDir }) {
         if (!provided || !timingSafeEqual(active.csrf, provided)) reject();
       }
       return { expiresAt: active.expiresAt };
+    },
+
+    identify(session, csrf) {
+      const active = getSession(session);
+      if (arguments.length > 1) {
+        const supplied = decodeFixed(csrf, TOKEN_BYTES);
+        if (!supplied || !timingSafeEqual(active.csrf, supplied)) reject();
+      }
+      return Object.freeze({ role: 'owner', ownerId, loginSessionId: active.loginSessionId });
+    },
+
+    isLoginActive(identity) {
+      if (identity?.role !== 'owner' || identity.ownerId !== ownerId) return false;
+      for (const [key, current] of sessions) {
+        if (current.loginSessionId !== identity.loginSessionId) continue;
+        if (performance.now() < current.deadline) return true;
+        removeSession(key);
+        return false;
+      }
+      return false;
+    },
+
+    onSessionRevoked(listener) {
+      if (typeof listener !== 'function') throw TypeError('Expected a revocation listener');
+      revoked.add(listener);
+      return () => revoked.delete(listener);
     },
 
     describe(session) {

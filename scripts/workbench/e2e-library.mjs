@@ -61,7 +61,18 @@ function avatarPng() {
 
 // Observations return predicates or W3C element references. They never return page URLs,
 // form values, cookies, CSRF, storage details, screenshots, or avatar bytes.
-function controls(browser, signal) {
+function controls(browser, signal, readOnlyNavigation = false) {
+  // The restored panel can replace a DOM node between a W3C element lookup and click.
+  // Re-resolve only a read-side navigation/selection. Never replay a write or a chat launch.
+  async function clickResolved(lookup, description, navigation = false) {
+    try { await browser.click(await lookup()) }
+    catch (error) {
+      if (!(error instanceof WebDriverError)) throw error
+      if ((!readOnlyNavigation && !navigation) || error.detail !== 'stale element reference') throw new WebDriverError(description, error.detail)
+      try { await browser.click(await lookup()) }
+      catch (retry) { if (retry instanceof WebDriverError) throw new WebDriverError(description, retry.detail); throw retry }
+    }
+  }
   const until = (predicate, description) => waitFor(predicate, description, { signal })
   const element = (selector, description, text = null, child = null, hidden = false) => until(async () => {
     const result = await browser.execute(`
@@ -76,19 +87,19 @@ function controls(browser, signal) {
   }, description)
   return {
     element, until,
-    click: async (...args) => browser.click(await element(...args)),
+    click: (...args) => clickResolved(() => element(...args), args[1]),
+    navigate: (...args) => clickResolved(() => element(...args), args[1], true),
     gone: (selector, description) => until(() => browser.execute('return !document.querySelector(arguments[0]);', selector), description),
     async fill(selector, value, replace = false) {
       const field = await element(selector, 'editable form field')
       await browser.keys(field, replace ? `\uE009a\uE000${value}` : value)
     },
     async choose(selector, name) {
-      const field = await element(selector, 'workspace selector')
-      const option = await until(() => browser.execute(`
-        return [...arguments[0].options].find(node => !node.disabled && node.textContent.trim() === arguments[1]) ?? null;
-      `, field, name), 'catalogued workspace option')
-      await browser.click(option)
-      await until(() => browser.execute('return arguments[0].selectedOptions[0]?.textContent.trim() === arguments[1];', field, name),
+      await clickResolved(() => until(() => browser.execute(`
+        const select = document.querySelector(arguments[0]);
+        return select && !select.disabled && select.getClientRects().length ? [...select.options].find(node => !node.disabled && node.textContent.trim() === arguments[1]) ?? null : null;
+      `, selector, name), 'catalogued workspace option'), 'select a registered memory scope', true)
+      await until(() => browser.execute('return document.querySelector(arguments[0])?.selectedOptions[0]?.textContent.trim() === arguments[1];', selector, name),
         'selected workspace option')
     }
   }
@@ -270,8 +281,8 @@ async function createRoleAndMemory(ui, browser) {
 }
 
 async function openProjectMemory(ui) {
-  await ui.click(hook('profile'), 'open personal profile for project memory')
-  await ui.click(hook('project-open'), 'open the project memory panel')
+  await ui.navigate(hook('profile'), 'open personal profile for project memory')
+  await ui.navigate(hook('project-open'), 'open the project memory panel')
   await ui.choose(hook('project-select'), projectName)
 }
 
@@ -362,7 +373,7 @@ try {
   stage = 'sign out and log in again through the existing auth UI'
   await loginAgain(ui, http, passwordValue)
   stage = 'check avatar and all three memory scopes in a fresh document'
-  await verifyPersistence(browser, ui)
+  await verifyPersistence(browser, controls(browser, stop.signal, true))
   stage = 'start a role-bound text conversation and verify its identity after refresh'
   await verifyBoundChat(browser, ui, http)
 } catch (error) {

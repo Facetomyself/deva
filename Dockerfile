@@ -15,11 +15,14 @@ RUN pnpm workbench:build && pnpm --filter @deva/headless build
 FROM ${NODE_IMAGE} AS runtime
 WORKDIR /opt/deva
 ENV NODE_ENV=production DEVA_HOME=/data DEVA_RUN_DIR=/run/deva DEVA_MASTER_KEY_FILE=/keys/master.key DEVA_WEB_DIR=/opt/deva/web DEVA_HOST=127.0.0.1 DEVA_PORT=8787
-RUN test -x /usr/bin/flock && install -d -m 0700 -o node -g node /data /keys /run/deva
+RUN test -x /usr/bin/flock && install -d -m 0700 -o node -g node /data /keys /run/deva /run/deva-browser-control
 COPY --from=build /src/apps/headless/package.json ./apps/headless/package.json
 COPY --from=build /src/apps/desktop/package.json ./apps/desktop/package.json
 COPY --from=build /src/apps/headless/src ./apps/headless/src
 COPY --from=build /src/apps/headless/dist ./apps/headless/dist
+# Narrow Unix client only. Neither Chromium nor its egress broker runs in the workbench.
+COPY apps/browser-worker/src/client.mjs apps/browser-worker/src/worker-control.mjs ./apps/browser-worker/src/
+COPY apps/browser-worker/src/engine/policy.mjs ./apps/browser-worker/src/engine/
 # ws has JS fallbacks for its optional native helpers; no desktop dependency tree is shipped.
 COPY --from=build /src/node_modules/ws ./apps/headless/node_modules/ws
 COPY --from=build /src/apps/desktop/out/workbench ./web

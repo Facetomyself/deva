@@ -4,6 +4,8 @@
 
 通用文本阶段另外给七个 `chat` 条目登记了 `web.partial`：`createSession`、`send`、`abort`、`listSessions`、`loadSession`、`attachSession`、`onEvent`。每项记录已验证范围、专有测试和仍缺的桌面行为；它们仍计入 `pending`，不等同于附件、工具、成员或审批均已接通。[通用文本协议与阶段限制](../../../apps/headless/src/chat/README.md)。
 
+[可选人工浏览器](../../../apps/browser-worker/README.md) 仅对当前真实登录、已绑定会话和工作器页面发放短租约。`browser.getState`、`ready`、`open`、`liveStart`、`liveStop`、`onLiveFrame`、`handoff` 和 `closeTab` 已登记具体人工操作范围，仍按部分覆盖计算。它不是多标签自动化、团队转交，也不是让模型读取人工页面内容。
+
 ## 本地与 CI
 
 依赖准备好后，从仓库根目录执行；脚本使用桌面已有的 `typescript` 开发依赖，运行无需网络或启动 Electron：

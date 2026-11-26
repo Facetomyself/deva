@@ -14,7 +14,7 @@ export interface Bootstrap {
   config: RecordValue
   csrf: string
   expiresAt: number
-  capabilities?: { textChat?: true; library?: true; workspaceFiles?: true; attachments?: true }
+  capabilities?: { textChat?: true; library?: true; workspaceFiles?: true; attachments?: true; browserPanel?: true }
 }
 
 export type SessionScreen = { mode: 'authenticated'; bootstrap: Bootstrap } | { mode: 'claim' | 'login' }
@@ -105,12 +105,32 @@ export function createTransport(send: Fetch = fetch) {
       if (result.capabilities.library === true) capabilities.library = true
       if (result.capabilities.workspaceFiles === true) capabilities.workspaceFiles = true
       if (result.capabilities.attachments === true) capabilities.attachments = true
+      if (result.capabilities.browserPanel === true) capabilities.browserPanel = true
     }
     return { protocol, version, platform, config, csrf, expiresAt, ...(Object.keys(capabilities).length ? { capabilities } : {}) }
   }
 
+  async function browserRequest(path: string, csrf: string, signal: AbortSignal | undefined, body?: unknown, png = false): Promise<Response> {
+    if (!csrf) throw new Error('Browser session closed')
+    // Fetch supplies Origin for same-origin POSTs; JS cannot set the header itself.
+    // Use the application origin, never an origin obtained from the remote tab.
+    const headers: Record<string, string> = { accept: png ? 'image/png' : 'application/json', [csrfHeader]: csrf }
+    if (body !== undefined) headers['content-type'] = 'application/json'
+    const response = await send(prefix + path, {
+      method: body === undefined ? 'GET' : 'POST', headers, signal,
+      body: body === undefined ? undefined : JSON.stringify(body), credentials: 'same-origin',
+      mode: 'same-origin', redirect: 'error', cache: 'no-store', referrerPolicy: 'same-origin'
+    })
+    // Never surface or retain a response error body for private browser operations.
+    if (!response.ok) {
+      void response.body?.cancel().catch(() => {})
+      throw new HttpFailure(response.status)
+    }
+    return response
+  }
+
   return {
-    request, uploadAttachment,
+    request, uploadAttachment, browserRequest,
     async inspect(): Promise<SessionScreen> {
       try {
         return { mode: 'authenticated', bootstrap: await bootstrap() }
