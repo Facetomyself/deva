@@ -1,0 +1,6 @@
+# Add alongside compose.workspaces.yaml to allow read-only Git inspection of ONLY named projects.
+# Example: DEVA_GIT_PROJECTS='["Documentation"]'. This is not implied by file browsing or chat.
+services:
+  workbench:
+    environment:
+      DEVA_GIT_PROJECTS: ${DEVA_GIT_PROJECTS:?Supply a JSON array of approved direct project directory names}

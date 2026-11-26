@@ -5,6 +5,7 @@ import { openProfile } from './profile.mjs'
 import { openPersonas } from './personas.mjs'
 import { checkRoleBindings } from './role-bindings.mjs'
 import { openWorkspaceCatalog } from './workspace-catalog.mjs'
+import { gitGrants, gitProjectNames } from '../git/access.mjs'
 import { openWorkspaceFiles } from '../files/workspace-files.mjs'
 import { workspaceFileRoutes } from '../files/workspace-routes.mjs'
 import { openDeliveryFiles } from '../files/delivery-files.mjs'
@@ -46,11 +47,14 @@ function snapshotOf(memory, scope) {
   return { snapshot, revision }
 }
 
-export async function openLibrary({ dataDir, workspaceRoot, workspaceWritable = false, privateRoots = [] }) {
+export async function openLibrary({ dataDir, workspaceRoot, workspaceWritable = false, privateRoots = [], gitProjects }) {
   if (typeof workspaceWritable !== 'boolean' || (workspaceWritable && !workspaceRoot)) throw new TypeError('Workspace writes require an explicit project root')
+  const gitNames = gitProjectNames(gitProjects)
+  if (gitNames.length && !workspaceRoot) throw new TypeError('Git inspection requires an explicit workspace root')
   const catalog = openWorkspaceCatalog({ root: workspaceRoot, privateRoots: [dataDir, ...privateRoots] })
-  let profile, personas, memory, fileCommands
+  let profile, personas, memory, fileCommands, approvedGit
   try {
+    approvedGit = gitGrants(catalog, gitNames)
     if (workspaceRoot) fileCommands = workspaceFileRoutes(openWorkspaceFiles({ catalog, writable: workspaceWritable }))
     profile = await openProfile({ dataDir })
     personas = await openPersonas({ dataDir, workspaceCatalog: catalog, checkReferences: checkRoleBindings(dataDir) })
@@ -95,6 +99,7 @@ export async function openLibrary({ dataDir, workspaceRoot, workspaceWritable = 
   }
   return {
     workspaceFilesEnabled: Boolean(fileCommands),
+    gitGrants: approvedGit,
     deliveryFiles: workspaceRoot ? openDeliveryFiles({ catalog }) : undefined,
     resolveRole: id => serial(() => enabledRole(id)),
     withRoleForChat: (id, action) => serial(async () => action(await enabledRole(id))),

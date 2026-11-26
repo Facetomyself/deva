@@ -31,6 +31,7 @@ Options override the environment:
   --workspace-root PATH   DEVA_WORKSPACE_ROOT (optional mounted parent for registered projects; default none)
   --workspace-write       DEVA_WORKSPACE_WRITE=1 (explicit permission to save an existing text file; default 0)
   --browser-control-dir PATH  DEVA_BROWSER_CONTROL_DIR (optional private browser-worker socket mount)
+  --git-projects JSON      DEVA_GIT_PROJECTS (optional array of project names approved for read-only Git history)
   --help                  Show this help.
 
 DEVA_PROVIDER_ORIGINS is an optional comma-separated list of exact private model origins for serve.
@@ -42,7 +43,7 @@ const runtime = { 'run-dir': str }
 const origin = { host: str, port: str, 'public-url': str }
 const flags = Object.freeze({
   'init-key': { ...paths, ...key, 'if-missing': { type: 'boolean' } },
-  serve: { ...paths, ...key, ...runtime, ...origin, 'web-dir': str, 'workspace-root': str, 'workspace-write': { type: 'boolean' }, 'browser-control-dir': str },
+  serve: { ...paths, ...key, ...runtime, ...origin, 'web-dir': str, 'workspace-root': str, 'workspace-write': { type: 'boolean' }, 'browser-control-dir': str, 'git-projects': str },
   claim: { ...paths, ...runtime, ...origin },
   status: { ...paths, ...runtime }
 })
@@ -73,12 +74,14 @@ function configuration(command, values, env) {
     const origins = env.DEVA_PROVIDER_ORIGINS?.trim()
     const workspaceRoot = values['workspace-root'] ?? env.DEVA_WORKSPACE_ROOT
     const browserControl = values['browser-control-dir'] ?? env.DEVA_BROWSER_CONTROL_DIR
+    const gitProjects = values['git-projects'] ?? env.DEVA_GIT_PROJECTS
     const writeFlag = env.DEVA_WORKSPACE_WRITE ?? '0'
     if (!['0', '1'].includes(writeFlag)) throw Error('DEVA_WORKSPACE_WRITE must be 0 or 1')
     const workspaceWritable = values['workspace-write'] === true || writeFlag === '1'
     if (workspaceWritable && !workspaceRoot) throw Error('Workspace writes require an explicit workspace root')
     config.businessOptions = {
       workspaceWritable,
+      ...(gitProjects ? { gitProjects } : {}),
       ...(browserControl ? { browserRunDir: workbenchPath(browserControl, 'Browser control directory') } : {}),
       ...(origins ? { allowedOrigins: origins.split(',').map(origin => origin.trim()) } : {}),
       ...(workspaceRoot ? { workspaceRoot: workbenchPath(workspaceRoot, 'Workspace root') } : {})

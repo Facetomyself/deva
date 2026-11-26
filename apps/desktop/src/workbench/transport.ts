@@ -14,7 +14,7 @@ export interface Bootstrap {
   config: RecordValue
   csrf: string
   expiresAt: number
-  capabilities?: { textChat?: true; library?: true; workspaceFiles?: true; attachments?: true; browserPanel?: true; sessionPreferences?: true; deliveries?: true }
+  capabilities?: { textChat?: true; library?: true; workspaceFiles?: true; attachments?: true; browserPanel?: true; sessionPreferences?: true; deliveries?: true; gitInspect?: true }
 }
 
 export type SessionScreen = { mode: 'authenticated'; bootstrap: Bootstrap } | { mode: 'claim' | 'login' }
@@ -62,10 +62,10 @@ export function captureClaim(location: Pick<Location, 'hash' | 'pathname' | 'sea
 }
 
 export function createTransport(send: Fetch = fetch) {
-  async function fetchJson(path: string, init: RequestInit): Promise<unknown> {
+  async function fetchJson(path: string, init: RequestInit, referrerPolicy: ReferrerPolicy = 'no-referrer'): Promise<unknown> {
     const response = await send(prefix + path, {
       ...init, credentials: 'same-origin', mode: 'same-origin', redirect: 'error',
-      cache: 'no-store', referrerPolicy: 'no-referrer'
+      cache: 'no-store', referrerPolicy
     })
     if (!response.ok) {
       const failure: unknown = await response.json().catch(() => undefined)
@@ -80,6 +80,16 @@ export function createTransport(send: Fetch = fetch) {
     if (body !== undefined) headers['content-type'] = 'application/json'
     if (csrf) headers[csrfHeader] = csrf
     return fetchJson(path, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) })
+  }
+
+  function gitRequest(path: string, body: object, csrf: string, signal: AbortSignal): Promise<unknown> {
+    if (!csrf || /^\/workspaces\/w_[a-f0-9]{32}\/git\/(status|branches|log|diff)$/u.exec(path)?.[0] !== path)
+      throw new Error('Invalid workspace Git request')
+    // The browser supplies Origin for same-origin POSTs. A no-referrer request can serialize
+    // Origin as null; use the same-origin policy already used by other owner-only panels.
+    return fetchJson(path, { method: 'POST', body: JSON.stringify(body), signal,
+      headers: { accept: 'application/json', 'content-type': 'application/json', [csrfHeader]: csrf }
+    }, 'same-origin')
   }
 
   async function uploadAttachment(sid: string, body: Blob, encodedName: string, mime: string, csrf: string): Promise<unknown> {
@@ -108,6 +118,7 @@ export function createTransport(send: Fetch = fetch) {
       if (result.capabilities.browserPanel === true) capabilities.browserPanel = true
       if (result.capabilities.sessionPreferences === true) capabilities.sessionPreferences = true
       if (result.capabilities.deliveries === true) capabilities.deliveries = true
+      if (result.capabilities.gitInspect === true) capabilities.gitInspect = true
     }
     return { protocol, version, platform, config, csrf, expiresAt, ...(Object.keys(capabilities).length ? { capabilities } : {}) }
   }
@@ -156,7 +167,7 @@ export function createTransport(send: Fetch = fetch) {
   }
 
   return {
-    request, uploadAttachment, browserRequest, deliveryRequest,
+    request, uploadAttachment, browserRequest, deliveryRequest, gitRequest,
     async inspect(): Promise<SessionScreen> {
       try {
         return { mode: 'authenticated', bootstrap: await bootstrap() }

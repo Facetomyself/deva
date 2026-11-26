@@ -1,6 +1,8 @@
 import { useEffect, useId, useLayoutEffect, useRef, useSyncExternalStore } from 'react'
 import { ChevronDown, ChevronRight, FileText, Folder, FolderOpen, X } from 'lucide-react'
 import { useI18n } from '../renderer/src/i18n/i18n'
+import { authorizedWorkspaceId, bindWorkspaceGitView, type WorkspaceGitView } from './git-view-controller'
+import { WorkspaceGitPanel } from './git-view-panel'
 import { type FileDraft, type WorkspaceFiles, type WorkspaceFilesView } from './workspace-files'
 import { workspaceEditorText } from './workspace-line-endings'
 import './workspace-dialog.css'
@@ -37,21 +39,22 @@ const copy = {
 }
 type Copy = (typeof copy)['en']
 
-export function WorkspaceFilesPanel({ open, close, controller }: {
-  open: boolean; close: () => void; controller: WorkspaceFiles
+export function WorkspaceFilesPanel({ open, close, controller, git }: {
+  open: boolean; close: () => void; controller: WorkspaceFiles; git?: WorkspaceGitView
 }): React.JSX.Element | null {
   const view = useSyncExternalStore(controller.subscribe, controller.snapshot)
+  useLayoutEffect(() => open && git ? bindWorkspaceGitView(git, controller) : undefined, [open, git, controller])
   useEffect(() => {
     if (!view.anyDirty) return
     const warn = (event: BeforeUnloadEvent): void => { event.preventDefault(); event.returnValue = true }
     window.addEventListener('beforeunload', warn)
     return () => window.removeEventListener('beforeunload', warn)
   }, [view.anyDirty])
-  return open ? <WorkspaceFilesDialog view={view} api={controller} close={close} /> : null
+  return open ? <WorkspaceFilesDialog view={view} api={controller} close={close} git={git} /> : null
 }
 
-function WorkspaceFilesDialog({ view, api, close }: {
-  view: WorkspaceFilesView; api: WorkspaceFiles; close: () => void
+function WorkspaceFilesDialog({ view, api, close, git }: {
+  view: WorkspaceFilesView; api: WorkspaceFiles; close: () => void; git?: WorkspaceGitView
 }): React.JSX.Element {
   const labels = copy[useI18n().locale === 'zh-CN' ? 'zh-CN' : 'en']
   const title = useId()
@@ -62,12 +65,13 @@ function WorkspaceFilesDialog({ view, api, close }: {
     return () => { if (element.open) element.close() }
   }, [])
   const projectList = view.projects.data ?? []
+  const gitWorkspaceId = git ? authorizedWorkspaceId(view) : undefined
   return <dialog ref={dialog} className="modal__card wb-workspace" aria-labelledby={title} data-testid="workbench-workspace-dialog"
     onCancel={(event) => { event.preventDefault(); close() }} onKeyDown={(event) => {
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's') {
         event.preventDefault()
         event.stopPropagation()
-        void api.save()
+        if (!(event.target instanceof Element) || !event.target.closest('[data-workspace-git]')) void api.save()
       }
     }}>
     <div className="wb-workspace__head">
@@ -75,14 +79,17 @@ function WorkspaceFilesDialog({ view, api, close }: {
       <button type="button" className="cf-modal__close" data-testid="workbench-workspace-close" aria-label={labels.close} onClick={close}><X size={17} /></button>
     </div>
     <p className="wb-workspace__muted">{labels.manual}</p>
-    <label className="wb-workspace__project">
-      {labels.project}
-      <select className="input" data-testid="workbench-workspace-select" value={view.projectId} disabled={!projectList.length}
-        onChange={(event) => void api.select(event.currentTarget.value)}>
-        <option value="">{labels.choose}</option>
-        {projectList.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
-      </select>
-    </label>
+    <div className="wb-workspace__project-picker">
+      <label className="wb-workspace__project">
+        {labels.project}
+        <select className="input" data-testid="workbench-workspace-select" value={view.projectId} disabled={!projectList.length}
+          onChange={(event) => void api.select(event.currentTarget.value)}>
+          <option value="">{labels.choose}</option>
+          {projectList.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
+        </select>
+      </label>
+      {git && gitWorkspaceId && <WorkspaceGitPanel controller={git} workspaceId={gitWorkspaceId} />}
+    </div>
     {view.issue && <p className="wb-workspace__alert" role="alert" data-testid="workbench-workspace-status" data-status={view.issue}>{labels[view.issue]}</p>}
     {!view.issue && view.projects.pending && <p role="status">{labels.loading}</p>}
     {!view.issue && view.projects.issue && <p className="wb-workspace__alert" role="alert">{labels[view.projects.issue]}{' '}

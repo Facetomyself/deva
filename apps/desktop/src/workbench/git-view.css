@@ -1,0 +1,62 @@
+.wb-workspace__project-picker {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: var(--space-2);
+  align-items: end;
+}
+.wb-workspace__project-picker > label { grid-column: 1 / -1; }
+.wb-workspace__project-picker:has(> .wb-git__toggle) > label { grid-column: 1; }
+.wb-git__toggle.cf-gitchip {
+  height: 34px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+.wb-git__toggle[aria-expanded='true'] { background: var(--bg-active); color: var(--fg); }
+.wb-git.cf-ctx {
+  grid-column: 1 / -1;
+  min-width: 0;
+  position: static;
+  max-height: min(50dvh, 440px);
+  padding: var(--space-2);
+  display: grid;
+  gap: var(--space-2);
+  overflow: auto;
+}
+.wb-git :is(p, h3, h4, ul, ol) { margin: 0; }
+.wb-git :is(h3, .wb-git__diff h4) { font-size: 13px; }
+.wb-git .cf-ctx__item { width: auto; }
+.wb-git .cf-ctx__item[aria-pressed='true'], .wb-git .cf-ctx__item[aria-current='true'] {
+  background: var(--bg-active);
+  color: var(--accent);
+}
+.wb-git__bar, .wb-git__row, .wb-git__result {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  flex-wrap: wrap;
+  min-width: 0;
+}
+.wb-git__bar h3 { flex: 1; }
+.wb-git__tabs, .wb-git__diff { border-top: 1px solid var(--border); padding-top: var(--space-1); }
+.wb-git__muted, .wb-git__alert, .wb-git__flag { font-size: 12px; }
+.wb-git__muted { color: var(--fg-muted); }
+.wb-git__alert { color: var(--warning); }
+.wb-git__flag {
+  padding: 1px 6px;
+  border-radius: var(--radius-sm);
+  color: var(--warning);
+  background: color-mix(in srgb, var(--warning) 18%, transparent);
+}
+.wb-git__rows { list-style: none; padding: 0; }
+.wb-git__row, .wb-git__result { padding: 3px 0; border-bottom: 1px solid var(--border); }
+.wb-git__result { padding-inline: 9px; }
+.wb-git__result bdi, .wb-git__diff h4 { overflow-wrap: anywhere; }
+.wb-git .wb-git__path { flex: 1; min-width: min(200px, 100%); }
+.wb-git .wb-git__path bdi { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.wb-git .wb-git__side { font-size: 12px; }
+.wb-git__branch-check { display: inline-flex; width: 14px; flex: none; color: var(--accent); }
+.wb-git__commit code { color: var(--fg-muted); }
+.wb-git__subject { flex: 1; min-width: min(150px, 100%); }
+.wb-git .diffview { overflow: auto; max-height: 25dvh; }
+.wb-git .diffview__line { min-width: max-content; }
+.wb-git .diffview__no { width: 38px; }

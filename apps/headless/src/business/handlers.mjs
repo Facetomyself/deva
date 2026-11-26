@@ -7,6 +7,8 @@ import { createChatWebSocket } from '../events/websocket.mjs'
 import { createTextTurns } from '../chat/text-turns.mjs'
 import { chatRoutes } from '../chat/routes.mjs'
 import { browserRoutes } from '../browser/routes.mjs'
+import { gitViewRoutes } from '../git/routes.mjs'
+import { openGitService } from '../git/service.mjs'
 import { HttpError, json, readJson } from '../http/policy.mjs'
 import { openSettings } from './settings.mjs'
 import { allowedModelOrigins } from './provider-fetch.mjs'
@@ -43,14 +45,15 @@ async function probe(settings, supplied, opts, signal) {
   return connection.listModels()
 }
 
-export async function openBusiness({ dataDir, vault, auth, version, allowedOrigins = [], workspaceRoot, workspaceWritable = false, privateRoots, browserRunDir }) {
+export async function openBusiness({ dataDir, vault, auth, version, allowedOrigins = [], workspaceRoot, workspaceWritable = false, privateRoots, browserRunDir, gitProjects }) {
   const opts = { version, allowedOrigins: [...allowedModelOrigins(allowedOrigins)] }
   const settings = await openSettings({ dataDir, vault })
   const lifetime = new AbortController()
   const journal = createEventJournal()
-  let library, turns, uploads, browser, closingBrowser
+  let library, turns, uploads, browser, closingBrowser, git, closingGit
   try {
-    library = await openLibrary({ dataDir, workspaceRoot, workspaceWritable, privateRoots })
+    library = await openLibrary({ dataDir, workspaceRoot, workspaceWritable, privateRoots, gitProjects })
+    if (library.gitGrants.enabled) git = openGitService({ grants: library.gitGrants, auth })
     uploads = await openUploadStore({ dataDir })
     turns = createTextTurns({ dataDir, settings, journal, ...opts, resolveRole: library.resolveRole, uploads, deliveries: true })
     // The Unix client is loaded only when the operator mounted a private worker socket.
@@ -58,24 +61,27 @@ export async function openBusiness({ dataDir, vault, auth, version, allowedOrigi
       const { createManualBrowser } = await import('../browser/manual-browser.mjs')
       browser = createManualBrowser({ runDir: browserRunDir, auth, sessionExists: turns.hasBrowserSession })
     }
-  } catch (err) { journal.close(); await Promise.allSettled([turns?.close(), uploads?.close(), library?.close()]); throw err }
+  } catch (err) { journal.close(); await git?.close(); await Promise.allSettled([turns?.close(), uploads?.close(), library?.close()]); throw err }
+  const handleGit = gitViewRoutes(git)
   const handleBrowser = browserRoutes(browser)
   const chats = chatRoutes(turns, { withRoleForChat: library.withRoleForChat })
   const attachments = attachmentRoutes({ uploads, turns })
   const deliveries = deliveryRoutes({ turns, files: library.deliveryFiles })
   function beginShutdown() {
     lifetime.abort(); attachments.close()
+    if (git && !closingGit) { closingGit = git.close(); void closingGit.catch(() => {}) }
     if (browser && !closingBrowser) { closingBrowser = Promise.resolve(browser.close()); void closingBrowser.catch(() => {}) }
   }
   return {
     beginShutdown,
     capabilities: Object.freeze({ textChat: true, library: true, workspaceFiles: library.workspaceFilesEnabled, attachments: true,
-      browserPanel: !!browser, deliveries: typeof turns.deliverySnapshot === 'function',
+      browserPanel: !!browser, gitInspect: !!git, deliveries: typeof turns.deliverySnapshot === 'function',
       sessionPreferences: typeof turns.patchPreferences === 'function' && typeof journal.watchSessions === 'function' }),
     createRealtime: ({ auth, policy }) => createChatWebSocket({ turns, journal, auth, policy }),
     getConfig: () => settings.getPublicConfig(),
     async handle(req, res, { auth, policy }) {
       const path = (req.url ?? '').split('?', 1)[0]
+      if (path.startsWith('/api/v1/workspaces/') && path.includes('/git/') && await handleGit(req, res, { auth, policy })) return true
       if (path.includes('/browser') && await handleBrowser(req, res, { auth, policy })) return true
       if (path === '/api/v1/chats' || path.startsWith('/api/v1/chats/')) {
         if (path.includes('/deliveries') && await deliveries(req, res, { auth, policy })) return true
@@ -126,7 +132,10 @@ export async function openBusiness({ dataDir, vault, auth, version, allowedOrigi
       beginShutdown()
       try { await turns.close() } finally {
         journal.close()
-        try { await closingBrowser } finally { try { await uploads.close() } finally { await library.close() } }
+        try {
+          const results = await Promise.allSettled([closingBrowser, closingGit])
+          if (results.some(row => row.status === 'rejected')) throw Error('Optional service shutdown unconfirmed')
+        } finally { try { await uploads.close() } finally { await library.close() } }
       }
     }
   }
