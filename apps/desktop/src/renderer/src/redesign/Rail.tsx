@@ -84,7 +84,8 @@ export function IconRail({
   onChatsHover,
   onChatsLeave,
   onOpenSettings,
-  chatAlert
+  chatAlert,
+  unavailable
 }: {
   tab: RailTab
   /** 点亮着的「对话」图标也回调（由调用方切换会话列表的收起 / 展开）。 */
@@ -92,11 +93,13 @@ export function IconRail({
   /** 对话页的会话列表已收起：「对话」图标的提示改为「展开会话列表」，红点也显示在它上面。 */
   listCollapsed: boolean
   /** 悬停 / 离开「对话」图标（收起时据此浮出列表）。 */
-  onChatsHover: () => void
-  onChatsLeave: () => void
+  onChatsHover?: () => void
+  onChatsLeave?: () => void
   onOpenSettings: () => void
   /** 其他对话有新消息或待你处理 → 按钮上显示红点。 */
   chatAlert: boolean
+  /** Explanation for features that this host does not expose. Omitted on desktop. */
+  unavailable?: string
 }): React.JSX.Element {
   const { t } = useI18n()
   const [profileOpen, setProfileOpen] = useState(false)
@@ -108,13 +111,14 @@ export function IconRail({
       <button
         type="button"
         className="cf-iconrail__me"
-        title={t('cf.profile.open')}
+        title={unavailable ?? t('cf.profile.open')}
+        disabled={!!unavailable}
         aria-label={t('cf.profile.open')}
         onClick={() => setProfileOpen(true)}
       >
         <Avatar user size={34} />
       </button>
-      {profileOpen && <ProfilePanel onClose={() => setProfileOpen(false)} />}
+      {profileOpen && !unavailable && <ProfilePanel onClose={() => setProfileOpen(false)} />}
       <button
         className={`cf-navbtn${tab === 'chats' ? ' is-active' : ''}`}
         title={chatsLabel}
@@ -133,7 +137,8 @@ export function IconRail({
       </button>
       <button
         className={`cf-navbtn${tab === 'roster' ? ' is-active' : ''}`}
-        title={t('cf.tabRoster')}
+        title={unavailable ?? t('cf.tabRoster')}
+        disabled={!!unavailable}
         aria-label={t('cf.tabRoster')}
         aria-current={tab === 'roster'}
         onClick={() => onTab('roster')}
@@ -142,7 +147,8 @@ export function IconRail({
       </button>
       <button
         className={`cf-navbtn${tab === 'tasks' ? ' is-active' : ''}`}
-        title={t('cf.tabTasks')}
+        title={unavailable ?? t('cf.tabTasks')}
+        disabled={!!unavailable}
         aria-label={t('cf.tabTasks')}
         aria-current={tab === 'tasks'}
         onClick={() => onTab('tasks')}
@@ -152,7 +158,8 @@ export function IconRail({
       <div className="cf-spacer" />
       <button
         className={`cf-navbtn${tab === 'bots' ? ' is-active' : ''}`}
-        title={t('bots.title')}
+        title={unavailable ?? t('bots.title')}
+        disabled={!!unavailable}
         aria-label={t('bots.title')}
         aria-current={tab === 'bots'}
         onClick={() => onTab('bots')}
@@ -163,6 +170,7 @@ export function IconRail({
         className="cf-navbtn"
         title={t('cf.settings')}
         aria-label={t('cf.settings')}
+        data-testid={unavailable ? "workbench-settings" : undefined}
         onClick={onOpenSettings}
       >
         <Cog size={20} />
@@ -1083,7 +1091,7 @@ export function GroupFace({
   )
 }
 
-function ThreadRow({
+export function ThreadRow({
   session,
   owner,
   memberFaces,
@@ -1093,16 +1101,20 @@ function ThreadRow({
   tasks,
   active,
   picked,
+  subtitle,
+  appearance,
   onClick,
   onContext
 }: {
   /** 多选时这一行是否勾上；不在多选状态为 undefined（不画勾选框）。 */
   picked?: boolean
-  session: SessionMeta
+  session: Pick<SessionMeta, 'id' | 'title' | 'updatedAt' | 'archived' | 'focusRoot' | 'members'>
   owner?: Persona
+  subtitle?: string
+  appearance?: Parameters<typeof Avatar>[0]['persona']
   /** 成员的显示身份（未移除的，按加入先后）：有成员时头像换成群组头像（GroupFace）。 */
   memberFaces: Persona[]
-  state?: SessionLiveState
+  state?: Pick<SessionLiveState, 'streaming' | 'unread' | 'attention'>
   /** 与 memberFaces 一一对应：这位成员是否正在工作（群组头像里谁在工作谁变星芒）。定时任务不算。 */
   membersWorking: boolean[]
   /** 这个对话在内置浏览器里开着几个网页（>0 时标题旁打地球徽标）。 */
@@ -1111,7 +1123,7 @@ function ThreadRow({
   tasks: TaskRecord[]
   active: boolean
   onClick: () => void
-  onContext: (e: React.MouseEvent) => void
+  onContext?: (e: React.MouseEvent) => void
 }): React.JSX.Element {
   const { t } = useI18n()
   const rel = useRelativeTime()
@@ -1145,7 +1157,7 @@ function ThreadRow({
           />
         ) : (
           <Avatar
-            persona={owner}
+            persona={owner ?? appearance}
             size={38}
             busy={state?.streaming}
             attention={!active && !session.archived && state?.attention}
@@ -1179,7 +1191,7 @@ function ThreadRow({
               <span className="cf-thread__wsname">{basename(session.focusRoot)}</span>
             </div>
           ) : (
-            <div className="cf-thread__owner">{owner?.name ?? ''}</div>
+            <div className="cf-thread__owner">{subtitle ?? owner?.name ?? ''}</div>
           )}
           {(isTask || tasks.length > 0 || browserPages > 0) && (
             <span className="cf-thread__badges">

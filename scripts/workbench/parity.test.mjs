@@ -139,6 +139,18 @@ test('requires handler/test evidence before declaring a Workbench method impleme
   assert.ok(checkManifest(changed, inventory, () => true).includes('chat.respondPlan.web.implementation: handler and test must be distinct files'))
 })
 
+test('partial text support cannot be counted as full desktop parity', () => {
+  const changed = structuredClone(manifest)
+  const row = byName(methods(changed.groups, 'chat'), 'send')
+  assert.ok(row.web.partial.scope)
+  row.web.partial.remaining = ''
+  row.web.partial.test = '../outside.test.mjs'
+  row.web.status = 'implemented'
+  const errors = checkManifest(changed, inventory)
+  assert.ok(errors.some(e => e.startsWith('chat.send.web.partial:')))
+  assert.ok(errors.some(e => e.startsWith('chat.send.web.partial.test:')))
+})
+
 test('a historical desktop bridge remains a traced Web behavior, not an exclusion', () => {
   const changed = structuredClone(manifest)
   const pty = byName(methods(changed.groups, 'terminal'), 'create')

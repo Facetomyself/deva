@@ -11,7 +11,6 @@ import {
   useSyncExternalStore
 } from 'react'
 import {
-  ChevronDown,
   Clock,
   FolderPlus,
   Paperclip,
@@ -19,7 +18,6 @@ import {
   Puzzle,
   RotateCcw,
   Shrink,
-  Square,
   X
 } from 'lucide-react'
 import {
@@ -55,6 +53,7 @@ import { samePath, DEFAULT_PERSONA_ID, fill, AvatarStack, Avatar } from './shell
 import { GitWidget, WorkspaceMenu } from './GitWidget'
 import { leadingQuote, withQuote, quotePlain } from './ConvMessage'
 import { ModelPanel } from './ModelPanel'
+import { ComposerDraftInput, ComposerJump, ComposerSendButton } from './ComposerControls'
 
 /**
  * 一次挑选返回的附件（与 preload PickedAttachment 结构一致）；拖入 / 粘贴的文件夹也放这里，kind 为 folder。
@@ -789,17 +788,7 @@ export const Composer = memo(function Composer({
   return (
     <div className="cf-composer">
       {/* 回到最新：仅当用户上滚离开底部且已有消息时浮现，锚在输入区正上方居中 */}
-      {showJump && (
-        <button
-          className="cf-jump"
-          type="button"
-          onClick={onJump}
-          title={t('chat.jumpToLatest')}
-          aria-label={t('chat.jumpToLatest')}
-        >
-          <ChevronDown size={18} />
-        </button>
-      )}
+      {showJump && <ComposerJump onJump={onJump} />}
       <div className="cf-composer__inner">
         {slashOpen && (
           <div className="cf-slash" ref={slashRef}>
@@ -913,19 +902,8 @@ export const Composer = memo(function Composer({
             </div>
           )}
           {/* 输入区：Lexical 接管的 contentEditable（子节点归编辑器管，React 不渲染内容）；占位提示叠在其上。 */}
-          <div className="cf-draft" style={{ height: boxH }}>
-            <div
-              ref={composer.rootRef}
-              className="cf-draft__input"
-              contentEditable
-              role="textbox"
-              aria-multiline
-              aria-label={placeholder}
-              onFocus={() => setFocused(true)}
-              onBlur={() => setFocused(false)}
-            />
-            {composer.empty && <div className="cf-draft__ph">{placeholder}</div>}
-          </div>
+          <ComposerDraftInput editor={composer} height={boxH} placeholder={placeholder}
+            onFocus={() => setFocused(true)} onBlur={() => setFocused(false)} />
           <div className="cf-box__bar">
             <button
               className="cf-iconbtn"
@@ -970,31 +948,9 @@ export const Composer = memo(function Composer({
             {/* 回合进行中只有一枚键：输入框有文字＝「发送」（插入当前轮），空＝「停止」（只放图标，与发送同宽不跳动）。
                 有文字时不出停止，要停先清空输入框。 */}
             {streaming ? (
-              canInsert ? (
-                <button
-                  className="cf-send"
-                  type="button"
-                  title={t('cf.insert.hint').replace('{name}', name)}
-                  onClick={insertNow}
-                >
-                  {t('cf.send')}
-                </button>
-              ) : (
-                <button
-                  className="cf-send is-stop"
-                  type="button"
-                  title={t('chat.stop')}
-                  aria-label={t('chat.stop')}
-                  onClick={stopTurn}
-                >
-                  <Square size={14} fill="currentColor" />
-                </button>
-              )
-            ) : (
-              <button className="cf-send" type="button" disabled={!canSend} onClick={submit}>
-                {t('cf.send')}
-              </button>
-            )}
+              canInsert ? <ComposerSendButton title={t('cf.insert.hint').replace('{name}', name)} onClick={insertNow} />
+                : <ComposerSendButton stop onClick={stopTurn} />
+            ) : <ComposerSendButton disabled={!canSend} onClick={submit} />}
           </div>
         </div>
       </div>

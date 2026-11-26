@@ -1,13 +1,14 @@
-import { Component, useEffect, useMemo, useRef, useState, type ComponentType, type FormEvent, type ReactNode } from 'react'
+import { Component, useCallback, useEffect, useMemo, useRef, useState, type ComponentType, type FormEvent, type ReactNode } from 'react'
 import { createRoot } from 'react-dom/client'
 import '../renderer/src/styles/tokens.css'
 import '../renderer/src/styles/app.css'
 import './first-use.css'
+import type { DesktopSettingsProps } from './desktop-settings'
 import { copy, type Issue, type Locale } from './first-use-copy'
 import { createTransport, createSettingsBridge, installSettingsHost, HttpFailure, type Bootstrap } from './transport'
 
 type ClaimHandoff = { claim?: string }
-type Mode = 'loading' | 'claim' | 'login' | 'settings' | 'failed'
+type Mode = 'loading' | 'claim' | 'login' | 'settings' | 'chat' | 'failed'
 
 function browserLocale(): Locale {
   return navigator.language.toLowerCase().startsWith('zh') ? 'zh-CN' : 'en'
@@ -52,7 +53,9 @@ function FirstUse({ handoff }: { handoff: ClaimHandoff }): React.JSX.Element {
   const [locale, setLocale] = useState<Locale>(browserLocale)
   const [issue, setIssue] = useState<Issue>()
   const [logoutFailed, setLogoutFailed] = useState(false)
-  const [settings, setSettings] = useState<ComponentType>()
+  const [settings, setSettings] = useState<ComponentType<DesktopSettingsProps>>()
+  const [bootstrap, setBootstrap] = useState<Bootstrap>()
+  const onExpired = useCallback(() => setIssue('expired'), [])
   const [version, setVersion] = useState('')
   const t = copy[locale]
   const reload = (): void => window.location.reload()
@@ -61,7 +64,8 @@ function FirstUse({ handoff }: { handoff: ClaimHandoff }): React.JSX.Element {
     handoff.claim = undefined
     setLocale(applyAppearance(bootstrap.config))
     setVersion(bootstrap.version)
-    setMode('settings')
+    const chat = bootstrap.capabilities?.textChat === true
+    setMode(chat ? 'loading' : 'settings')
     const host = createSettingsBridge({
       transport, bootstrap, updateBrowserTheme: browserTheme,
       onFailure: (error) => setIssue(issueFrom(error, 'writeFailure'))
@@ -72,12 +76,13 @@ function FirstUse({ handoff }: { handoff: ClaimHandoff }): React.JSX.Element {
       await host.ready
       setLocale(applyAppearance(host.api.config.getSync()))
       release = installSettingsHost(window, host.api)
-      // PR2 has settings routes only. The full shell stays in the separate mountWorkbench entry
-      // for a real full-capability host; a session/bootstrap is not evidence of those capabilities.
       const { DesktopSettings } = await import('./desktop-settings')
       setSettings(() => DesktopSettings)
+      setBootstrap(bootstrap)
+      if (chat) setMode('chat')
     } catch (error) {
       release?.()
+      if (chat) setMode('failed')
       setIssue(issueFrom(error, 'settingsFailure'))
     }
   }
@@ -139,6 +144,15 @@ function FirstUse({ handoff }: { handoff: ClaimHandoff }): React.JSX.Element {
 
   const Settings = settings
   const settingsLocked = working || issue === 'conflict' || issue === 'writeFailure' || issue === 'settingsFailure'
+  const alert = issue && <div className="wb-error" role="alert">
+    <p>{t[issue]}</p><button className="btn btn--ghost" type="button" onClick={reload}>{t.reload}</button>
+  </div>
+  if (mode === 'chat' && Settings && bootstrap && bridge.current && issue !== 'expired' && issue !== 'settingsFailure') {
+    return <SettingsBoundary onFailure={() => setIssue('settingsFailure')}>
+      <Settings chat={{ transport, bootstrap, beforeWrite: bridge.current.beforeChatWrite, onExpired, locked: settingsLocked,
+        notice: alert, logout: () => void logout(), working, logoutFailed }} />
+    </SettingsBoundary>
+  }
   return (
     <main className="wb-page">
       <div className="wb-frame">
@@ -148,12 +162,7 @@ function FirstUse({ handoff }: { handoff: ClaimHandoff }): React.JSX.Element {
         </header>
         {mode === 'loading' && <p role="status">{t.loading}</p>}
         {mode === 'settings' && <p className="wb-stage">{t.limited}</p>}
-        {issue && (
-          <div className="wb-error" role="alert">
-            <p>{t[issue]}</p>
-            <button className="btn btn--ghost" type="button" onClick={reload}>{t.reload}</button>
-          </div>
-        )}
+        {alert}
         {logoutFailed && <div className="wb-error" role="alert">{t.logoutFailure}</div>}
         {(mode === 'claim' || mode === 'login') && (
           <form className="wb-card wb-auth" onSubmit={(event) => void submit(event)}>

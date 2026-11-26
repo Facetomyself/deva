@@ -273,6 +273,34 @@ export function MemberInlineFace({ persona }: { persona: Persona }): React.JSX.E
  * 单条消息。包 memo：流式输出时只有末条在变，前面的消息 props 不变就不重渲染
  * （msg 未变的消息对象引用不变，见 store/chat.tsx updateLastAssistant）。
  */
+function UserBubble({ text, children, dataTurn }: { text: string; children?: React.ReactNode; dataTurn?: number }): React.JSX.Element {
+  return <div className="cf-msg is-user" data-turn={dataTurn} data-role="user">
+    <div className="cf-msg__body">{children}{text && <UserText text={text} />}</div>
+    <Avatar user size={32} />
+  </div>
+}
+
+function AssistantBubble({ face, header, children, dataTurn, streaming }: {
+  face: React.ReactNode; header: React.ReactNode; children: React.ReactNode; dataTurn?: number; streaming?: boolean
+}): React.JSX.Element {
+  return <div className="cf-msg" data-turn={dataTurn} data-role="assistant" data-streaming={streaming || undefined}>
+    {face}
+    <div className="cf-msg__body">{header && <div className="cf-msg__head">{header}</div>}{children}</div>
+  </div>
+}
+
+/** Plain-text projection of the same desktop bubbles; no business cards or host actions. */
+export const TextConversationMessage = memo(function TextConversationMessage({ role, text, streaming }: {
+  role: 'user' | 'assistant'; text: string; streaming?: boolean
+}): React.JSX.Element {
+  const { t } = useI18n()
+  if (role === 'user') return <UserBubble text={text} />
+  const name = t('cf.assistant')
+  return <AssistantBubble face={<Avatar persona={{ id: 'general', name, desc: '', avatar: '' }} size={32} plain />} header={<span className="cf-msg__name">{name}</span>} streaming={streaming}>
+    <div className="msg__content">{text && <div className="msg__text"><Markdown text={text} textOnly /></div>}</div>
+  </AssistantBubble>
+})
+
 export const ConvMessage = memo(function ConvMessage({
   msg,
   report,
@@ -456,8 +484,7 @@ export const ConvMessage = memo(function ConvMessage({
   if (msg.role === 'user') {
     const text = msg.blocks.map((b) => (b.kind === 'text' ? b.text : '')).join('')
     return (
-      <div className="cf-msg is-user" data-turn={dataTurn}>
-        <div className="cf-msg__body">
+      <UserBubble text={text} dataTurn={dataTurn}>
           {msg.attachments && msg.attachments.length > 0 && (
             <AttachmentList
               variant="sent"
@@ -479,10 +506,7 @@ export const ConvMessage = memo(function ConvMessage({
               }))}
             />
           )}
-          {text && <UserText text={text} />}
-        </div>
-        <Avatar user size={32} />
-      </div>
+      </UserBubble>
     )
   }
   // 仍在流式输出的那一块（只有进行中的回合才有）：思考据此判断是否已完成，按引用比对。
@@ -532,10 +556,12 @@ export const ConvMessage = memo(function ConvMessage({
   // 有工作过程时，角色名与折叠条同一行（「Deva › 已处理 … · N 步」）；没有时单独一行。
   const name = <span className="cf-msg__name">{taskSpeaker ?? owner?.name ?? t('cf.assistant')}</span>
   return (
-    <div className="cf-msg" data-turn={dataTurn}>
-      {taskSpeaker ? <TaskSpeakerFace persona={taskPersona} size={32} /> : <Avatar persona={owner} size={32} />}
-      <div className="cf-msg__body">
-        {!split && <div className="cf-msg__head">{name}</div>}
+    <AssistantBubble
+      dataTurn={dataTurn}
+      streaming={active}
+      face={taskSpeaker ? <TaskSpeakerFace persona={taskPersona} size={32} /> : <Avatar persona={owner} size={32} />}
+      header={!split && name}
+    >
         <div
           className="msg__content"
           ref={contentRef}
@@ -572,7 +598,6 @@ export const ConvMessage = memo(function ConvMessage({
           {!active && <DeliveryCards blocks={msg.blocks} />}
           {footer}
         </div>
-      </div>
-    </div>
+    </AssistantBubble>
   )
 })

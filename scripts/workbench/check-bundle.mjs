@@ -66,4 +66,10 @@ assert.equal(settings.isDynamicEntry, true)
 const modelSettings = settings.imports?.find((id) => manifest[id]?.name === 'ModelSettings')
 assert.ok(modelSettings && manifest[ui[0]].imports?.includes(modelSettings), 'first use and desktop must share the real ModelSettings bundle')
 assert.ok(!firstUse.imports?.some((id) => id === modelSettings || ui.includes(id)), 'desktop settings and full shell must remain lazy')
-console.log('Workbench bundle OK: browser index and ES mount entry, shared desktop ModelSettings, lazy renderer views, CSS and assets present.')
+const textChat = manifest['text-workbench.tsx']
+assert.ok(textChat?.isDynamicEntry && settings.dynamicImports?.includes('text-workbench.tsx'), 'text chat must load only on the declared host capability')
+const shared = textChat.imports.filter(id => manifest[ui[0]].imports.includes(id))
+const sharedStyles = [...new Set(shared.flatMap(id => manifest[id].css ?? []))]
+const css = (await Promise.all(sharedStyles.map(name => readFile(resolve(root, name), 'utf8')))).join('\n')
+for (const selector of ['.cf-shell', '.cf-rail', '.cf-msg', '.cf-composer']) assert.ok(css.includes(selector), `missing shared desktop styling: ${selector}`)
+console.log('Workbench bundle OK: lazy chat, desktop layout styles and ModelSettings are shared; all assets present.')

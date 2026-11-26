@@ -10,5 +10,6 @@
     "build": "node scripts/build-provider.mjs",
     "test": "node scripts/build-provider.mjs && node --test --test-concurrency=1 test/*.test.mjs"
   },
+  "dependencies": { "ws": "8.18.3" },
   "devDependencies": { "esbuild": "0.21.5" }
 }

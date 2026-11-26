@@ -60,6 +60,13 @@ function checkWeb(web, id, errors, isFile) {
   if (statuses.includes(status) && (target === 'desktop') !== (status === 'desktop-only')) {
     errors.push(`${id}.web: desktop target and disposition disagree`)
   }
+  if (web.partial !== undefined) {
+    if (status !== 'pending' || !text(web.partial?.scope) || !text(web.partial?.remaining)) {
+      errors.push(`${id}.web.partial: bounded progress needs a pending row, a scope, and the remaining desktop behavior`)
+    }
+    checkEvidence(web.partial?.handler, `${id}.web.partial.handler`, errors, isFile)
+    checkEvidence(web.partial?.test, `${id}.web.partial.test`, errors, isFile)
+  }
   if (status === 'implemented') {
     checkEvidence(implementation?.handler, `${id}.web.implementation.handler`, errors, isFile)
     checkEvidence(implementation?.test, `${id}.web.implementation.test`, errors, isFile)

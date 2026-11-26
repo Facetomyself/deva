@@ -1,0 +1,20 @@
+.wb-chat .cf-navbtn:disabled, .wb-chat .cf-iconrail__me:disabled,
+.wb-chat .cf-iconbtn:disabled, .wb-chat .cf-wschip:disabled {
+  opacity: .38;
+  cursor: default;
+}
+.wb-chat .cf-rail__addbtn:disabled { opacity: .5; cursor: default; }
+.wb-chat .wb-chat__title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.wb-chat .wb-chat__scope { margin-left: auto; min-width: 0; max-width: 65%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: block; }
+.wb-chat .wb-chat__notice { padding-block: 8px; }
+.wb-chat .wb-chat__empty { display: grid; gap: 12px; justify-items: center; align-content: center; flex: 1; }
+.wb-chat .wb-chat__model, .wb-chat .wb-chat__limits { margin: 4px 0; padding-inline: 12px; color: var(--fg-muted); font-size: 12px; }
+.wb-chat .wb-chat__limits { text-align: center; margin: 0 0 6px; }
+.wb-chat .wb-chat__older { display: block; margin: 0 auto; }
+.wb-chat .wb-chat__logout { margin-top: auto; }
+.wb-chat .cf-modal__body .wb-settings { user-select: text; }
+.wb-chat .wb-error { margin: 8px; }
+@media (max-width: 700px) {
+  .wb-chat .cf-modal__body { overflow: auto; }
+  .wb-chat .cf-box__bar .cf-wschip:disabled { font-size: 0; }
+}
