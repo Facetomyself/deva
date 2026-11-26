@@ -10,14 +10,15 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { connectPipe } from '../src/engine/pipe.mjs';
 import { BOOTSTRAP_URL, fail, PAGE_POLICIES, readFrame, VIEWPORT } from '../src/engine/policy.mjs';
 import { procIdentity, verifyRendererSandbox } from '../src/engine/sandbox.mjs';
+import { fixedWebdriverComparison, launchDriver, webdriverExecutable } from './navigation-webdriver-fixture.mjs';
 
 const NAVIGATION_MS = 15_000;
+const VIRTUAL_HOST = 'deva-engine-fixture.test';
 const LANES = [
-  { name: 'default-minimal' },
-  { name: 'default-guarded', guards: true },
-  { name: 'task-guarded-retired', task: true, guards: true, retire: true },
-  { name: 'task-guarded-kept', task: true, guards: true },
-  { name: 'task-guarded-split', task: true, guards: true, retire: true, split: true },
+  { name: 'webdriver-numeric-direct', webdriver: true, direct: true },
+  { name: 'webdriver-numeric-proxy', webdriver: true },
+  { name: 'cdp-virtual-bare', virtual: true },
+  { name: 'cdp-virtual-guarded', virtual: true, guards: true },
 ];
 const SITE_POLICY = "default-src 'none'; sandbox; connect-src 'none'; frame-src 'none'; form-action 'none'; base-uri 'none'";
 const SITE_PATH = '/qa-document';
@@ -29,31 +30,46 @@ const TARGETS = ['page', 'iframe', 'worker', 'shared_worker', 'service_worker'].
 const COUNTERS = ['navigateSent', 'navigateAck', 'frameStartedNavigating', 'frameStartedLoading', 'frameCommit', 'frameLoad',
   'networkRequest', 'networkResponse', 'networkFailed', 'fetchRequest', 'fetchRequestAck', 'fetchResponse', 'fetchResponseAck',
   'fetchBlocked', 'proxyReceived', 'proxyAccepted', 'proxyResponse', 'proxyRejected', 'proxyConnect', 'documentReceived',
-  'documentResponse', 'targetCreated', 'targetRetired'];
+  'documentResponse', 'targetCreated', 'targetRetired', 'requestExpected', 'requestUpgraded', 'requestOther',
+  'blockedReason', 'localNetworkAccess', 'localNetworkPolicy', 'httpsUpgradeConnect', 'interstitial', 'errorPageCommit', 'download'];
 const MILESTONES = { frameStartedNavigating: 'firstFrameMs', networkRequest: 'firstNetworkMs', fetchRequest: 'firstFetchMs',
   proxyAccepted: 'firstProxyMs', documentReceived: 'firstDocumentMs', navigateAck: 'navigateAckMs' };
 const FAILURE_KIND = new Set(['net::ERR_ABORTED', 'net::ERR_BLOCKED_BY_CLIENT', 'net::ERR_PROXY_CONNECTION_FAILED',
-  'net::ERR_NAME_NOT_RESOLVED', 'net::ERR_CONNECTION_REFUSED', 'net::ERR_TIMED_OUT', 'net::ERR_FAILED']);
+  'net::ERR_NAME_NOT_RESOLVED', 'net::ERR_CONNECTION_REFUSED', 'net::ERR_TIMED_OUT', 'net::ERR_FAILED',
+  'net::ERR_BLOCKED_BY_LOCAL_NETWORK_ACCESS_CHECKS', 'net::ERR_TUNNEL_CONNECTION_FAILED', 'net::ERR_SSL_PROTOCOL_ERROR']);
+const LNA_KINDS = new Set(['InsecurePrivateNetwork', 'InvalidPrivateNetworkAccess', 'UnexpectedPrivateNetworkAccess',
+  'InsecureLocalNetwork', 'PreflightMissingAllowPrivateNetwork', 'PreflightInvalidAllowPrivateNetwork',
+  'LocalNetworkAccessPermissionDenied', 'LocalNetworkAccessPermissionDismissed', 'LocalNetworkAccessPermissionUnavailable']);
+const BLOCK_KINDS = new Set(['csp', 'mixed-content', 'origin', 'inspector', 'subresource-filter', 'content-type',
+  'coep-frame-resource-needs-coep-header', 'corp-not-same-origin', 'corp-not-same-origin-after-defaulted-to-same-origin-by-coep',
+  'corp-not-same-site', 'other']);
 
 function evidence() {
   const counters = Object.fromEntries(COUNTERS.map((key) => [key, 0]));
   const milliseconds = Object.fromEntries(Object.values(MILESTONES).map((key) => [key, -1]));
-  let started, finished;
+  let started, startWall, finished;
   return {
-    counters, milliseconds, networkFailure: 'none',
-    begin() { started = performance.now(); },
+    counters, milliseconds, networkFailure: 'none', blockedKind: 'none',
+    begin() { started = performance.now(); startWall = Date.now(); },
     finish() { finished ??= performance.now(); },
     elapsed: () => started === undefined ? -1 : Math.min(60_000, Math.floor((finished ?? performance.now()) - started)),
-    failure(errorText) {
+    failure(errorText, eventWall, count = true) {
       if (started === undefined || finished !== undefined) return;
-      this.bump('networkFailed');
-      this.networkFailure = FAILURE_KIND.has(errorText) ? errorText.slice(5) : 'other';
+      if (count) this.bump('networkFailed', eventWall);
+      if (FAILURE_KIND.has(errorText)) this.networkFailure = errorText.slice(5);
+      else if (this.networkFailure === 'none') this.networkFailure = 'other';
     },
-    bump(key) {
-      if (started === undefined || finished !== undefined) return;
+    blocked(value, eventWall) {
+      if (typeof value !== 'string' || !value || started === undefined || finished !== undefined) return;
+      this.bump('blockedReason', eventWall);
+      this.blockedKind = BLOCK_KINDS.has(value) ? value : 'other';
+    },
+    bump(key, eventWall) {
+      if (started === undefined || finished !== undefined || (Number.isFinite(eventWall) && eventWall < startWall)) return;
       counters[key] = Math.min(256, counters[key] + 1);
       const time = MILESTONES[key];
-      if (time && milliseconds[time] < 0) milliseconds[time] = this.elapsed();
+      if (time && milliseconds[time] < 0) milliseconds[time] = Number.isFinite(eventWall) ?
+        Math.min(60_000, Math.floor(eventWall - startWall)) : this.elapsed();
     },
   };
 }
@@ -80,7 +96,7 @@ function stopServer(server) {
   return new Promise((resolve) => { server.close(resolve); server.closeAllConnections(); });
 }
 
-async function fixture(trace) {
+async function fixture(trace, lane) {
   const site = createServer((req, res) => {
     if (req.method !== 'GET') return res.writeHead(405).end();
     if (req.url === HEALTH_PATH) return res.writeHead(204).end();
@@ -94,8 +110,10 @@ async function fixture(trace) {
   let proxy;
   try {
     const origin = await listen(site);
-    const url = `${origin}${SITE_PATH}`;
-    const health = `${origin}${HEALTH_PATH}`;
+    const publicOrigin = lane.virtual ? `http://${VIRTUAL_HOST}` : origin;
+    const url = `${publicOrigin}${SITE_PATH}`;
+    const health = `${publicOrigin}${HEALTH_PATH}`;
+    const expected = new URL(url);
     proxy = createServer((req, res) => {
       trace.bump('proxyReceived');
       // Do not relay HTTP headers, credentials, redirects, or any request except these exact local GETs.
@@ -104,7 +122,8 @@ async function fixture(trace) {
         return res.writeHead(403).end();
       }
       trace.bump('proxyAccepted');
-      const upstream = request(req.url, { method: 'GET', agent: false, headers: { connection: 'close' } }, (result) => {
+      const upstream = request(`${origin}${req.url === url ? SITE_PATH : HEALTH_PATH}`,
+        { method: 'GET', agent: false, headers: { connection: 'close' } }, (result) => {
         trace.bump('proxyResponse');
         res.writeHead(result.statusCode, result.headers);
         result.pipe(res);
@@ -114,7 +133,11 @@ async function fixture(trace) {
       req.resume();
       upstream.end();
     });
-    proxy.on('connect', (_req, socket) => { trace.bump('proxyConnect'); socket.destroy(); });
+    proxy.on('connect', (req, socket) => {
+      trace.bump('proxyConnect');
+      if (req.url === `${expected.hostname}:443` || (expected.port && req.url === expected.host)) trace.bump('httpsUpgradeConnect');
+      socket.destroy();
+    });
     proxy.on('upgrade', (_req, socket) => socket.destroy());
     const proxyUrl = await listen(proxy);
     const check = await new Promise((resolve, reject) => {
@@ -148,7 +171,7 @@ async function activeGroup(pid) {
   return rows;
 }
 
-async function childLauncher(executablePath, proxyUrl) {
+async function childLauncher(executablePath, proxyUrl, driverPath = null) {
   const profile = await mkdtemp('/tmp/deva-engine-qa-');
   if (dirname(profile) !== '/tmp' || !/^deva-engine-qa-[a-z0-9]{6}$/iu.test(basename(profile))) throw fail('BROWSER_QA_CLEANUP');
   let child;
@@ -163,7 +186,7 @@ async function childLauncher(executablePath, proxyUrl) {
     const env = { PATH: '/usr/bin:/bin', LANG: 'C.UTF-8', HOME: profile, TMPDIR: join(profile, 'tmp'),
       XDG_CONFIG_HOME: join(profile, 'config'), XDG_CACHE_HOME: join(profile, 'cache'), XDG_DATA_HOME: join(profile, 'data'),
       XDG_RUNTIME_DIR: join(profile, 'runtime') };
-    child = spawn(executablePath, ['--headless', '--remote-debugging-pipe', `--user-data-dir=${profile}`,
+    child = driverPath ? launchDriver(driverPath, env, profile) : spawn(executablePath, ['--headless', '--remote-debugging-pipe', `--user-data-dir=${profile}`,
       '--window-size=1024,768', `--proxy-server=${proxyUrl}`, '--proxy-bypass-list=<-loopback>',
       '--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1', '--disable-quic',
       '--force-webrtc-ip-handling-policy=disable_non_proxied_udp', '--disable-blink-features=FileSystemAccess,FileSystemAccessLocal',
@@ -198,8 +221,9 @@ async function childLauncher(executablePath, proxyUrl) {
     for (const pid of await ownedAlive()) signal(pid, value);
   }
   return { child, profile, observeOwned(rows) { for (const row of rows) owned.set(row.pid, row); }, async close() {
-    child.stdio[3].destroy();
-    child.stdio[4].destroy();
+    child.stdio[3]?.destroy();
+    child.stdio[4]?.destroy();
+    child.stdout?.destroy();
     if (!(await waitExit(350))) {
       await terminate('SIGTERM');
       if (!(await waitExit(350))) {
@@ -211,10 +235,55 @@ async function childLauncher(executablePath, proxyUrl) {
   } };
 }
 
+function observer(trace, url, ownFrame = () => true) {
+  const expected = new URL(url);
+  function classification(raw) {
+    if (raw === url) return 'requestExpected';
+    try {
+      const seen = new URL(raw);
+      if (seen.protocol === 'https:' && seen.hostname === expected.hostname && seen.pathname === expected.pathname &&
+          !seen.username && !seen.password && !seen.search && !seen.hash && (!seen.port || seen.port === expected.port)) {
+        return 'requestUpgraded';
+      }
+    } catch { /* count as other */ }
+    return 'requestOther';
+  }
+  return (method, p, wall) => {
+    if (method === 'Page.frameStartedNavigating' && ownFrame(p.frameId)) trace.bump('frameStartedNavigating', wall);
+    if (method === 'Page.frameStartedLoading' && ownFrame(p.frameId)) trace.bump('frameStartedLoading', wall);
+    if (method === 'Page.frameNavigated' && p.frame && !p.frame.parentId && ownFrame(p.frame.id)) {
+      if (p.frame.url === url && !p.frame.unreachableUrl) trace.bump('frameCommit', wall);
+      if (p.frame.unreachableUrl || /^chrome-error:\//u.test(p.frame.url ?? '')) trace.bump('errorPageCommit', wall);
+    }
+    if (method === 'Page.lifecycleEvent' && ownFrame(p.frameId) && p.name === 'load') trace.bump('frameLoad', wall);
+    if (method === 'Page.interstitialShown') trace.bump('interstitial', wall);
+    if (method === 'Browser.downloadWillBegin' || method === 'Page.downloadWillBegin') trace.bump('download', wall);
+    if (method === 'Network.requestWillBeSent' && p.type === 'Document') {
+      trace.bump('networkRequest', wall);
+      trace.bump(classification(p.request?.url), wall);
+    }
+    if (method === 'Network.responseReceived' && p.type === 'Document') trace.bump('networkResponse', wall);
+    if (method === 'Network.loadingFailed' && p.type === 'Document') {
+      trace.failure(p.errorText, wall);
+      trace.blocked(p.blockedReason, wall);
+      if (LNA_KINDS.has(p.corsErrorStatus?.corsError) || p.errorText === 'net::ERR_BLOCKED_BY_LOCAL_NETWORK_ACCESS_CHECKS') {
+        trace.bump('localNetworkAccess', wall);
+      }
+    }
+    if (method === 'Network.requestWillBeSentExtraInfo' &&
+        ['Block', 'Warn', 'PreflightBlock', 'PreflightWarn', 'PermissionBlock', 'PermissionWarn']
+          .includes(p.clientSecurityState?.privateNetworkRequestPolicy)) trace.bump('localNetworkPolicy', wall);
+    if (method === 'Audits.issueAdded' && LNA_KINDS.has(p.issue?.details?.corsIssueDetails?.corsErrorStatus?.corsError)) {
+      trace.bump('localNetworkAccess', wall);
+    }
+  };
+}
+
 function controller({ browser, local, lane, trace, signal }) {
   let bootId, bootContext, context, target, candidate, main, control, guard, fault;
   let pageCreating = false, navigated = false;
   const retired = new Map();
+  const inspect = observer(trace, local.url, (frame) => frame === main);
   const pipe = connectPipe(browser.child.stdio[3], browser.child.stdio[4], { onEvent, onFailure: setFault });
   const root = (name, args) => pipe.send(name, args);
   const on = (sid) => (name, args, timeoutMs) => pipe.send(name, args, sid, timeoutMs);
@@ -265,14 +334,7 @@ function controller({ browser, local, lane, trace, signal }) {
     if (method === 'Fetch.requestPaused' && sid === guard) return fetchPaused(p);
     if (method === 'Fetch.authRequired' && sid === guard) return continueFetch('Fetch.continueWithAuth',
       { requestId: p.requestId, authChallengeResponse: { response: 'CancelAuth' } });
-    if (sid !== control) return;
-    if (method === 'Page.frameStartedNavigating' && p.frameId === main) trace.bump('frameStartedNavigating');
-    if (method === 'Page.frameStartedLoading' && p.frameId === main) trace.bump('frameStartedLoading');
-    if (method === 'Page.frameNavigated' && p.frame?.id === main && p.frame?.url === local.url) trace.bump('frameCommit');
-    if (method === 'Page.lifecycleEvent' && p.frameId === main && p.name === 'load') trace.bump('frameLoad');
-    if (method === 'Network.requestWillBeSent' && p.type === 'Document') trace.bump('networkRequest');
-    if (method === 'Network.responseReceived' && p.type === 'Document') trace.bump('networkResponse');
-    if (method === 'Network.loadingFailed' && p.type === 'Document') trace.failure(p.errorText);
+    if (sid === control || (sid === null && method === 'Browser.downloadWillBegin')) inspect(method, p);
   }
   return {
     async pin() {
@@ -302,7 +364,7 @@ function controller({ browser, local, lane, trace, signal }) {
         pageCreating = false;
         if (typeof target !== 'string' || !target || target === bootId || (candidate && candidate !== target)) throw fail('BROWSER_TARGET_LOST');
       }
-      await root('Browser.setDownloadBehavior', { behavior: 'deny', ...(context ? { browserContextId: context } : {}) });
+      await root('Browser.setDownloadBehavior', { behavior: 'deny', eventsEnabled: true, ...(context ? { browserContextId: context } : {}) });
       ({ sessionId: control } = await root('Target.attachToTarget', { targetId: target, flatten: true }));
       if (typeof control !== 'string' || !control) throw fail('BROWSER_TARGET_LOST');
       guard = control;
@@ -320,6 +382,7 @@ function controller({ browser, local, lane, trace, signal }) {
       await page('Page.enable');
       await page('Page.setLifecycleEventsEnabled', { enabled: true });
       await page('Network.enable');
+      await page('Audits.enable').catch((error) => { if (error.code !== 'BROWSER_COMMAND_FAILED') throw error; });
       if (lane.guards) {
         await protectedPage('Page.setInterceptFileChooserDialog', { enabled: true });
         await protectedPage('Network.setCacheDisabled', { cacheDisabled: true });
@@ -368,6 +431,8 @@ function controller({ browser, local, lane, trace, signal }) {
       trace.bump('navigateSent');
       const result = await on(control)('Page.navigate', { url: local.url }, NAVIGATION_MS);
       trace.bump('navigateAck');
+      if (result.errorText) trace.failure(result.errorText, undefined, false);
+      if (result.isDownload) trace.bump('download');
       if (result.errorText || result.isDownload || result.frameId !== main) throw fail('BROWSER_NAVIGATION_FAILED');
       const end = Date.now() + Math.max(0, NAVIGATION_MS - trace.elapsed());
       do {
@@ -388,16 +453,19 @@ function controller({ browser, local, lane, trace, signal }) {
   };
 }
 
-async function runLane(executablePath, lane) {
+async function runLane(executablePath, driverPath, lane) {
   const trace = evidence();
   const signal = AbortSignal.timeout(35_000);
   let phase = 'fixture', code = 'none', local, browser, run, cleaned = true;
   try {
-    local = await fixture(trace);
+    local = await fixture(trace, lane);
     phase = 'launch';
-    browser = await childLauncher(executablePath, local.proxyUrl);
-    run = controller({ browser, local, lane, trace, signal });
-    for (const key of ['pin', 'guard', 'attest', 'activate', 'navigate']) { phase = key; await run[key](); }
+    if (lane.webdriver && !driverPath) throw fail('BROWSER_QA_DRIVER_REQUIRED');
+    browser = await childLauncher(executablePath, local.proxyUrl, lane.webdriver ? driverPath : null);
+    run = lane.webdriver ? fixedWebdriverComparison({ owned: browser, binary: executablePath, local, trace, signal,
+      direct: lane.direct, observe: observer(trace, local.url) }) : controller({ browser, local, lane, trace, signal });
+    const phases = lane.webdriver ? ['pin', 'attest', 'navigate'] : ['pin', 'guard', 'attest', 'activate', 'navigate'];
+    for (const key of phases) { phase = key; await run[key](); }
     phase = 'complete';
   } catch (error) { code = /^BROWSER_[A-Z_]+$/u.test(error?.code) ? error.code : 'BROWSER_QA_FAILURE'; }
   finally {
@@ -409,7 +477,7 @@ async function runLane(executablePath, lane) {
   const okay = code === 'none' && cleaned;
   const counts = Object.entries({ ...trace.counters, ...trace.milliseconds }).map(([key, value]) => `${key}:${value}`).join(',');
   console.log(`QA lane=${lane.name} verdict=${okay ? 'pass' : 'fail'} phase=${phase} code=${code} cleanup=${Number(cleaned)} ` +
-    `navigationMs=${trace.elapsed()} networkFailure=${trace.networkFailure} counts=${counts}`);
+    `navigationMs=${trace.elapsed()} networkFailure=${trace.networkFailure} blockedKind=${trace.blockedKind} counts=${counts}`);
   return okay;
 }
 
@@ -417,8 +485,9 @@ async function run() {
   if (process.argv.length !== 2) throw fail('BROWSER_QA_FIXED_FIXTURE');
   if (process.platform !== 'linux' || !process.getuid?.() || !process.geteuid?.()) throw fail('BROWSER_SANDBOX_REQUIRED');
   const binary = await browserExecutable();
+  const driver = await webdriverExecutable().catch(() => null);
   let passed = 0;
-  for (const lane of LANES) if (await runLane(binary, lane)) passed++;
+  for (const lane of LANES) if (await runLane(binary, driver, lane)) passed++;
   console.log(`QA summary pass=${passed} fail=${LANES.length - passed}`);
   if (passed !== LANES.length) process.exitCode = 1;
 }
