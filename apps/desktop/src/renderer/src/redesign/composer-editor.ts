@@ -316,6 +316,8 @@ export interface ComposerEditorHandlers {
   onKey: (key: ComposerKey, e: KeyboardEvent) => boolean
   /** 粘贴：返回 true = 已接管（如粘贴文件转附件），false = 按纯文本粘贴。 */
   onPaste?: (e: ClipboardEvent) => boolean
+  /** Web-only: consume a trusted plain-text paste synchronously at the current Lexical selection. */
+  onClientTextPaste?: (e: ClipboardEvent, insert: (text: string) => boolean) => boolean
   /** 开头 `/name` 是否会生效（name 为去掉斜杠的原文，whole 为去首尾空白的整条消息）。 */
   isToken?: (name: string, whole: string) => boolean
   /** 正文里 `@名字` 会生效的名字（本对话成员、可 @ 的角色、新建成员标记）；空 = 不认 @。 */
@@ -420,7 +422,23 @@ export function useComposerEditor(handlers: ComposerEditorHandlers): ComposerEdi
       key(KEY_ESCAPE_COMMAND, 'escape'),
       editor.registerCommand(
         PASTE_COMMAND,
-        (e) => e instanceof ClipboardEvent && (handlersRef.current.onPaste?.(e) ?? false),
+        (e) => {
+          if (!(e instanceof ClipboardEvent)) return false
+          const handlers = handlersRef.current
+          if (!handlers.onClientTextPaste) return handlers.onPaste?.(e) ?? false
+          const root = editor.getRootElement()
+          // On the Web the clipboard belongs to the user's focused editor. A synthetic event
+          // or one originating in a different control must not read even its file metadata.
+          if (!e.isTrusted || e.defaultPrevented || !root || !(e.target instanceof Node) || !root.contains(e.target) ||
+              !root.contains(root.ownerDocument.activeElement)) { e.preventDefault(); return true }
+          if (handlers.onPaste?.(e)) return true // Keep genuine pasted files on the explicit attachment path.
+          return handlers.onClientTextPaste(e, (text) => {
+            const selection = $getSelection()
+            if (!$isRangeSelection(selection)) return false
+            selection.insertRawText(text)
+            return true
+          })
+        },
         COMMAND_PRIORITY_HIGH
       ),
       // 拖入文件：不让 Lexical 按文本落入，事件继续冒泡，由外层在窗口级统一转成附件。
