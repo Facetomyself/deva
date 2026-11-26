@@ -1,12 +1,67 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
-import type { EffortLevel } from '../shared/effort'
-import type { UpdateState } from '../shared/update'
-import type { DeliverableInfo } from '../shared/deliverables'
-import type { PhoneLinkResult, PhonePairedEvent, PhoneQrResult, PhoneState, PhoneVia } from '../shared/phone'
-import type { AgentDraft, AutotaskDraft } from '../shared/drafts'
 import type { BrowserLiveFrame, BrowserUiState } from '../shared/browser'
+import type { DeliverableInfo } from '../shared/deliverables'
 import type {
-  ChatModelConfig,
+  PhoneLinkResult,
+  PhonePairedEvent,
+  PhoneQrResult,
+  PhoneState,
+  PhoneVia
+} from '../shared/phone'
+import type { UpdateState } from '../shared/update'
+import type {
+  DevaApi as HostApi,
+  ChatSessionMeta,
+  RewindTurnStat,
+  RewindPreview,
+  RewindApplyRequest,
+  RewindApplyResult,
+  RewindUndoResult,
+  TaskStatus,
+  TaskSchedule,
+  TaskRecord,
+  TaskCreateInput,
+  TaskUpdateInput,
+  CreateTaskResult,
+  PreviewScheduleResult,
+  ChatEventPayload,
+  DirEntry,
+  OpenFolderResult,
+  ReadFileResult,
+  PickedAttachment,
+  DroppedEntry,
+  TerminalCreateOptions,
+  ShellProfile,
+  TerminalDataPayload,
+  TerminalExitPayload,
+  GitStatus,
+  GitDiffLine,
+  GitCommit,
+  GitBranch,
+  GitAvailable,
+  GitOpResult,
+  GitGenModel,
+  GitGenLocale,
+  GitGenerateResult,
+  SkillRecord,
+  SkillImportResult,
+  PersonaRecord,
+  UserProfile,
+  MemoryType,
+  MemorySnapshot,
+  MemoryScopeArg,
+  MemoryIpcResult,
+  PersonaUpsertInput,
+  McpServerConfig,
+  McpServerInput,
+  McpServerView,
+  ProbeConfig,
+  ProviderListModelsResult,
+  BotPlatform,
+  BotReplyMode,
+  BotReplyScope,
+  RemoteState,
+  BotScanEvent,
   ChatSendRequest,
   ChatInsertRequest,
   ChatInsertResult,
@@ -18,597 +73,16 @@ import type {
   ChatSetFocusRequest,
   ChatRenameSessionRequest,
   ChatRemoteChange,
-  AttachmentChip,
-  HandoffInfo,
-  MemberTask,
-  DisplayBlock,
   DisplayMessage,
-  AskOption,
-  AskQuestion,
   AskResponse,
   PlanResponse,
-  TodoItem,
-  TodoList,
   TodoState,
   MountResponse,
   ResolveAutotaskResult,
-  ChatStreamEvent,
-  ContextUsage,
-  MemberProgressGroup
-} from '../shared/chat-protocol'
+  ContextUsage
+} from '../shared/host-api'
 
-/** 聊天 IPC 协议类型：与主进程共用 shared/chat-protocol.ts。 */
-export type {
-  ChatModelConfig,
-  ChatSendRequest,
-  ChatInsertRequest,
-  ChatInsertResult,
-  TakenInserts,
-  ChatCompactRequest,
-  ChatCreateSessionRequest,
-  ChatSetModelRequest,
-  ChatSetEffortRequest,
-  ChatSetFocusRequest,
-  ChatRenameSessionRequest,
-  ChatRemoteChange,
-  AttachmentChip,
-  HandoffInfo,
-  MemberTask,
-  DisplayBlock,
-  DisplayMessage,
-  AskOption,
-  AskQuestion,
-  AskResponse,
-  PlanResponse,
-  TodoItem,
-  TodoList,
-  TodoState,
-  MountResponse,
-  ResolveAutotaskResult,
-  ChatStreamEvent,
-  ContextUsage,
-  MemberProgressGroup
-}
-
-/** 目录项（单层）。 */
-export interface DirEntry {
-  name: string
-  path: string
-  type: 'dir' | 'file'
-}
-
-/** 打开文件夹结果。 */
-export interface OpenFolderResult {
-  path: string
-  name: string
-}
-
-/** 读取文件结果（可能因过大 / 二进制而不含正文）。 */
-export interface ReadFileResult {
-  path: string
-  content: string
-  tooLarge?: boolean
-  binary?: boolean
-}
-
-/** 思考等级：定义在主进程 / 渲染层共用模块（含模型能力表），此处转出供渲染层按既有方式取用。 */
-export type { EffortLevel }
-
-/** 附件类型（与 services/attachments.ts 对齐）。 */
-/** file = 只把位置交给模型的文件（Word 等读不进消息的格式、超过体积上限的）。 */
-export type AttachmentKind = 'image' | 'document' | 'text' | 'file' | 'unsupported'
-
-/** 一次挑选返回的附件描述（不含正文/base64）。 */
-export interface PickedAttachment {
-  path: string
-  name: string
-  ext: string
-  size: number
-  kind: AttachmentKind
-  supported: boolean
-  reason?: string
-}
-
-/** 拖入 / 粘贴的条目里认出的文件夹（与 services/attachments.ts 对齐）。 */
-export interface DroppedFolder {
-  path: string
-  name: string
-}
-
-/** 拖入 / 粘贴的一项：文件夹，或带真实路径的文件（与 services/attachments.ts 对齐）。 */
-export type DroppedEntry = { folder: DroppedFolder } | { file: PickedAttachment }
-
-/** 会话元信息（左侧列表用，与 chat-store.ts 对齐）。 */
-export interface ChatSessionMeta {
-  id: string
-  title: string
-  createdAt: number
-  updatedAt: number
-  /** 绑定的 persona id（对话优先外壳：驱动列表头像/主题色）。旧壳会话缺省。 */
-  personaId?: string
-  /** 聚焦工作区绝对路径；null = 全机通用助手。 */
-  focusRoot?: string | null
-  /** 本对话模型引用 `"providerId:modelId"`；空串/缺省 = 跟随全局默认。见 ChatSendRequest.modelRef。 */
-  model?: string
-  /** 本对话思考等级；缺省 = 尚未定格（渲染层打开时定格为「最近使用」）。 */
-  effort?: EffortLevel
-  /** 已归档（不在左侧对话列表里显示）；缺省 = 未归档。 */
-  archived?: boolean
-  /** 项目成员名单（主对话；含已移除的，见 MemberMeta.removed）。 */
-  members?: MemberMeta[]
-  /** 成员会话所属的主对话 id（成员会话不进左侧列表，故列表里的对话恒无此字段）。 */
-  parentId?: string
-}
-
-/** 项目成员（与 services/members.ts 的 MemberRef 对齐）。 */
-export interface MemberMeta {
-  /** 成员会话 id（也是生成头像的种子）。 */
-  sessionId: string
-  name: string
-  /** created = 主智能体创建（用主对话角色的设定）；mention = 用户 @ 加入的角色。 */
-  origin: 'created' | 'mention'
-  /** 设定来源角色 id。 */
-  personaId: string
-  /** 负责的文件夹（绝对路径）；null = 没有文件夹（不跟随主对话）。以成员会话的 focusRoot 为准。 */
-  root: string | null
-  duty: string
-  /** 头像形状（主智能体建的成员创建时存下；@ 加入的与老成员没有）。 */
-  shape?: string
-  addedAt: number
-  removed?: boolean
-  /** 最近一次派来的任务标题。 */
-  task?: string
-  /** 最近一次结论（截断）与结局。 */
-  last?: { text: string; at: number; status: 'done' | 'failed' | 'stopped'; task?: string }
-  /** 用户在成员会话里亲自选过模型 / 思考等级（此后不再跟随主对话）。 */
-  modelSet?: boolean
-  effortSet?: boolean
-}
-
-/** 名片草稿（角色 / 定时任务）：主进程与渲染层共用 shared/drafts.ts。 */
-export type { AgentDraft, AutotaskDraft }
-
-/** 回滚列表里每轮自身的改动量（与 services/checkpoints.ts 的 RewindTurnStat 对齐）。 */
-export interface RewindTurnStat {
-  turn: number
-  fileCount: number
-  added: number
-  removed: number
-  /** 含近似 / 二进制 / 过大等无法精确计数的文件。 */
-  approx: boolean
-  hasExec: boolean
-}
-
-/** 回滚对单个文件的动作：写回 / 删除（目标是不存在）/ 重建（现已不存在）/ 无需改动。 */
-export type RewindAction = 'restore' | 'delete' | 'create' | 'none'
-/** ok=可回滚；conflict=回滚点之后被外部改过；link=链接文件跳过。 */
-export type RewindStatus = 'ok' | 'conflict' | 'link' | 'blob_missing' | 'too_large'
-
-/** 回滚预览里的一个文件（只有摘要，不含内容；与 services/checkpoints.ts 的 RewindFile 对齐）。 */
-export interface RewindFile {
-  path: string
-  rel: string
-  action: RewindAction
-  status: RewindStatus
-  added?: number
-  removed?: number
-  approx?: boolean
-  binary?: boolean
-}
-
-export interface RewindPreview {
-  files: RewindFile[]
-  /** 目标轮起跑过的命令：其影响无法撤销，面板只提示条数不逐条列出。 */
-  commands: string[]
-}
-
-/** 回滚模式：both=代码与对话 / conversation=仅对话 / code=仅代码。 */
-export type RewindMode = 'both' | 'conversation' | 'code'
-
-export interface RewindApplyRequest {
-  sessionId: string
-  turn: number
-  mode: RewindMode
-  /** 勾选「仍然覆盖」的冲突文件路径（RewindFile.path）。 */
-  force?: string[]
-}
-
-export type RewindApplyResult =
-  | {
-      ok: true
-      messages: DisplayMessage[]
-      restored: string[]
-      skipped: { rel: string; reason: RewindStatus | 'error' }[]
-    }
-  | { ok: false; error: 'no-session' | 'busy' | 'bad-turn' }
-
-export type RewindUndoResult =
-  | { ok: true; messages: DisplayMessage[]; restored: string[]; skipped: string[] }
-  | { ok: false; error: 'no-undo' | 'busy' }
-
-/** 技能记录（与 services/skills.ts 的 SkillRecord 对齐）。 */
-export interface SkillRecord {
-  id: string
-  name: string
-  description: string
-  trigger: string
-  allowedTools: string[]
-  license: string
-  compatibility: string
-  metadata: Record<string, string>
-  instructions: string
-  enabled: boolean
-  /** 可用角色（角色 id）；null = 全部角色。内置技能恒为 null。 */
-  roles: string[] | null
-  /** 来源：`builtin` = 应用内置（不可删/编辑、恒启用）；`custom` = 用户创建/导入。 */
-  source: 'builtin' | 'custom'
-}
-
-/** 技能导入结果（skills:import 回传；error 为稳定错误码，渲染层据此本地化）。 */
-export interface SkillImportResult {
-  ok: boolean
-  id?: string
-  name?: string
-  error?: string
-}
-
-/** Agent 提示词记录（与 services/personas.ts 的 PersonaRecord 对齐）。 */
-export interface PersonaRecord {
-  id: string
-  name: string
-  /** 专长，一句话（frontmatter description）。 */
-  description: string
-  /** 头像 spec（Humation AvatarSpec 的 JSON 字符串；空 → 由 id 确定性生成）。 */
-  avatar: string
-  /**
-   * 自定义头像图片（data URI；空串 = 无，回落生成头像）。**只读派生字段**：真源是主进程磁盘上的
-   * 图片文件，不入 upsert 入参——改图走 setAvatarImage / clearAvatarImage。
-   */
-  avatarImage: string
-  /** 偏好模型引用 `"providerId:modelId"`；空串 = 跟随主对话默认。 */
-  model: string
-  /** 工作区（绝对路径；空串 = 用角色的默认工作区）。设了则绑定此角色的新对话一开始就挂载它。 */
-  workspace: string
-  /** 正文 = 追加进主智能体系统提示词的内容。 */
-  prompt: string
-  enabled: boolean
-}
-
-/** 本机用户资料（与 services/profile.ts 对齐）。 */
-export interface UserProfile {
-  /** 头像 spec（Humation AvatarSpec 的 JSON 字符串；空 → 固定 seed 默认头像）。 */
-  avatar: string
-  /** 自定义头像图片（data URI；空串 = 无）。只读派生字段，改图走 profile.setAvatarImage。 */
-  avatarImage: string
-}
-
-/** 记忆类型：user 用户 / feedback 做事方式 / project 进展 / reference 资料（与 services/memory.ts 对齐）。 */
-export type MemoryType = 'user' | 'feedback' | 'project' | 'reference'
-/** 记忆条目（全局 / 角色 / 项目共用，与 services/memory.ts 对齐）。 */
-export interface MemoryEntry {
-  id: string
-  type: MemoryType
-  /** 一句话标题（进索引）。 */
-  title: string
-  /** 正文，可为空。 */
-  body: string
-  createdAt: number
-  updatedAt: number
-}
-export interface MemorySnapshot {
-  entries: MemoryEntry[]
-  /** 当前索引总字数（与随消息下发同一口径）。 */
-  used: number
-  /** 索引总字数上限：写入后超出即拒写。 */
-  budget: number
-  maxEntries: number
-  maxTitle: number
-  maxBody: number
-}
-/** 记忆作用域：省略 = 全局；字符串 = 该工作区的项目记忆；`{ personaId }` = 该角色的记忆。 */
-export type MemoryScopeArg = string | { personaId: string }
-export type MemoryErrorCode = 'empty' | 'tooLong' | 'full' | 'budget' | 'notFound' | 'duplicate' | 'badType'
-export type MemoryIpcResult = { ok: true; snapshot: MemorySnapshot } | { ok: false; code: MemoryErrorCode }
-
-/** Agent 提示词新建/更新入参（有 id 覆盖，无 id 新建）。 */
-export interface PersonaUpsertInput {
-  id?: string
-  name: string
-  description?: string
-  avatar?: string
-  model?: string
-  /** 工作区（空串 = 改回默认工作区；缺省 = 保持原值）。 */
-  workspace?: string
-  prompt?: string
-  enabled?: boolean
-}
-
-/** MCP「线缆类型」（与 services/mcp.ts + mcp-config.ts 对齐，按既定模式在 preload 内复述）。 */
-export type McpTransport = 'stdio' | 'sse' | 'http'
-export type McpStatus =
-  | 'disconnected'
-  | 'connecting'
-  | 'connected'
-  | 'error'
-  | 'needs_config'
-  | 'needs_secret'
-/** env / header 值：明文字符串，或指向加密库的引用（真实值在主进程 `mcp:<id>:<secretRef>`）。 */
-export type McpValue = string | { secretRef: string }
-
-/** MCP 服务配置（不含运行期状态；`mcp:get` 返回此形状）。 */
-export interface McpServerConfig {
-  id: string
-  name: string
-  description: string
-  transport: McpTransport
-  command?: string
-  args?: string[]
-  env?: Record<string, McpValue>
-  url?: string
-  headers?: Record<string, McpValue>
-}
-
-/** MCP 新建/更新入参（有 id 覆盖，无 id 新建）。 */
-export interface McpServerInput {
-  id?: string
-  name: string
-  description?: string
-  transport: McpTransport
-  command?: string
-  args?: string[]
-  env?: Record<string, McpValue>
-  url?: string
-  headers?: Record<string, McpValue>
-  enabled?: boolean
-}
-
-/** 回渲染层的合并视图（配置 + 启用态 + 运行期状态）。 */
-export interface McpServerView extends McpServerConfig {
-  enabled: boolean
-  /** 可用角色（角色 id）；null = 全部角色。 */
-  roles: string[] | null
-  scope: 'global'
-  source: 'custom'
-  status: McpStatus
-  toolCount: number
-  lastError: string | null
-  /** status=needs_secret 时尚未填写的密钥字段名。 */
-  missingSecrets: string[]
-  /** 已发现工具的展示清单（原始名 + 命名空间化名 + 描述）。 */
-  tools: { name: string; fqName: string; description: string }[]
-}
-
-/** 定时任务类型（与 services/tasks-types.ts 对齐，按既定模式在 preload 内复述）。 */
-export type TaskStatus = 'active' | 'paused' | 'completed' | 'error'
-export interface TaskSchedule {
-  kind: 'once' | 'recurring'
-  at?: string
-  cron?: string
-  tz: string
-}
-export interface TaskAuthorization {
-  personaId: string | null
-  modelRef: string | null
-}
-export interface TaskRun {
-  firedAt: number
-  finishedAt?: number
-  status: 'ok' | 'error' | 'skipped' | 'aborted'
-  summary?: string
-  error?: string
-  /** 绑定任务这次交给主角色的结果（见 services/handoff.ts）；没交接则缺省。 */
-  handoff?: { summary: string; needsAction: boolean }
-}
-export interface TaskRecord {
-  id: string
-  title: string
-  prompt: string
-  schedule: TaskSchedule
-  auth: TaskAuthorization
-  sessionId: string
-  /** 运行方式「在会话中运行」所在的会话 id（见 services/tasks-types.ts）；缺省 = 独立运行。 */
-  ownerSessionId?: string
-  /** 在哪个对话里创建的（对话里的确认名片）。 */
-  originSessionId?: string
-  status: TaskStatus
-  createdAt: number
-  updatedAt: number
-  lastRunAt: number | null
-  nextRunAt: number | null
-  consecutiveErrors: number
-  runs: TaskRun[]
-}
-export interface TaskCreateInput {
-  title: string
-  prompt: string
-  schedule: TaskSchedule
-  auth: TaskAuthorization
-  /** 在哪个对话里创建的（由主进程 resolveAutotask 填，渲染层不传）。 */
-  originSessionId?: string
-  /** 运行方式：在这个会话中运行；缺省 = 独立运行。 */
-  ownerSessionId?: string
-}
-export interface TaskUpdateInput {
-  id: string
-  title?: string
-  prompt?: string
-  schedule?: TaskSchedule
-  auth?: Partial<TaskAuthorization>
-  /** 运行方式：会话 id = 在该会话中运行，null = 独立运行，缺省 = 不改。 */
-  ownerSessionId?: string | null
-}
-/** 创建结果：成功带记录，失败带稳定错误码（渲染层据此本地化）。 */
-export type CreateTaskResult =
-  | { ok: true; task: TaskRecord }
-  | { ok: false; error: 'invalid-input' | 'invalid-tz' | 'invalid-cron' | 'invalid-once' | 'expired' }
-
-/** 日程预览结果（确认名片实时校验，与 services/tasks.ts 的 PreviewScheduleResult 对齐）。 */
-export type PreviewScheduleResult =
-  | { ok: true; description: string; nextRunAt: number | null }
-  | { ok: false; error: 'invalid-input' | 'invalid-tz' | 'invalid-cron' | 'invalid-once' }
-
-/** 终端「线缆类型」（与 services/terminal.ts 对齐，按既定模式在 preload 内复述）。 */
-export interface TerminalCreateOptions {
-  cols: number
-  rows: number
-  cwd: string | null
-  /** 选定的 shell 配置 id（来自 listShells）；空则用主进程默认。 */
-  shellId?: string | null
-}
-/** 可选 shell 配置（渲染层只见 id/label/isDefault；path/args 留在主进程）。 */
-export interface ShellProfile {
-  id: string
-  label: string
-  isDefault?: boolean
-}
-export interface TerminalDataPayload {
-  id: string
-  data: string
-}
-export interface TerminalExitPayload {
-  id: string
-  exitCode: number
-}
-
-/** Git「线缆类型」（与 services/git.ts 对齐，按既定模式在 preload 内复述）。 */
-export type GitStatusLetter = 'M' | 'A' | 'D' | 'U' | 'R' | 'C' | 'T'
-export interface GitFileStatus {
-  path: string
-  rel: string
-  name: string
-  dir: string
-  letter: GitStatusLetter
-  staged: boolean
-  unstaged: boolean
-  conflicted: boolean
-  untracked: boolean
-}
-export interface GitStatus {
-  isRepo: boolean
-  root: string
-  branch: string | null
-  detached: boolean
-  upstream: string | null
-  ahead: number
-  behind: number
-  remotes: string[]
-  mergeInProgress: boolean
-  staged: GitFileStatus[]
-  unstaged: GitFileStatus[]
-  conflicts: GitFileStatus[]
-}
-export interface GitDiffLine {
-  type: 'ctx' | 'add' | 'del' | 'hunk'
-  oldNo?: number
-  newNo?: number
-  text: string
-}
-export interface GitCommit {
-  oid: string
-  short: string
-  author: string
-  email: string
-  timestamp: number
-  subject: string
-}
-export interface GitBranch {
-  /** 本地分支为短名；远程分支含远程名前缀（origin/x） */
-  name: string
-  current: boolean
-  /** 远程分支所属远程名；本地分支为 null */
-  remote: string | null
-  /** 本地分支的上游；无则 null */
-  upstream: string | null
-}
-export type GitFailReason =
-  | 'auth'
-  | 'network'
-  | 'rejected'
-  | 'conflict'
-  | 'dirty'
-  | 'identity-needed'
-  | 'empty'
-  | 'unmerged'
-  | 'no-git'
-  | 'canceled'
-  | 'error'
-export type GitAvailable = { available: false } | { available: true; version: string; path: string }
-export interface GitOpResult {
-  ok: boolean
-  reason?: GitFailReason
-  message?: string
-  /** delete-branch 回 unmerged 时：未合并到当前 HEAD 的提交数 */
-  count?: number
-}
-
-/** AI 生成提交信息所用的模型配置（与 chat 的模型形状一致；密钥仍在主进程按 providerId 解密）。 */
-export interface GitGenModel {
-  adapter: 'anthropic' | 'openai' | 'responses'
-  providerId: string
-  baseURL: string
-  model: string
-}
-/** 生成语言：跟随界面语言；主进程只区分 en 与其余（回退简体中文）。 */
-export type GitGenLocale = 'zh-CN' | 'en'
-/** 生成结果：成功时 text 为提交信息；失败时 reason/message 说明原因。 */
-export interface GitGenerateResult {
-  ok: boolean
-  text?: string
-  /** 被用户中断：text 为已生成的部分（可能为空串）。 */
-  aborted?: boolean
-  reason?: GitFailReason
-  message?: string
-}
-
-/** 服务商探针「线缆类型」（与 services/provider.ts 对齐）。 */
-export interface ProbeConfig {
-  adapter: 'anthropic' | 'openai' | 'responses'
-  providerId: string
-  baseURL: string
-}
-
-export interface ProviderListModelsResult {
-  ok: boolean
-  models?: string[]
-  kind?: string
-  message?: string
-}
-
-/** IM 机器人（远程通道）状态，与 services/remote/index.ts 的 BotView / ScanEvent 对齐。 */
-export type BotPlatform = 'feishu' | 'telegram' | 'web'
-export type BotReplyMode = 'stream' | 'final'
-/** 回复范围：all 全部 / personas 选中角色的对话 / sessions 选中的对话（两份清单都保留，切模式不丢）。 */
-export interface BotReplyScope {
-  mode: 'all' | 'personas' | 'sessions'
-  personas: string[]
-  sessions: string[]
-}
-export interface BotView {
-  id: string
-  platform: BotPlatform
-  name: string
-  region?: 'cn' | 'intl'
-  username?: string
-  enabled: boolean
-  state: 'off' | 'connecting' | 'connected' | 'error'
-  error?: string
-  replyMode: BotReplyMode
-  scope: BotReplyScope
-  users: { id: string; name?: string; pairedAt: number }[]
-}
-export interface RemoteState {
-  bots: BotView[]
-}
-export type BotScanEvent =
-  | { scanId: string; status: 'done'; botId: string }
-  | { scanId: string; status: 'denied' | 'expired' | 'cancelled' }
-  | { scanId: string; status: 'error'; error: string }
-
-export interface ChatEventPayload {
-  turnId: string
-  sessionId: string
-  event: ChatStreamEvent
-}
+export type * from '../shared/host-api'
 
 /**
  * 白名单 API：只向渲染层暴露明确、受控的能力。
@@ -1241,7 +715,7 @@ const api = {
       return () => ipcRenderer.removeListener('phone:paired', listener)
     }
   }
-}
+} satisfies HostApi
 
 if (process.contextIsolated) {
   try {
@@ -1254,4 +728,8 @@ if (process.contextIsolated) {
   window.deva = api
 }
 
-export type DevaApi = typeof api
+// `satisfies` checks assignability; exact matching also catches compatible signature drift.
+type Equal<L, R> = (<T>() => T extends L ? 1 : 2) extends
+  (<T>() => T extends R ? 1 : 2) ? true : false
+type CheckedHostApi<Matches extends true> = Matches extends true ? HostApi : never
+export type DevaApi = CheckedHostApi<Equal<HostApi, typeof api>>

@@ -1,4 +1,4 @@
-import type { DevaApi } from './index'
+import type { DevaApi } from '../shared/host-api'
 
 declare global {
   interface Window {
