@@ -67,7 +67,8 @@ export async function openBusiness({ dataDir, vault, auth, version, allowedOrigi
   }
   return {
     beginShutdown,
-    capabilities: Object.freeze({ textChat: true, library: true, workspaceFiles: library.workspaceFilesEnabled, attachments: true, browserPanel: !!browser }),
+    capabilities: Object.freeze({ textChat: true, library: true, workspaceFiles: library.workspaceFilesEnabled, attachments: true,
+      browserPanel: !!browser, sessionPreferences: typeof turns.patchPreferences === 'function' && typeof journal.watchSessions === 'function' }),
     createRealtime: ({ auth, policy }) => createChatWebSocket({ turns, journal, auth, policy }),
     getConfig: () => settings.getPublicConfig(),
     async handle(req, res, { auth, policy }) {
