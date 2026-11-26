@@ -5,6 +5,7 @@ import { connectProvider } from '../business/model-connection.mjs'
 import { providerId as checkedProviderId } from '../business/settings-schema.mjs'
 import { chatScope } from '../events/index.mjs'
 import { HttpError } from '../http/policy.mjs'
+import { ATTACHMENT_META, attachmentIds, createTurnAttachments } from './turn-attachments.mjs'
 
 const META = '_devaHeadlessTextTurns'
 const MAX_REQUESTS = 256 // Never evict an accepted ID and later interpret its retry as a fresh request.
@@ -110,16 +111,20 @@ function splitModel(ref) {
   return { providerId, modelId }
 }
 
-function sendInput(input) {
-  const { sid, clientRequestId, text, model } = inputRecord(input, ['sid', 'clientRequestId', 'text', 'model'], 'invalid_send')
+function sendInput(input, supportsAttachments) {
+  const keys = ['sid', 'clientRequestId', 'text', 'model']
+  if (supportsAttachments && input && Object.hasOwn(input, 'attachments')) keys.push('attachments')
+  const fields = inputRecord(input, keys, 'invalid_send')
+  const { sid, clientRequestId, text, model } = fields
   if (!validSid(sid)) throw new HttpError(400, 'invalid_session_id')
   if (!validRequestId(clientRequestId)) throw new HttpError(400, 'invalid_client_request_id')
-  if (typeof text !== 'string' || text.length > MAX_TEXT_BYTES || !text.trim() || Buffer.byteLength(text) > MAX_TEXT_BYTES) {
+  const attachments = Object.hasOwn(fields, 'attachments') ? attachmentIds(fields.attachments) : undefined
+  if (typeof text !== 'string' || text.length > MAX_TEXT_BYTES || (!attachments?.length && !text.trim()) || Buffer.byteLength(text) > MAX_TEXT_BYTES) {
     throw new HttpError(400, 'invalid_text')
   }
   const ref = splitModel(model)
-  const fingerprint = createHash('sha256').update(JSON.stringify([model, text])).digest('hex')
-  return { sid, clientRequestId, text, model, ...ref, fingerprint }
+  const fingerprint = createHash('sha256').update(JSON.stringify(attachments?.length ? [model, text, attachments] : [model, text])).digest('hex')
+  return { sid, clientRequestId, text, model, ...ref, fingerprint, attachments }
 }
 
 function plainText(content) {
@@ -185,17 +190,18 @@ function appendNotice(notices, after, status, reason, text) {
 
 /** One instance per data directory and journal. The owner closes the journal after awaiting close().
  * resolveRole only reads trusted library state and returns the current enabled role projection. */
-export function createTextTurns({ dataDir, settings, journal, version, allowedOrigins, resolveRole }) {
+export function createTextTurns({ dataDir, settings, journal, version, allowedOrigins, resolveRole, uploads }) {
   if (typeof settings?.getProvider !== 'function' || !['snapshot', 'snapshotAndSubscribe', 'publishChat', 'publishSessionsChanged']
     .every(fn => typeof journal?.[fn] === 'function')) throw new TypeError('Text turns require settings and an event journal')
   if (resolveRole !== undefined && typeof resolveRole !== 'function') throw new TypeError('resolveRole must be a function')
+  const attachments = uploads === undefined ? undefined : createTurnAttachments({ dataDir, uploads })
   let warned = false
   const incomplete = new WeakSet()
+  const mediaUnconfirmed = new WeakSet()
   const classifications = new WeakMap()
   const store = createChatStore({
     dataDir, onWarning() { warned = true },
-    // Preserve the native attachment tags for classification, even when their blobs are missing.
-    // This domain writes text only; it has no reason to read or create attachment blobs.
+    // Keep native blob refs in the cache. Only a selected turn or preview reads media bytes.
     media: { hydrateMessages() {}, mediaReplacer: (_key, value) => value }
   })
   const active = new Map()
@@ -217,7 +223,17 @@ export function createTextTurns({ dataDir, settings, journal, version, allowedOr
     return s
   }
 
+  function attachedIndex(s) {
+    return attachments && s[ATTACHMENT_META] && attachments.index(s, s[META].requests)
+  }
+
   function compatibility(s) {
+    if (s[ATTACHMENT_META] !== undefined) {
+      return attachments && !incomplete.has(s) && s.focusRoot == null &&
+        (s.personaId === undefined || isChatRoleId(s.personaId)) && validLedger(s[META], s.messages.length) && validNotices(s) &&
+        Object.keys(s).every(key => s[key] === undefined || key === ATTACHMENT_META || nativeTextFields.has(key)) &&
+        attachedIndex(s) ? 'text' : 'unsupported'
+    }
     if (classifications.has(s)) return classifications.get(s)
     const owns = Object.hasOwn(s, META)
     const complex = incomplete.has(s) || complexFields.some(key => {
@@ -235,6 +251,8 @@ export function createTextTurns({ dataDir, settings, journal, version, allowedOr
   }
 
   function summary(s, kind = compatibility(s)) {
+    const index = kind === 'text' && attachedIndex(s)
+    if (index && (mediaUnconfirmed.has(s) || !attachments.available(index))) kind = 'unsupported'
     let writeBlockReason = null
     if (kind === 'unsupported') writeBlockReason = 'unsupported_history'
     else if (kind !== 'text') writeBlockReason = 'read_only_session'
@@ -291,9 +309,13 @@ export function createTextTurns({ dataDir, settings, journal, version, allowedOr
     const running = slot?.record
     const last = base.compatibility === 'text' ? s[META].requests.at(-1) : null
     const terminal = unconfirmed.get(s.id) ?? last
+    const index = base.compatibility === 'text' && attachedIndex(s)
     return {
       ...base,
-      messages: base.compatibility === 'unsupported' ? null : s.messages.map(m => ({ role: m.role, content: plainText(m.content) })),
+      messages: base.compatibility === 'unsupported' ? null : s.messages.map((m, i) => {
+        const row = index && index.byMessage.get(i)
+        return row ? attachments.snapshot(m, row) : { role: m.role, content: plainText(m.content) }
+      }),
       active: running ? { turnId: running.turnId, startedAt: running.startedAt, text: slot.text } : null,
       lastTurn: terminal ? result(terminal.status === 'running' && !running ? interrupted(terminal) : terminal) : null
     }
@@ -308,6 +330,33 @@ export function createTextTurns({ dataDir, settings, journal, version, allowedOr
     if (callbacks === undefined) return snapshot(sid)
     const s = getSession(sid)
     return journal.snapshotAndSubscribe(chatScope(sid), () => readState(s), callbacks)
+  }
+
+  function attachmentScope(sid) {
+    if (!attachments || !validSid(sid)) return null
+    const s = lookupSession(sid)
+    if (!s) return null
+    return { writable: summary(s).writable && attachments.canStage(attachedIndex(s)) }
+  }
+
+  function describeCommittedAttachment(sid, id) {
+    if (!attachments || !validSid(sid)) return null
+    const s = lookupSession(sid)
+    if (!s || compatibility(s) !== 'text') return null
+    const item = attachedIndex(s)?.byId.get(id)
+    if (!item) return null
+    const { name, kind, mime, size } = item
+    return { id, name, kind, mime, size }
+  }
+
+  function readCommittedAttachment(sid, id) {
+    if (!attachments || !validSid(sid)) return null
+    const s = lookupSession(sid)
+    if (!s || compatibility(s) !== 'text') return null
+    const index = attachedIndex(s)
+    const committed = attachments.preview(index, id)
+    if (!committed && index?.byId.has(id)) mediaUnconfirmed.add(s)
+    return committed
   }
 
   function publish(slot, event) {
@@ -348,11 +397,23 @@ export function createTextTurns({ dataDir, settings, journal, version, allowedOr
 
   async function admit(slot, input) {
     const { session: s, controller } = slot
-    // Only fresh requests reach admission; retries use the durable ledger before inspecting the role.
+    // Only fresh requests reach admission; retries use the durable ledger before inspecting the role or drafts.
+    const previous = attachedIndex(s)
+    const withMedia = previous || input.attachments?.length
+    if (previous && (mediaUnconfirmed.has(s) || !attachments.available(previous))) {
+      throw new HttpError(409, 'unsupported_history')
+    }
     const role = s.personaId === undefined ? undefined : await roleForTurn(s.personaId)
-    let client
+    let client, adapter
+    // Capture the adapter from the same trusted provider snapshot that binds credentials, model and URL.
+    const binding = withMedia ? { async getProvider(id) {
+      const provider = await settings.getProvider(id)
+      if (provider == null) return provider
+      adapter = provider.adapter
+      return { ...provider, adapter }
+    } } : settings
     try {
-      client = await connectProvider(settings, input.providerId, { version, allowedOrigins, signal: controller.signal, modelId: input.modelId })
+      client = await connectProvider(binding, input.providerId, { version, allowedOrigins, signal: controller.signal, modelId: input.modelId })
     } catch (err) {
       if (closing) throw closedError()
       const knownStatus = err instanceof HttpError ? publicModelErrors.get(err.code) : undefined
@@ -369,15 +430,31 @@ export function createTextTurns({ dataDir, settings, journal, version, allowedOr
       requests[requests.length - 1] = interrupted(requests.at(-1))
       notices = appendNotice(notices, s.messages.length, 'interrupted', 'interrupted', '')
     }
+    requests.push(record)
+    let prepared
+    if (withMedia) {
+      try { prepared = await attachments.prepare(s, input, adapter, record, previous, requests) }
+      catch (err) {
+        if (previous && err instanceof HttpError && err.code === 'unsupported_history') mediaUnconfirmed.add(s)
+        throw err
+      }
+      if (closing) throw closedError()
+    }
+    prepared?.persist?.() // Publish immutable media before the confirmed JSON and before streamChat.
     // Native text part avoids interpreting a literal desktop compaction/auto marker as metadata.
-    const messages = [...s.messages, { role: 'user', content: [{ type: 'text', text: input.text }] }]
+    const messages = prepared?.messages ?? [...s.messages, { role: 'user', content: [{ type: 'text', text: input.text }] }]
     commit(s, {
-      messages, notices, model: input.model, title: s.title || deriveTitle(input.text), updatedAt: record.startedAt,
-      [META]: { version: 1, messageCount: messages.length, requests: [...requests, record] }
+      messages, notices, model: input.model, title: s.title || deriveTitle(prepared?.question ?? input.text), updatedAt: record.startedAt,
+      [META]: { version: 1, messageCount: messages.length, requests }, ...prepared?.patch
     })
     slot.record = record
     publish(slot, { type: 'turn_start' })
-    return { client, record, role }
+    // The session now owns durable bytes. Retire spent draft reservations after commit,
+    // never before: a failed save must keep the user's files available for a retry.
+    if (input.attachments?.length && typeof uploads?.remove === 'function') {
+      await Promise.allSettled(input.attachments.map(id => Promise.resolve().then(() => uploads.remove(s.id, id))))
+    }
+    return { client, record, role, modelContext: prepared?.modelContext }
   }
 
   function streamText(slot, delta) {
@@ -395,7 +472,7 @@ export function createTextTurns({ dataDir, settings, journal, version, allowedOr
     if (end < delta.length) throw outputLimit
   }
 
-  async function run(slot, client, role) {
+  async function run(slot, client, role, modelContext) {
     const { session: s, controller, record } = slot
     const clock = setTimeout(() => controller.abort('timeout'), MAX_TURN_MS)
     clock.unref()
@@ -407,7 +484,7 @@ export function createTextTurns({ dataDir, settings, journal, version, allowedOr
       if (!controller.signal.aborted) {
         let thinkingSize = 0
         const events = client.streamChat({
-          system: role ? ROLE_SYSTEM : SYSTEM, messages: turnMessages(s.messages, role), tools: [], maxTokens: 4096,
+          system: role ? ROLE_SYSTEM : SYSTEM, messages: turnMessages(modelContext ?? s.messages, role), tools: [], maxTokens: 4096,
           sessionId: s.id, signal: controller.signal
         })
         step = await consumeModelStep(events, {
@@ -431,6 +508,8 @@ export function createTextTurns({ dataDir, settings, journal, version, allowedOr
     const notices = appendNotice(s.notices ?? [], messages.length, status, reason, text)
     const ended = { ...record, status, reason }
     try {
+      const index = attachedIndex(s)
+      if (index && (mediaUnconfirmed.has(s) || !attachments.available(index))) throw storageError()
       commit(s, {
         messages, notices, updatedAt: Date.now(),
         [META]: { version: 1, messageCount: messages.length, requests: [...s[META].requests.slice(0, -1), ended] }
@@ -447,7 +526,7 @@ export function createTextTurns({ dataDir, settings, journal, version, allowedOr
 
   async function send(raw) {
     if (closing) throw closedError()
-    const input = sendInput(raw)
+    const input = sendInput(raw, Boolean(attachments))
     const s = getSession(input.sid)
     const kind = compatibility(s)
     if (kind === 'unsupported') throw new HttpError(409, 'unsupported_history')
@@ -469,7 +548,7 @@ export function createTextTurns({ dataDir, settings, journal, version, allowedOr
     }
     active.set(input.sid, slot) // Exclusivity is acquired before the first await, including credential lookup.
     slot.admission = admit(slot, input)
-    slot.finished = slot.admission.then(({ client, role }) => run(slot, client, role), () => { active.delete(input.sid) })
+    slot.finished = slot.admission.then(({ client, role, modelContext }) => run(slot, client, role, modelContext), () => { active.delete(input.sid) })
     const { record } = await slot.admission
     return { ...result(record), duplicate: false }
   }
@@ -493,5 +572,5 @@ export function createTextTurns({ dataDir, settings, journal, version, allowedOr
     return closing
   }
 
-  return Object.freeze({ create, list, attach, snapshot, send, stop, close })
+  return Object.freeze({ create, list, attach, snapshot, send, stop, close, attachmentScope, describeCommittedAttachment, readCommittedAttachment })
 }

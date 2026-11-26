@@ -156,6 +156,7 @@ export async function startWorkbench(opts = {}) {
     return closing ??= (async () => {
       const results = await Promise.allSettled([
         closeHttp(server, sockets, shutdownTimeoutMs),
+        Promise.resolve().then(() => business?.beginShutdown?.()),
         Promise.resolve().then(() => realtime?.close()),
         Promise.resolve().then(() => control?.close())
       ])

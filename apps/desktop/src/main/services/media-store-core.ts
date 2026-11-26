@@ -1,7 +1,7 @@
 import { createHash } from 'crypto'
 import { existsSync, mkdirSync, promises as fsp, readFileSync, renameSync, rmSync, writeFileSync } from 'fs'
 import { join, resolve } from 'path'
-import type { ContentPart, Message } from '../providers/types'
+import type { ContentPart, Message, TextPart } from '../providers/types'
 
 /**
  * 消息里二进制附件（图片 / PDF 的 base64）的外置存储。
@@ -23,6 +23,12 @@ interface BlobRef {
   blob: string
 }
 
+interface TextBlobRef {
+  type: 'text'
+  name: string
+  blob: string
+}
+
 const HASH_RE = /^[0-9a-f]{64}$/
 /** 启动清扫：刚写入、可能还没被对话文件引用上的 blob 留一小时宽限。 */
 const SWEEP_GRACE_MS = 3600 * 1000
@@ -34,6 +40,8 @@ export function createMediaStore(dataDir: string) {
 
   /** 块对象 → 其 base64 的哈希（块按不可变对待，算一次即缓存；载入时读回的块也直接登记）。 */
   const hashOf = new WeakMap<object, string>()
+  // Only text parts hydrated from an existing headless ref are externalized on desktop saves.
+  const textRefs = new WeakMap<object, { ref: TextBlobRef; text: string }>()
   /** 本进程已确认落盘的 blob，免每次保存都 existsSync。 */
   const stored = new Set<string>()
 
@@ -69,6 +77,10 @@ export function createMediaStore(dataDir: string) {
    * 用法：`JSON.stringify(obj, mediaReplacer, 2)`。
    */
   function mediaReplacer(_key: string, value: unknown): unknown {
+    if (value && typeof value === 'object') {
+      const saved = textRefs.get(value)
+      if (saved && (value as TextPart).text === saved.text && existsSync(blobFile(saved.ref.blob))) return saved.ref
+    }
     if (!isBinaryPart(value) || !value.data) return value
     let hash = hashOf.get(value)
     if (!hash) {
@@ -93,8 +105,21 @@ export function createMediaStore(dataDir: string) {
     }
   }
 
-  function isRef(v: unknown): v is BlobRef {
+  function isRef(v: unknown): v is BlobRef | TextBlobRef {
     return !!v && typeof v === 'object' && typeof (v as BlobRef).blob === 'string'
+  }
+
+  function hydrateText(ref: TextBlobRef): TextPart {
+    if (HASH_RE.test(ref.blob)) {
+      try {
+        const bytes = readFileSync(blobFile(ref.blob))
+        // On-disk text-ref v1 represents the desktop attachment block, not the user's question.
+        const part: TextPart = { type: 'text', text: `[附件文件] ${ref.name}\n\`\`\`\n${bytes.toString('utf8')}\n\`\`\`` }
+        textRefs.set(part, { ref: { type: 'text', name: ref.name, blob: ref.blob }, text: part.text })
+        return part
+      } catch { /* same missing-media behavior as native binary parts */ }
+    }
+    return { type: 'text', text: `[附件文件「${ref.name}」的数据已丢失]` }
   }
 
   /** 把一个引用块原地还原成带 base64 的块；读不回返回 false。 */
@@ -117,6 +142,7 @@ export function createMediaStore(dataDir: string) {
       if (typeof m.content === 'string') continue
       m.content = m.content.map((part): ContentPart => {
         if (isRef(part)) {
+          if (part.type === 'text' && typeof part.name === 'string') return hydrateText(part as unknown as TextBlobRef)
           if (hydratePart(part as unknown as Record<string, unknown>)) return part
           const what = (part as unknown as BlobRef).type === 'document' ? '文档' : '图片'
           const name = (part as unknown as BlobRef).name

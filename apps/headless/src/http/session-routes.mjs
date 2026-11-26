@@ -48,7 +48,7 @@ export function sessionRoutes({ auth, policy, version, getConfig, capabilities }
         const config = appearanceSnapshot(await getConfig())
         json(res, 200, { protocol: 1, version, platform: process.platform, config, csrf, expiresAt,
           capabilities: { textChat: capabilities?.textChat === true, library: capabilities?.library === true,
-            workspaceFiles: capabilities?.workspaceFiles === true } })
+            workspaceFiles: capabilities?.workspaceFiles === true, attachments: capabilities?.attachments === true } })
         return true
       }
       if (path === '/api/v1/auth/logout') {
