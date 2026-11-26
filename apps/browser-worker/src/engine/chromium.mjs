@@ -24,7 +24,8 @@ function browserFlags(profile, proxyUrl) {
     '--force-webrtc-ip-handling-policy=disable_non_proxied_udp',
     '--disable-blink-features=FileSystemAccess,FileSystemAccessLocal',
     '--no-first-run', '--no-default-browser-check', '--disable-background-networking',
-    '--disable-component-update', '--disable-extensions', '--disable-sync',
+    '--disable-component-update', '--disable-extensions', '--disable-component-extensions-with-background-pages',
+    '--disable-default-apps', '--disable-sync',
     '--disable-breakpad', '--disable-crash-reporter', '--disable-crashpad-for-testing',
     '--password-store=basic', BOOTSTRAP_URL,
   ];

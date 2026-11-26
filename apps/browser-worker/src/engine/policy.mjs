@@ -1,12 +1,13 @@
 import { isAbsolute } from 'node:path';
 
 const DIAGNOSTIC_STAGES = new Set([
-  'version', 'discover-bootstrap', 'watch-targets', 'download-guard', 'attach-bootstrap', 'page-controls',
-  'bootstrap-png', 'sandbox-attest', 'activate-bootstrap', 'entry-navigation',
+  'version', 'discover-bootstrap', 'create-context', 'watch-targets', 'create-task-target', 'download-guard',
+  'attach-bootstrap', 'retire-startup', 'page-controls', 'bootstrap-png', 'sandbox-attest', 'activate-bootstrap', 'entry-navigation',
 ]);
 const DIAGNOSTIC_COMMANDS = new Set([
   'Browser.getVersion', 'Browser.setDownloadBehavior', 'Browser.close', 'Target.setDiscoverTargets',
-  'Target.attachToTarget', 'Target.activateTarget', 'Target.getTargetInfo', 'Target.getTargets',
+  'Target.createBrowserContext', 'Target.createTarget', 'Target.closeTarget', 'Target.attachToTarget',
+  'Target.activateTarget', 'Target.getTargetInfo', 'Target.getTargets',
   'Page.enable', 'Page.setLifecycleEventsEnabled', 'Page.setInterceptFileChooserDialog',
   'Network.setCacheDisabled', 'Network.setBypassServiceWorker', 'Emulation.setDeviceMetricsOverride', 'Page.getFrameTree',
   'Fetch.enable', 'Fetch.continueRequest', 'Fetch.continueResponse', 'Fetch.failRequest', 'Fetch.continueWithAuth',
@@ -32,13 +33,16 @@ export const ENTRY_EVENTS = Object.freeze([
 ]);
 
 const TARGET_TYPES = new Set(['missing', 'page', 'iframe', 'worker', 'shared_worker', 'service_worker', 'tab', 'browser', 'other']);
-const URL_KINDS = new Set(['empty', 'blank', 'http', 'other']);
+const URL_KINDS = new Set(['empty', 'blank', 'http', 'extension', 'chrome', 'chrome-untrusted', 'other']);
+const CONTEXT_RELATIONS = new Set(['omitted', 'unbound', 'same', 'different', 'invalid']);
 const TARGET_VALUES = {
-  event: new Set(['snapshot', 'created', 'attached', 'detached', 'destroyed', 'attach-result', 'get-info', 'main-frame', 'crashed']),
+  event: new Set(['snapshot', 'created', 'attached', 'detached', 'destroyed', 'attach-result', 'get-info', 'main-frame', 'crashed',
+    'context-result', 'task-result', 'retire-component', 'retire-default', 'retirement-incomplete']),
   eventStage: new Set([...DIAGNOSTIC_STAGES, 'live']),
   type: TARGET_TYPES, snapshotType: TARGET_TYPES,
   urlKind: URL_KINDS, snapshotUrlKind: URL_KINDS,
-  context: new Set(['omitted', 'unbound', 'same', 'different', 'invalid']),
+  context: CONTEXT_RELATIONS, defaultContext: CONTEXT_RELATIONS,
+  role: new Set(['task', 'task-candidate', 'default-blank', 'default-component', 'foreign']),
 };
 const TARGET_FLAGS = ['root', 'sameTarget', 'sameSession', 'opener', 'postNavigation', 'waiting',
   'snapshotContext', 'snapshotOpener', 'snapshotAttached'];

@@ -13,14 +13,26 @@ const SHELL_REASONS = new Set(['BROWSER_CLOSED', 'BROWSER_DISCONNECTED']);
 const cloneFrame = (frame) => ({ ...frame, bytes: Buffer.from(frame.bytes) });
 const reportTypes = new Set(['page', 'iframe', 'worker', 'shared_worker', 'service_worker', 'tab', 'browser']);
 const reportType = (type) => type === undefined ? 'missing' : reportTypes.has(type) ? type : 'other';
-const reportUrl = (url) => url === undefined || url === '' ? 'empty' : url === BOOTSTRAP_URL ? 'blank' :
-  typeof url === 'string' && /^https?:\/\//iu.test(url) ? 'http' : 'other';
+function reportUrl(url) {
+  if (url === undefined || url === '') return 'empty';
+  if (url === BOOTSTRAP_URL) return 'blank';
+  if (typeof url !== 'string') return 'other';
+  if (/^https?:\/\//iu.test(url)) return 'http';
+  if (/^chrome-extension:/iu.test(url)) return 'extension';
+  if (/^chrome-untrusted:/iu.test(url)) return 'chrome-untrusted';
+  if (/^chrome:/iu.test(url)) return 'chrome';
+  return 'other';
+}
+const componentExtensionUrl = (url) => typeof url === 'string' && url.length <= 4096 &&
+  /^chrome-extension:\/\/[a-p]{32}\/[!-~]*$/u.test(url);
 
 // Internal controller, with the process/transport boundary explicit for deterministic tests.
 // The exported production facade has only the fixed methods returned at the bottom.
 export async function startChromiumSession({ writer, reader, policy, verifySandbox, shutdown, probeOnly = false,
   commandMs, handshakeMs, navigationMs = NAVIGATION_MS, signal, abortCode = () => 'BROWSER_ABORTED' }) {
-  let contextId, targetId, sessionId, frameId, attachmentEvent;
+  let contextId, targetId, sessionId, frameId, attachmentEvent, taskCandidateId;
+  let defaultContextId, defaultTargetId, defaultClosed = false;
+  const startupComponents = new Map();
   let startupStage = 'version', postNavigation = false, targetLoss;
   let targetSnapshot = {};
   let fatalCode = null, closing = null, busy = false, stopping = null, notice = null;
@@ -109,22 +121,36 @@ export async function startChromiumSession({ writer, reader, policy, verifySandb
     });
   }
 
-  function contextRelation(target) {
+  function contextRelation(target, expected = contextId) {
     const observed = target?.browserContextId;
     if (observed === undefined || observed === null || observed === '') return 'omitted';
     if (typeof observed !== 'string') return 'invalid';
-    if (!contextId) return 'unbound';
-    return observed === contextId ? 'same' : 'different';
+    if (!expected) return 'unbound';
+    return observed === expected ? 'same' : 'different';
+  }
+
+  function defaultContextRelation(target) { return contextRelation(target, defaultContextId ?? null); }
+  const validContext = (r) => r !== 'different' && r !== 'invalid';
+  const blankReport = (info) => info?.url === BOOTSTRAP_URL || reportUrl(info?.url) === 'empty';
+  const openerlessPage = (info) => info?.type === 'page' && !info.openerId;
+  const validTargetId = (id) => typeof id === 'string' && id.length > 0 && id.length <= 256;
+  function isDefaultComponent(info) {
+    return !postNavigation && !!startupStage && !!defaultContextId && defaultContextId !== contextId &&
+      info?.type === 'service_worker' && !info.openerId && !info.attached && validTargetId(info.targetId) &&
+      info.targetId !== defaultTargetId && info.targetId !== targetId && info.targetId !== taskCandidateId &&
+      defaultContextRelation(info) === 'same' && componentExtensionUrl(info.url);
   }
 
   function ownsTarget(target) {
-    if (!targetId || target?.type !== 'page' || target.targetId !== targetId || target.openerId) return false;
-    const relation = contextRelation(target);
-    return relation !== 'different' && relation !== 'invalid';
+    return !!targetId && target?.targetId === targetId && openerlessPage(target) && validContext(contextRelation(target));
   }
 
-  function bindReportedContext(target) {
-    if (!contextId && contextRelation(target) === 'unbound') contextId = target.browserContextId;
+  function targetRole(target) {
+    if (targetId && target?.targetId === targetId) return 'task';
+    if (taskCandidateId && target?.targetId === taskCandidateId) return 'task-candidate';
+    if (defaultTargetId && target?.targetId === defaultTargetId) return 'default-blank';
+    if (startupComponents.has(target?.targetId) || isDefaultComponent(target)) return 'default-component';
+    return 'foreign';
   }
 
   function saveTargetSnapshot(targetInfos) {
@@ -141,7 +167,8 @@ export async function startChromiumSession({ writer, reader, policy, verifySandb
     const knownSession = sessionId ?? attachmentEvent;
     targetLoss ??= {
       ...targetSnapshot, event, eventStage: startupStage ?? 'live', type: reportType(target?.type),
-      urlKind: reportUrl(target?.url), context: contextRelation(target), root: id === null,
+      urlKind: reportUrl(target?.url), context: contextRelation(target), defaultContext: defaultContextRelation(target),
+      role: targetRole(target), root: id === null,
       sameTarget: !!targetId && target?.targetId === targetId,
       sameSession: !!knownSession && observedSession === knownSession,
       opener: !!target?.openerId, postNavigation, waiting: waiting === true,
@@ -151,6 +178,36 @@ export async function startChromiumSession({ writer, reader, policy, verifySandb
   function loseTarget(event, target, id = null, observedSession, waiting) {
     recordTargetLoss(event, target, id, observedSession, waiting);
     fatal('BROWSER_TARGET_LOST');
+  }
+
+  function retireDefaultComponent(info) {
+    if (startupComponents.has(info.targetId) || startupComponents.size >= 8) return loseTarget('created', info);
+    // The clean default profile has never visited a site. Never attach to, resume, or
+    // expose this Chrome-owned service worker; the only command addressed to it is closure.
+    const retired = root('Target.closeTarget', { targetId: info.targetId }).then(({ success }) => {
+      if (success !== true) loseTarget('retire-component', info);
+    }, () => loseTarget('retire-component', info));
+    startupComponents.set(info.targetId, retired);
+  }
+
+  function onTargetCreated(info, id) {
+    if (id !== null || !validTargetId(info?.targetId)) return loseTarget('created', info, id);
+    if (info.targetId === defaultTargetId) {
+      const relation = defaultContextRelation(info);
+      if (!startupStage || postNavigation || defaultClosed || !openerlessPage(info) || !blankReport(info) ||
+          !validContext(relation) || contextRelation(info) === 'same') return loseTarget('created', info, id);
+      if (relation === 'unbound') defaultContextId = info.browserContextId;
+      return;
+    }
+    if (ownsTarget(info) && !postNavigation && blankReport(info)) return;
+    if (startupStage === 'create-task-target' && !taskCandidateId && openerlessPage(info) && !info.attached &&
+        blankReport(info) && contextRelation(info) === 'same') {
+      // An early event is inert until the exact target ID from our create command agrees.
+      taskCandidateId = info.targetId;
+      return;
+    }
+    if (isDefaultComponent(info)) return retireDefaultComponent(info);
+    loseTarget('created', info, id);
   }
 
   function trackNavigation(url, loaderId = null) {
@@ -203,14 +260,13 @@ export async function startChromiumSession({ writer, reader, policy, verifySandb
     if (closing) return;
     if (method === 'Target.targetCreated') {
       bump('targetCreated');
-      const info = p.targetInfo;
-      const startupBlank = info?.url === BOOTSTRAP_URL || (!postNavigation && reportUrl(info?.url) === 'empty');
-      if (id !== null || !ownsTarget(info) || !startupBlank) return loseTarget('created', info, id);
-      bindReportedContext(info);
-      return;
+      return onTargetCreated(p.targetInfo, id);
     }
-    if (method === 'Target.targetDestroyed' && targetId && p.targetId === targetId) {
-      return loseTarget('destroyed', { targetId: p.targetId }, id);
+    if (method === 'Target.targetDestroyed') {
+      if (id === null && defaultTargetId && p.targetId === defaultTargetId) defaultClosed = true;
+      if ((targetId && p.targetId === targetId) || (taskCandidateId && p.targetId === taskCandidateId)) {
+        return loseTarget('destroyed', { targetId: p.targetId }, id);
+      }
     }
     if (method === 'Target.attachedToTarget') {
       bump('targetAttach');
@@ -218,7 +274,6 @@ export async function startChromiumSession({ writer, reader, policy, verifySandb
           !p.sessionId || (sessionId && sessionId !== p.sessionId) || (attachmentEvent && attachmentEvent !== p.sessionId)) {
         return loseTarget('attached', p.targetInfo, id, p.sessionId, p.waitingForDebugger);
       }
-      bindReportedContext(p.targetInfo);
       attachmentEvent = p.sessionId;
       return;
     }
@@ -335,7 +390,6 @@ export async function startChromiumSession({ writer, reader, policy, verifySandb
         loseTarget('get-info', targetInfo);
         checkLive();
       }
-      bindReportedContext(targetInfo);
       if (!policy.permits(targetInfo.url)) return { origin: null, title: '' };
       // The last frame event and Target.getTargetInfo may briefly disagree during navigation.
       if (targetInfo.url.split('#', 1)[0] !== location?.url.split('#', 1)[0]) {
@@ -400,6 +454,43 @@ export async function startChromiumSession({ writer, reader, policy, verifySandb
     try { await stopping; } finally { stopping = null; }
   }
 
+  async function retireStartupTargets() {
+    if (!defaultClosed) {
+      const { success } = await root('Target.closeTarget', { targetId: defaultTargetId });
+      if (success !== true && !defaultClosed) {
+        loseTarget('retire-default', { targetId: defaultTargetId, type: 'page', url: BOOTSTRAP_URL });
+        checkLive();
+      }
+    }
+    let waiting;
+    for (let attempt = 0; attempt < 12; attempt++) {
+      await Promise.all(startupComponents.values());
+      checkLive();
+      const { targetInfos } = await root('Target.getTargets', { filter: DISCOVERED_TARGETS });
+      checkLive();
+      if (!Array.isArray(targetInfos) || targetInfos.length > 10) break;
+      waiting = null;
+      let taskCount = 0;
+      for (const info of targetInfos) {
+        if (ownsTarget(info) && info.url === BOOTSTRAP_URL) { taskCount++; continue; }
+        if (info?.targetId === defaultTargetId && openerlessPage(info) && blankReport(info) &&
+            validContext(defaultContextRelation(info)) && contextRelation(info) !== 'same') { waiting ??= info; continue; }
+        if (isDefaultComponent(info)) {
+          if (!startupComponents.has(info.targetId)) retireDefaultComponent(info);
+          waiting ??= info;
+          continue;
+        }
+        loseTarget('retirement-incomplete', info);
+        checkLive();
+      }
+      if (taskCount !== 1) break;
+      if (!waiting) { defaultClosed = true; return; }
+      if (attempt < 11) await delay(45, undefined, { signal });
+    }
+    loseTarget('retirement-incomplete', waiting);
+    checkLive();
+  }
+
   async function setup() {
     const version = await pipe.send('Browser.getVersion', {}, null, handshakeMs);
     if (!/^(?:Chromium|Chrome|HeadlessChrome)\/[\d.]+$/u.test(version.product ?? '')) throw fail('BROWSER_START_FAILED');
@@ -416,27 +507,42 @@ export async function startChromiumSession({ writer, reader, policy, verifySandb
       if (initial && initial.url !== '') break;
       if (attempt < 7) await delay(40, undefined, { signal });
     }
-    if (initial?.type !== 'page' || initial.url !== BOOTSTRAP_URL || initial.openerId || initial.attached ||
-        typeof initial.targetId !== 'string' || !initial.targetId || contextRelation(initial) === 'invalid') {
+    if (!openerlessPage(initial) || initial.url !== BOOTSTRAP_URL || initial.attached ||
+        !validTargetId(initial.targetId) || defaultContextRelation(initial) === 'invalid') {
       recordTargetLoss('snapshot', initial, null);
       throw fail('BROWSER_TARGET_LOST');
     }
-    targetId = initial.targetId;
-    bindReportedContext(initial);
+    defaultTargetId = initial.targetId;
+    if (defaultContextRelation(initial) === 'unbound') defaultContextId = initial.browserContextId;
+    startupStage = 'create-context';
+    const context = await root('Target.createBrowserContext', { disposeOnDetach: true });
+    if (!validTargetId(context.browserContextId) || context.browserContextId === defaultContextId) {
+      recordTargetLoss('context-result', { browserContextId: context.browserContextId }, null);
+      throw fail('BROWSER_TARGET_LOST');
+    }
+    contextId = context.browserContextId;
     startupStage = 'watch-targets';
-    // The process owns a single private default profile. Watch for unexpected targets,
-    // but never put a renderer or a provisional cross-process navigation into debugger wait.
+    // Global discovery remains observation-only: it never adds a debugger wait to
+    // the chosen task renderer or a provisional cross-process navigation.
     await root('Target.setDiscoverTargets', { discover: true, filter: DISCOVERED_TARGETS });
     checkLive();
     startupStage = 'download-guard';
-    await root('Browser.setDownloadBehavior', { behavior: 'deny', eventsEnabled: true });
+    await root('Browser.setDownloadBehavior', { behavior: 'deny', browserContextId: contextId, eventsEnabled: true });
     checkLive();
+    startupStage = 'create-task-target';
+    const created = await root('Target.createTarget', { url: BOOTSTRAP_URL, browserContextId: contextId, background: false });
+    checkLive();
+    if (!validTargetId(created.targetId) || created.targetId === defaultTargetId || startupComponents.has(created.targetId) ||
+        (taskCandidateId && taskCandidateId !== created.targetId)) {
+      recordTargetLoss('task-result', { targetId: created.targetId, browserContextId: contextId }, null);
+      throw fail('BROWSER_TARGET_LOST');
+    }
+    targetId = created.targetId;
     startupStage = 'attach-bootstrap';
     const attached = await root('Target.attachToTarget', { targetId, flatten: true });
     checkLive();
-    if (typeof attached.sessionId !== 'string' || !attached.sessionId ||
-        (attachmentEvent && attachmentEvent !== attached.sessionId)) {
-      recordTargetLoss('attach-result', initial, null, attached.sessionId);
+    if (!validTargetId(attached.sessionId) || (attachmentEvent && attachmentEvent !== attached.sessionId)) {
+      recordTargetLoss('attach-result', { targetId, browserContextId: contextId, type: 'page', url: BOOTSTRAP_URL }, null, attached.sessionId);
       throw fail('BROWSER_TARGET_LOST');
     }
     sessionId = attached.sessionId;
@@ -460,6 +566,8 @@ export async function startChromiumSession({ writer, reader, policy, verifySandb
     await screenshot();
     startupStage = 'sandbox-attest';
     await verifySandbox(() => root('SystemInfo.getProcessInfo'));
+    startupStage = 'retire-startup';
+    await retireStartupTargets();
     if (!probeOnly) {
       startupStage = 'activate-bootstrap';
       await root('Target.activateTarget', { targetId });
