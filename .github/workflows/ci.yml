@@ -58,6 +58,10 @@ jobs:
         timeout-minutes: 5
         run: node scripts/workbench/e2e-attachments.mjs
 
+      - name: Verify workbench UI controlling a second sandboxed browser
+        timeout-minutes: 5
+        run: node scripts/workbench/e2e-manual-browser.mjs
+
   sandbox:
     name: Private human browser worker
     runs-on: ubuntu-latest
