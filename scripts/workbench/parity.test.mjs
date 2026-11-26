@@ -156,6 +156,8 @@ test('fails closed on uninspectable API syntax', () => {
     [withMethod('send: sharedSend'), /inline method implementation/],
     [withMethod('send: () => ipcRenderer.invoke(channel)'), /nonliteral channel/],
     [withMethod(`send: () => ipcRenderer.postMessage('chat:send')`), /unsupported IPC operation/],
+    [withMethod(`send: () => ipcRenderer?.invoke('chat:send')`), /unsupported IPC operation/],
+    [withMethod(`send() { const dormant = () => ipcRenderer.invoke('chat:send'); return true }`), /returned or sent directly/],
     [withMethod(`send: () => ipcRenderer.invoke('chat:send'), broken: ( =>`), /fixture\.ts:\d+:\d+:/],
     ['let api = {}', /expected top-level const api/]
   ]
@@ -166,7 +168,7 @@ test('rejects mismatched or missing unsubscribe and checks the disposer is retur
   for (const method of [subscribe('chat:other'), subscribe('chat:event', 'other'), subscribe().replace(/return.*removeListener.*/, '')]) {
     assert.throws(() => extract(withMethod(method)), /matching channel\/listener cleanup/)
   }
-  assert.throws(() => extract(withMethod(subscribe().replace('return () =>', 'const dispose = () =>'))), /returned as a disposer/)
+  assert.throws(() => extract(withMethod(subscribe().replace('return () =>', 'const dispose = () =>'))), /return matching cleanup as a disposer/)
 })
 
 test('CLI uses checkout-relative inputs from another cwd and prints machine-readable extraction', () => {

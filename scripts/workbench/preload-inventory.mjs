@@ -74,11 +74,19 @@ function ipcOperation(ts, node) {
 }
 
 function immediateCall(ts, rawBody, call, allowExpressionStatement) {
+  const reachesCall = (expression) => {
+    const node = unwrap(ts, expression)
+    if (node === call) return true
+    if (node && (ts.isAwaitExpression(node) || (allowExpressionStatement && ts.isVoidExpression(node)))) {
+      return reachesCall(node.expression)
+    }
+    return false
+  }
   const body = unwrap(ts, rawBody)
-  if (!ts.isBlock(body)) return body === call
+  if (!ts.isBlock(body)) return reachesCall(body)
   return body.statements.some((statement) =>
     (ts.isReturnStatement(statement) || (allowExpressionStatement && ts.isExpressionStatement(statement))) &&
-    unwrap(ts, statement.expression) === call)
+    reachesCall(statement.expression))
 }
 
 function readMethod(ts, value, id, fail) {
@@ -92,7 +100,7 @@ function readMethod(ts, value, id, fail) {
   const bodyOperation = ipcOperation(ts, value.body)
   if (bodyOperation) calls.unshift(bodyOperation)
   for (const call of calls) {
-    if (!['invoke', 'send', 'sendSync', 'on', 'removeListener'].includes(call.kind) || !call.channel) {
+    if (call.optional || !['invoke', 'send', 'sendSync', 'on', 'removeListener'].includes(call.kind) || !call.channel) {
       fail(call.node, `${id}: unsupported IPC operation or nonliteral channel`)
     }
   }
@@ -110,16 +118,18 @@ function readMethod(ts, value, id, fail) {
     const returns = ts.isBlock(body) ? body.statements.filter(ts.isReturnStatement).map((n) => unwrap(ts, n.expression)) : []
     const [cleanup] = returns
     if (returns.length !== 1 || !cleanup || (!ts.isArrowFunction(cleanup) && !ts.isFunctionExpression(cleanup)) ||
-      remove.node.getStart() < cleanup.getStart() || remove.node.getEnd() > cleanup.getEnd() ||
-      (add.node.getStart() >= cleanup.getStart() && add.node.getEnd() <= cleanup.getEnd())) {
-      fail(value, `${id}: matching cleanup must be returned as a disposer`)
+      !immediateCall(ts, cleanup.body, remove.node, true) || !immediateCall(ts, value.body, add.node, true)) {
+      fail(value, `${id}: register the listener directly and return matching cleanup as a disposer`)
     }
     return { kind: 'subscription', channel: add.channel }
   }
   if (calls.length !== 1 || calls[0].kind === 'removeListener') {
     fail(value, `${id}: expected exactly one invoke/send/sendSync call or one subscription`)
   }
-  const [{ kind, channel }] = calls
+  const [{ kind, channel, node }] = calls
+  if (!immediateCall(ts, value.body, node, kind === 'send')) {
+    fail(node, `${id}: expected the IPC call to be returned or sent directly`)
+  }
   return { kind, channel }
 }
 
