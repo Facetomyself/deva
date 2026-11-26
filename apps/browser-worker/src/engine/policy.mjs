@@ -10,15 +10,22 @@ const DIAGNOSTIC_COMMANDS = new Set([
   'Runtime.runIfWaitingForDebugger', 'Page.enable', 'Page.setLifecycleEventsEnabled', 'Page.setInterceptFileChooserDialog',
   'Network.setCacheDisabled', 'Network.setBypassServiceWorker', 'Emulation.setDeviceMetricsOverride', 'Page.getFrameTree',
   'Fetch.enable', 'Fetch.continueRequest', 'Fetch.continueResponse', 'Fetch.failRequest', 'Fetch.continueWithAuth',
+  'SystemInfo.getProcessInfo',
   'Page.captureScreenshot', 'Page.navigate', 'Page.getNavigationHistory', 'Page.navigateToHistoryEntry', 'Page.stopLoading',
   'Page.handleJavaScriptDialog', 'Input.insertText', 'Input.dispatchKeyEvent', 'Input.dispatchMouseEvent',
 ]);
 
 const LAUNCH_HINTS = new Set(['silent', 'unclassified', 'missing-library', 'sandbox-denied', 'debug-pipe',
   'profile-lock', 'snap-wrapper', 'startup-fatal']);
+const SANDBOX_FIELDS = [
+  'childIdentity', 'inventory', 'browserListed', 'browserOwned', 'browserStatus', 'browserUidReadable', 'browserUid', 'browserIdentity',
+  'renderersListed', 'renderersOwned', 'renderersAttested', 'rendererStatus', 'rendererIdentity', 'rendererUidReadable', 'rendererUid',
+  'pidNamespaceReadable', 'pidNamespace', 'userNamespaceReadable', 'userNamespace', 'nnpReadable', 'nnp',
+  'seccompReadable', 'seccomp', 'filterCountReadable', 'filterDelta',
+];
 
 export class EngineError extends Error {
-  constructor(code, { stage, command, launchHint } = {}) {
+  constructor(code, { stage, command, launchHint, sandbox } = {}) {
     super(code);
     this.name = 'EngineError';
     this.code = code;
@@ -26,6 +33,16 @@ export class EngineError extends Error {
     if (DIAGNOSTIC_STAGES.has(stage)) safe.stage = stage;
     if (DIAGNOSTIC_COMMANDS.has(command)) safe.command = command;
     if (LAUNCH_HINTS.has(launchHint)) safe.launchHint = launchHint;
+    if (sandbox && typeof sandbox === 'object') {
+      const fields = {};
+      for (const name of SANDBOX_FIELDS) {
+        const value = sandbox[name];
+        if (name.startsWith('renderers') ? Number.isInteger(value) && value >= 0 && value <= 256 : typeof value === 'boolean') {
+          fields[name] = value;
+        }
+      }
+      if (Object.keys(fields).length) safe.sandbox = Object.freeze(fields);
+    }
     if (Object.keys(safe).length) this.diagnostic = Object.freeze(safe);
   }
 }

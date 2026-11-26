@@ -5,13 +5,13 @@ import { basename, dirname, join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { BOOTSTRAP_URL, configPolicy, EngineError, fail, VIEWPORT } from './policy.mjs';
 import { classifyStartupStderr } from './launch-diagnostics.mjs';
+import { procIdentity, verifyRendererSandbox } from './sandbox.mjs';
 import { startChromiumSession } from './session.mjs';
 
 export { EngineError };
 
 const PROFILE_ROOT = '/tmp';
 const PROFILE_PREFIX = 'deva-browser-';
-const SANDBOX_MS = 2_500;
 const STARTUP_MS = 25_000;
 const HANDSHAKE_MS = 12_000;
 
@@ -91,39 +91,24 @@ async function profileHelpers(profile) {
   return found;
 }
 
-async function verifyRendererSandbox(pid, uid, signal) {
-  const start = Date.now();
-  while (Date.now() - start < SANDBOX_MS) {
-    signal.throwIfAborted();
-    try {
-      const browser = await readFile(`/proc/${pid}/status`, 'utf8');
-      const browserNsDepth = statusField(browser, 'NSpid').length;
-      const browserFilters = Number(statusField(browser, 'Seccomp_filters')[0]);
-      const browserIds = statusField(browser, 'Uid');
-      if (!browserNsDepth || browserIds.length !== 4 || browserIds.some((value) => Number(value) !== uid)) break;
-      for (const member of await groupMembers(pid)) {
-        if (member === pid) continue;
-        const argv = (await readFile(`/proc/${member}/cmdline`, 'utf8').catch(() => '')).split('\0');
-        if (!argv.includes('--type=renderer')) continue;
-        const renderer = await readFile(`/proc/${member}/status`, 'utf8').catch(() => '');
-        const filters = Number(statusField(renderer, 'Seccomp_filters')[0]);
-        const ids = statusField(renderer, 'Uid');
-        if (ids.length === 4 && ids.every((value) => Number(value) === uid) &&
-            statusField(renderer, 'NoNewPrivs')[0] === '1' && statusField(renderer, 'Seccomp')[0] === '2' &&
-            statusField(renderer, 'NSpid').length > browserNsDepth &&
-            (!Number.isFinite(browserFilters) || filters > browserFilters)) return;
-      }
-    } catch (error) {
-      if (['ENOENT', 'ESRCH'].includes(error.code)) break;
-      throw fail('BROWSER_SANDBOX_REQUIRED');
-    }
-    await delay(70, undefined, { signal });
-  }
-  throw fail('BROWSER_SANDBOX_REQUIRED');
-}
-
 function processControl(child, profile) {
   let exited = false, cleanup;
+  const observed = new Map();
+  function observeOwned(rows) {
+    for (const row of rows) if (observed.size < 512 || observed.has(row.pid)) observed.set(row.pid, row);
+  }
+
+  async function liveObserved() {
+    const live = [];
+    for (const row of observed.values()) {
+      const current = await procIdentity(row.pid);
+      if (current?.start !== row.start) { observed.delete(row.pid); continue; }
+      const status = await readFile(`/proc/${row.pid}/status`, 'utf8').catch(() => '');
+      const uid = statusField(status, 'Uid');
+      if (uid.length === 4 && uid.every((id) => Number(id) === process.getuid())) live.push(row.pid);
+    }
+    return live;
+  }
   const exit = new Promise((resolve) => {
     child.once('exit', () => { exited = true; resolve(); });
     child.on('error', () => { exited = true; resolve(); });
@@ -136,13 +121,14 @@ function processControl(child, profile) {
 
   async function signalBrowser(signal) {
     if (child.pid) signalOwned(-child.pid, signal);
-    for (const pid of await profileHelpers(profile)) signalOwned(pid, signal);
+    for (const pid of new Set([...(await liveObserved()), ...(await profileHelpers(profile))])) signalOwned(pid, signal);
   }
 
   async function awaitEmpty(grace) {
     const until = Date.now() + grace;
     do {
-      if (exited && (!child.pid || !(await groupMembers(child.pid)).length) && !(await profileHelpers(profile)).length) return true;
+      if (exited && !(await liveObserved()).length && (!child.pid || !(await groupMembers(child.pid)).length) &&
+          !(await profileHelpers(profile)).length) return true;
       if (exited) await delay(50);
       else {
         let timer;
@@ -153,7 +139,7 @@ function processControl(child, profile) {
     return false;
   }
 
-  return () => {
+  function shutdown() {
     if (cleanup) return cleanup;
     cleanup = (async () => {
       child.stdio[3]?.destroy();
@@ -170,7 +156,8 @@ function processControl(child, profile) {
       } finally { child.stderr?.destroy(); }
     })();
     return cleanup;
-  };
+  }
+  return { shutdown, observeOwned };
 }
 
 async function launch(policy, probeOnly, signal) {
@@ -198,10 +185,12 @@ async function launch(policy, probeOnly, signal) {
       cwd: profile, detached: true, env, stdio: ['ignore', 'ignore', 'pipe', 'pipe', 'pipe'],
     });
     stderr = classifyStartupStderr(child.stderr);
-    shutdown = processControl(child, profile);
+    const control = processControl(child, profile);
+    shutdown = control.shutdown;
     return await startChromiumSession({ writer: child.stdio[3], reader: child.stdio[4], policy, shutdown, probeOnly,
-      signal: startup, abortCode, handshakeMs: HANDSHAKE_MS, async verifySandbox() {
-        await verifyRendererSandbox(child.pid, process.getuid(), startup);
+      signal: startup, abortCode, handshakeMs: HANDSHAKE_MS, async verifySandbox(getProcessInfo) {
+        await verifyRendererSandbox({ pid: child.pid, uid: process.getuid(), profile, signal: startup, getProcessInfo,
+          observeOwned: control.observeOwned });
         stderr.finish();
       } });
   } catch (error) {

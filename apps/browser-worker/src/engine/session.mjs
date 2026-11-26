@@ -376,7 +376,7 @@ export async function startChromiumSession({ writer, reader, policy, verifySandb
     startupStage = 'bootstrap-png';
     await screenshot();
     startupStage = 'sandbox-attest';
-    await verifySandbox();
+    await verifySandbox(() => root('SystemInfo.getProcessInfo'));
     if (!probeOnly) {
       startupStage = 'entry-navigation';
       await navigate(policy.startUrl);
@@ -393,7 +393,7 @@ export async function startChromiumSession({ writer, reader, policy, verifySandb
   } catch (error) {
     await close();
     const code = signal?.aborted ? abortCode() : error?.code;
-    const diagnostic = { stage: startupStage, command: error?.diagnostic?.command };
+    const diagnostic = { ...error?.diagnostic, stage: startupStage };
     if (!SHELL_REASONS.has(code) && code !== 'BROWSER_COMMAND_FAILED' && code?.startsWith('BROWSER_')) throw fail(code, diagnostic);
     throw fail('BROWSER_START_FAILED', diagnostic);
   } finally { signal?.removeEventListener('abort', abort); }

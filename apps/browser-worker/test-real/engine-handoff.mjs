@@ -146,28 +146,40 @@ async function processes() {
     if (!/^\d+$/u.test(name)) continue;
     try {
       const raw = await readFile(`/proc/${name}/stat`, 'utf8');
-      const [state, parent, group] = raw.slice(raw.lastIndexOf(')') + 2).split(' ');
+      const fields = raw.slice(raw.lastIndexOf(')') + 2).split(' ');
+      const [state, parent, group] = fields;
       if (state === 'Z' || state === 'X') continue;
       const argv = (await readFile(`/proc/${name}/cmdline`, 'utf8').catch(() => '')).split('\0');
-      all.push({ pid: Number(name), parent: Number(parent), group: Number(group), argv });
+      all.push({ pid: Number(name), parent: Number(parent), group: Number(group), start: fields[19], argv });
     } catch { /* process exited between reads */ }
   }
   return all;
 }
 
 async function ownedBrowser() {
-  const roots = (await processes()).flatMap((p) => p.parent === process.pid ? p.argv
+  const snapshot = await processes();
+  const roots = snapshot.flatMap((p) => p.parent === process.pid ? p.argv
     .filter((arg) => /^--user-data-dir=\/tmp\/deva-browser-[a-z0-9]{6}$/iu.test(arg))
-    .map((arg) => ({ pid: p.pid, profile: arg.slice('--user-data-dir='.length) })) : []);
-  assert.equal(roots.length, 1, 'expected precisely one owned Chromium process group');
-  return roots[0];
+    .map((arg) => ({ pid: p.pid, start: p.start, profile: arg.slice('--user-data-dir='.length) })) : []);
+  assert.equal(roots.length, 1, 'expected precisely one owned Chromium process root');
+  const [root] = roots;
+  const children = new Map([[root.pid, root.start]]);
+  for (let added = true; added;) {
+    added = false;
+    for (const p of snapshot) if (children.has(p.parent) && !children.has(p.pid)) {
+      children.set(p.pid, p.start);
+      added = true;
+    }
+  }
+  return { ...root, children };
 }
 
 async function verifyExited(owned) {
   const live = await processes();
   if (owned) {
-    assert.ok(!live.some((p) => p.group === owned.pid || p.argv.some((arg) => arg.endsWith(`=${owned.profile}`) ||
-      arg.includes(`=${owned.profile}/`))), 'owned Chromium process survived close');
+    assert.ok(!live.some((p) => (owned.children.has(p.pid) && owned.children.get(p.pid) === p.start) ||
+      p.group === owned.pid || p.argv.some((arg) => arg === `--user-data-dir=${owned.profile}` ||
+        arg.startsWith(`--database=${owned.profile}/`))), 'owned Chromium process survived close');
     await assert.rejects(stat(owned.profile), { code: 'ENOENT' });
   }
   assert.ok(!live.some((p) => p.parent === process.pid && p.argv.some((arg) => arg.startsWith('--user-data-dir=/tmp/deva-browser-'))));
@@ -234,6 +246,9 @@ async function run() {
     await engine.forward();
     await eventually(() => engine.getPageInfo(), (info) => info.title === 'Fixture Complete');
     verificationPhase = 'close';
+    const finalOwned = await ownedBrowser();
+    assert.equal(finalOwned.pid, owned.pid);
+    owned = { ...owned, children: new Map([...owned.children, ...finalOwned.children]) };
     await engine.close();
     await verifyExited(owned);
     engine = null;
@@ -260,8 +275,10 @@ async function run() {
 run().catch((error) => {
   const diagnostic = error instanceof EngineError ? error.diagnostic : undefined;
   const code = /^BROWSER_[A-Z_]+$/u.test(error?.code) ? error.code : 'FIXTURE_FAILURE';
+  const sandbox = Object.entries(diagnostic?.sandbox ?? {}).map(([name, value]) => `${name}:${Number(value)}`).join(',');
   const labels = [`phase=${verificationPhase}`, diagnostic?.stage && `stage=${diagnostic.stage}`,
-    diagnostic?.command && `command=${diagnostic.command}`, diagnostic?.launchHint && `launch=${diagnostic.launchHint}`].filter(Boolean);
+    diagnostic?.command && `command=${diagnostic.command}`, diagnostic?.launchHint && `launch=${diagnostic.launchHint}`,
+    sandbox && `sandbox=${sandbox}`].filter(Boolean);
   console.error(`FAIL ${code} [${labels.join(' ')}]`);
   process.exitCode = 1;
 });
