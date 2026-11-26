@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from 'react'
-import { Archive, ArrowLeft, Globe, Plus, Search } from 'lucide-react'
+import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from 'react'
+import { Archive, ArrowLeft, CalendarClock, Globe, Plus, Search } from 'lucide-react'
 import { useI18n } from '../renderer/src/i18n/i18n'
 import { findActive, useModels } from '../renderer/src/store/models'
 import { ChatSurface, ConversationHeader, ConversationScroller, ConversationSurface } from '../renderer/src/redesign/ChatSurface'
@@ -29,6 +29,9 @@ import { createPreferenceTransport, matchesPreferences, projectSession } from '.
 import { SessionHeaderActions, SessionModelPicker, SessionPreferenceStatus, SessionRenameDialog } from './session-preference-ui'
 import { createSessionWorkspaceTransport } from './session-workspace-transport'
 import { AttachedWorkspaceLabel, SessionWorkspaceControls, useSessionWorkspace } from './session-workspace-ui'
+import { closedTaskSnapshot, createTaskInspection, idleTaskSubscription } from './task-inspection-controller'
+import { createTaskInspectionTransport } from './task-inspection-transport'
+import { TaskInspectionPanel } from './task-inspection-ui'
 import type { Bootstrap, LibraryQueue, Transport } from './transport'
 import { useTextWorkbench } from './use-text-workbench'
 import { WorkspaceFilesPanel } from './workspace-dialog'
@@ -71,6 +74,19 @@ export default function TextWorkbench({ transport, bootstrap, beforeWrite, onExp
     return () => { alive = false }
   }, [library])
   const [settingsOpen, setSettingsOpen] = useState(false)
+  const tasksEnabled = bootstrap.capabilities?.taskInspection === true
+  const tasks = useMemo(() => tasksEnabled ? createTaskInspection(createTaskInspectionTransport(transport, bootstrap.csrf), {
+    expired: onExpired, beforePause: beforeWrite
+  }) : undefined, [tasksEnabled, transport, bootstrap.csrf, beforeWrite, onExpired])
+  const taskView = useSyncExternalStore(tasks?.subscribe ?? idleTaskSubscription, tasks?.snapshot ?? closedTaskSnapshot)
+  const tasksButton = useRef<HTMLButtonElement>(null)
+  const tasksPanelId = useId()
+  useLayoutEffect(() => {
+    if (locked) tasks?.close()
+    return () => tasks?.close()
+  }, [locked, tasks])
+  const tasksVisible = !!tasks && !locked && taskView.open
+  const closeTasks = (): void => { tasks?.close(); tasksButton.current?.focus() }
   const [compact, setCompact] = useState(() => window.innerWidth < 780)
   const [sidebarWidth, setSidebarWidth] = useState(SIDEBAR_DEFAULT)
   const [query, setQuery] = useState('')
@@ -99,6 +115,7 @@ export default function TextWorkbench({ transport, bootstrap, beforeWrite, onExp
     openWorkspaceProject(files, workspace.id, signal)) : undefined
   const manualFilesSid = useRef<string | null>()
   const openFiles = files ? () => {
+    tasks?.close()
     if (controlledOpen && bound.confirmed?.workspace?.state === 'available' && !bound.pending && !bound.needsReview) {
       controlledOpen()
       return
@@ -165,7 +182,7 @@ export default function TextWorkbench({ transport, bootstrap, beforeWrite, onExp
   const [browserOpen, setBrowserOpen] = useState<{ sid: string; transport: BrowserTransport; panel: ManualBrowserPanel }>()
   const browserVisible = browserOpen && browserOpen.sid === sid && browserOpen.transport === browser && !locked && !settingsOpen
   useEffect(() => { if (browserOpen && !browserVisible) setBrowserOpen(undefined) }, [browserOpen, browserVisible])
-  const dropFiles = wk.attachments && sid ? (event: React.DragEvent<HTMLElement>): void => {
+  const dropFiles = !tasksVisible && wk.attachments && sid ? (event: React.DragEvent<HTMLElement>): void => {
     if (!event.dataTransfer.types.includes('Files') || !event.currentTarget.contains(event.target as Node)) return
     event.preventDefault()
     event.stopPropagation()
@@ -180,8 +197,8 @@ export default function TextWorkbench({ transport, bootstrap, beforeWrite, onExp
       window.removeEventListener('drop', preventFileDrop)
     }
   }, [])
-  const start = (): void => { setQuery(''); setArchivedView(false); void wk.create() }
-  const openSettings = (): void => setSettingsOpen(true)
+  const start = (): void => { tasks?.close(); setQuery(''); setArchivedView(false); void wk.create() }
+  const openSettings = (): void => { tasks?.close(); setSettingsOpen(true) }
   const surface = <ChatSurface className={`wb-chat${preferences ? ' wb-chat--session-prefs' : ''}`} data-testid="workbench-chat">
     <div className="cf-body" style={{ '--cf-side': `${compact ? 0 : sidebar}px` } as React.CSSProperties}>
       {!compact && <ResizeHandle axis="x" value={sidebar} title={t('cf.resizeSidebar')}
@@ -189,7 +206,7 @@ export default function TextWorkbench({ transport, bootstrap, beforeWrite, onExp
         onCommit={() => setSidebarWidth((w) => clampSidebar(w, window.innerWidth))} onReset={() => setSidebarWidth(SIDEBAR_DEFAULT)} />}
       <IconRail tab="chats" onTab={() => setCompact((value) => !value)} listCollapsed={compact}
         onOpenSettings={openSettings} chatAlert={false} unavailable={c.unavailable}
-        library={library ? { openProfile: () => setPanel('profile'), openRoster: () => setPanel('roster') } : undefined} />
+        library={library ? { openProfile: () => { tasks?.close(); setPanel('profile') }, openRoster: () => { tasks?.close(); setPanel('roster') } } : undefined} />
       <aside className={`cf-rail${compact ? ' is-collapsed' : ''}`} aria-hidden={compact || undefined}>
         {!compact && <>
           <div className="cf-rail__top">
@@ -220,7 +237,7 @@ export default function TextWorkbench({ transport, bootstrap, beforeWrite, onExp
               appearance={appearance(s.personaId)} memberFaces={[]} membersWorking={[]} browserPages={0} tasks={[]}
               subtitle={s.compatibility === 'legacy_text' ? c.readOnly : s.compatibility === 'unsupported' ? c.unavailable : (s.personaId ? appearance(s.personaId).name : s.model ?? t('cf.assistant'))}
               state={s.id === wk.selected && state?.active ? { streaming: true, unread: false, attention: false } : undefined}
-              onClick={() => { wk.select(s.id); if (viewport.w < 780) setCompact(true) }} />)
+              onClick={() => { tasks?.close(); wk.select(s.id); if (viewport.w < 780) setCompact(true) }} />)
               : !wk.listLoading && !wk.listIssue && <div className="cf-empty">{query && !archivedView ? t('cf.searchNoResults') : t('chat.noSessions')}</div>}
           </div>
         </>}
@@ -241,13 +258,17 @@ export default function TextWorkbench({ transport, bootstrap, beforeWrite, onExp
             rename={renameSession} archive={archiveSession} />}
           {openFiles && !(wk.selected && (state?.writable || state?.active)) &&
             <ComposerWorkspaceButton label={workspaceLabel} onClick={openFiles} testId={WORKSPACE_OPEN} />}
-          {browser && sid && <button className="cf-wschip wb-browser__launch" type="button" data-testid="workbench-browser-open"
+          {tasks && <button ref={tasksButton} className="cf-wschip wb-tasks__toggle" type="button" data-testid="workbench-tasks-toggle"
+            aria-label={t('cf.tabTasks')} aria-expanded={tasksVisible} aria-controls={tasksVisible ? tasksPanelId : undefined} disabled={locked}
+            onClick={() => { if (tasksVisible) closeTasks(); else void tasks.open() }}><CalendarClock size={15} />{t('cf.tabTasks')}</button>}
+          {!tasksVisible && browser && sid && <button className="cf-wschip wb-browser__launch" type="button" data-testid="workbench-browser-open"
             aria-haspopup="dialog" aria-label={t('browser.title')} disabled={locked} onClick={() => {
               setBrowserOpen({ sid, transport: browser, panel: createManualBrowserPanel(browser, sid, onExpired) })
             }}><Globe size={15} /><span>{t('browser.title')}</span></button>}
           <span className="cf-conv__tag wb-chat__scope" title={scope}>{scope}</span>
         </ConversationHeader>
         {notice}
+        {tasks && tasksVisible ? <TaskInspectionPanel api={tasks} view={taskView} id={tasksPanelId} close={closeTasks} /> : <>
         {binding && <SessionWorkspaceControls controller={binding} view={bound} locale={locale} writable={workspaceWritable} openNotes={notes} />}
         {preferenceEntry && renameSid !== sid && <SessionPreferenceStatus entry={preferenceEntry} reload={reloadPreferences} locked={locked} />}
         {sid ? <TextThread key={sid} sid={sid} wk={wk} c={c} locked={locked}
@@ -272,6 +293,7 @@ export default function TextWorkbench({ transport, bootstrap, beforeWrite, onExp
                   disabled={wk.createPending || locked} onClick={start}>{t('cf.newChat')}</button>}
             </>}
           </div>}
+        </>}
       </ConversationSurface>
     </div>
     {settingsOpen && renderSettings(() => setSettingsOpen(false))}
