@@ -13,7 +13,11 @@ import { dirname, isAbsolute, join, resolve, sep } from 'path'
 import { unzipSync } from 'fflate'
 import { getConfig, getDevaHome, setConfig } from './config'
 import { allowsPersona, getRoles, setRoles } from './ext-roles'
-import { fmArray, fmMap, fmScalar, fmString, parseFrontmatter } from './frontmatter'
+import { fmScalar, fmString, parseFrontmatter } from './frontmatter'
+import { parseSkillDocument } from './skill-document-format'
+import { BUILTIN_SKILL_CATALOG } from '../../shared/skill-catalog'
+
+const [createSkillSummary, createAgentSummary, createMcpSummary] = BUILTIN_SKILL_CATALOG
 
 /**
  * 技能（Skills）服务：发现 / 解析 / 读写 `~/.deva/skills/<id>/SKILL.md`（全局，与项目无关）。
@@ -153,10 +157,7 @@ allowed-tools: run_command, read_file
 
 /** 内置、不可删、恒启用的元技能，合成在代码里（永不落盘）。随 listSkills() 自动进系统提示词与 /create-skill。 */
 const BUILTIN_CREATE_SKILL: SkillRecord = {
-  id: 'create-skill',
-  name: 'create-skill',
-  description:
-    '引导用户从零创建一个新技能：从用例规划脚本、参考文档、模板等资源，落盘、校验并启用（单文件调 create_skill，多文件直接写进技能目录）。',
+  ...createSkillSummary,
   trigger: '输入 /create-skill，或表达「帮我做/创建一个技能」时触发。',
   allowedTools: ['create_skill', 'list_dir', 'write_file', 'read_file', 'run_command'],
   license: '',
@@ -164,8 +165,7 @@ const BUILTIN_CREATE_SKILL: SkillRecord = {
   metadata: {},
   instructions: CREATE_SKILL_INSTRUCTIONS,
   enabled: true,
-  roles: null,
-  source: 'builtin'
+  roles: null
 }
 
 /**
@@ -191,9 +191,7 @@ const CREATE_AGENT_INSTRUCTIONS = `你正在帮助用户创建一个新的**角�
 
 /** 内置、不可删、恒启用的「对话创建角色」元技能。随 listSkills() 自动进系统提示词与 /create-agent。 */
 const BUILTIN_CREATE_AGENT: SkillRecord = {
-  id: 'create-agent',
-  name: 'create-agent',
-  description: '引导用户用对话创建一个新角色：最多问一次厘清用途，随即调 propose_agent 生成名片供确认。',
+  ...createAgentSummary,
   trigger: '输入 /create-agent，或表达「帮我做/创建一个角色/性格/身份」时触发。',
   allowedTools: ['propose_agent'],
   license: '',
@@ -201,8 +199,7 @@ const BUILTIN_CREATE_AGENT: SkillRecord = {
   metadata: {},
   instructions: CREATE_AGENT_INSTRUCTIONS,
   enabled: true,
-  roles: null,
-  source: 'builtin'
+  roles: null
 }
 
 /**
@@ -231,9 +228,7 @@ const CREATE_MCP_INSTRUCTIONS = `你正在帮助用户接入一个新的 **MCP �
 
 /** 内置、不可删、恒启用的「对话接入 MCP 服务」元技能。随 listSkills() 自动进系统提示词与 /create-mcp。 */
 const BUILTIN_CREATE_MCP: SkillRecord = {
-  id: 'create-mcp',
-  name: 'create-mcp',
-  description: '引导用户用对话接入一个 MCP 服务：厘清用途与传输方式、收集要素（密钥仅收字段名）、确认后调 create_mcp 工具落盘并启用。',
+  ...createMcpSummary,
   trigger: '输入 /create-mcp，或表达「帮我接入/添加/创建一个 MCP（服务）」时触发。',
   allowedTools: ['create_mcp'],
   license: '',
@@ -241,8 +236,7 @@ const BUILTIN_CREATE_MCP: SkillRecord = {
   metadata: {},
   instructions: CREATE_MCP_INSTRUCTIONS,
   enabled: true,
-  roles: null,
-  source: 'builtin'
+  roles: null
 }
 
 /** 内置元技能按 id 索引（generalize：不同保留 id 返回各自的内置常量，勿一律返回 create-skill）。 */
@@ -307,18 +301,8 @@ function makeId(name: string): string {
 }
 
 function parseSkill(id: string, raw: string, enabled: boolean): SkillRecord {
-  const { data, body } = parseFrontmatter(raw)
-  const name = fmString(data, 'name') || id
   return {
-    id,
-    name,
-    description: fmString(data, 'description'),
-    trigger: fmString(data, 'trigger'),
-    allowedTools: fmArray(data, 'allowed-tools'),
-    license: fmString(data, 'license'),
-    compatibility: fmString(data, 'compatibility'),
-    metadata: fmMap(data, 'metadata'),
-    instructions: body.trim(),
+    ...parseSkillDocument(id, raw),
     enabled,
     roles: getRoles('skills', id),
     source: 'custom'
