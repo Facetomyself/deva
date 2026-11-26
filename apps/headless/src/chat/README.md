@@ -8,6 +8,9 @@
 | `POST /api/v1/chats` | `{}` 创建通用会话；`{sessionId}` 提供规范 UUID 或受限桌面 `sess_…` ID；可另给 `personaId` 绑定已启用的服务器角色并定格首选模型。客户端只传角色 ID，重复创建不会覆盖身份或触发新的模型请求。|
 | `GET /api/v1/chats/:sid` | 取历史、正在生成的部分文字、回合 ID、起始时间、最近终态和同一水位的游标。|
 | `POST /api/v1/chats/:sid/turns` | `{clientRequestId,text,model,attachments?}`。可选 `attachments` 最多是本会话的 4 个上传 ID，并非路径；顺序纳入幂等比较。同一请求 ID 再试不会重开上游请求。新请求在用户消息及幂等记录落盘后回 `202`；相同 ID 与同内容重复调用返回原回合，内容不同时为 `409`。|
+| `GET /api/v1/chats/:sid/preferences` | 当前会话标题、自定义标题、归档状态、模型选项和该会话版本。版本用于条件写入，不是访问凭证。|
+| `PATCH /api/v1/chats/:sid/preferences` | `{revision,set}` 只改指定字段（如 `customTitle:null`、`archived:true` 或 `model:null`）。取得持久化回执后更新 UI，同版本并发写不能静默覆盖。普通 `model` 字符串请求保持兼容；`model:null` 发送表示由服务端选择该时刻的默认模型。|
+| `WS /api/v1/chats/stream` | 登录所有者的只读列表失效通知。首帧 `sessions-snapshot` 给出真实水位，之后 `sessions-changed` 触发重新 GET 列表；重连和服务重启都重新取快照。通知不含会话名称、ID、正文或其他标签的操作。|
 | `POST /api/v1/chats/:sid/stop` | `{turnId}` 只停止目标回合。重建进程不会重发未完成的上游请求。|
 | `POST /api/v1/chats/:sid/attachments` | 当前所有者把文件字节作为 `application/octet-stream` 上传；`x-deva-file-name` 是 UTF-8 文件名的无填充 base64url，`x-deva-file-type` 是所选内容类型。返回不透明附件 ID 和显示元数据，不触发模型请求。|
 | `DELETE /api/v1/chats/:sid/attachments/:id` | 幂等撤回未发送的草稿；已经确认的会话历史独立保存。|

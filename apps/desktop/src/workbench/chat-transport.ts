@@ -27,6 +27,8 @@ export interface ChatSummary {
   updatedAt: number
   model: string | null
   personaId?: string
+  archived?: boolean
+  customTitle?: string
   compatibility: 'text' | 'legacy_text' | 'unsupported'
   writable: boolean
 }
@@ -52,7 +54,7 @@ export interface ChatSnapshot { cursor: ChatCursor; state: ChatState }
 export type ChatFrame = ({ t: 'snapshot' } & ChatSnapshot) | {
   t: 'event'; cursor: ChatCursor; sessionId: string; turnId: string; type: 'chat'; event: { type: string; text?: string }
 }
-export interface TurnRequest { clientRequestId: string; text: string; model: string; attachments?: string[] }
+export interface TurnRequest { clientRequestId: string; text: string; model: string | null; attachments?: string[] }
 
 type TurnDraft = Omit<TurnRequest, 'clientRequestId'>
 export function sameTurnDraft(a: TurnDraft | undefined, b: TurnDraft): boolean {
@@ -79,6 +81,8 @@ function message(value: unknown): value is ChatMessage {
 function summary(value: unknown): value is Omit<ChatSummary, 'updatedAt'> {
   return record(value) && id(value.id) && typeof value.title === 'string' && nullableString(value.model) &&
     (value.personaId === undefined || isRoleId(value.personaId)) &&
+    (value.archived === undefined || typeof value.archived === 'boolean') &&
+    (value.customTitle === undefined || typeof value.customTitle === 'string') &&
     (value.compatibility === 'text' || value.compatibility === 'legacy_text' || value.compatibility === 'unsupported') &&
     typeof value.writable === 'boolean'
 }

@@ -2,10 +2,13 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { attachmentTurnIssue, createAttachmentDrafts, readyAttachmentIds, type BrowserFiles } from './attachment-drafts'
 import { createChatStream, type ChatProjection } from './chat-stream'
 import { sameTurnDraft, type ChatSummary, type ChatTransport, type TurnRequest } from './chat-transport'
+import { createListRefresh, sessionAfterRefresh } from './session-list'
+import { createSessionPreferences, type createPreferenceTransport } from './session-preferences'
+import { createSessionsStream } from './sessions-stream'
 import { HttpFailure } from './transport'
 
 type ListIssue = 'listFailure' | 'createFailure'
-type TurnIssue = 'turnFailure' | 'busy' | 'modelFailure' | 'stopFailure' | 'roleUnavailable'
+type TurnIssue = 'turnFailure' | 'busy' | 'modelFailure' | 'stopFailure' | 'roleUnavailable' | 'preferencesChanged' | 'effortUnavailable'
 const savedSelection = 'deva-workbench.chat'
 function lastSession(): string | null {
   try { return window.sessionStorage.getItem(savedSelection) } catch { return null }
@@ -17,13 +20,14 @@ function remember(id: string | null): void {
   } catch { /* storage availability does not affect selection in the current page */ }
 }
 
-export function useTextWorkbench(api: ChatTransport, beforeWrite: () => Promise<void>, onExpired: () => void, uploadsEnabled: boolean) {
+export function useTextWorkbench(api: ChatTransport, beforeWrite: () => Promise<void>, onExpired: () => void, uploadsEnabled: boolean,
+  preferenceApi?: ReturnType<typeof createPreferenceTransport>) {
   const [sessions, setSessions] = useState<ChatSummary[]>([])
   const [selected, setSelected] = useState<string | null>(null)
   const selectedRef = useRef<string | null>(null)
   const [listIssue, setListIssue] = useState<ListIssue>()
   const [listLoading, setListLoading] = useState(true)
-  const listRevision = useRef(0)
+  const list = useRef<ReturnType<typeof createListRefresh<ChatSummary[]>>>()
   const creating = useRef<string>()
   const [createPending, setCreatePending] = useState(false)
   const retryCreate = useRef(new Map<string, string>()).current
@@ -43,31 +47,40 @@ export function useTextWorkbench(api: ChatTransport, beforeWrite: () => Promise<
     remember(id)
     setSelected(id)
   }, [])
-  const refreshList = useCallback(async () => {
-    const revision = ++listRevision.current
-    try {
-      const next = await api.list()
-      if (listRevision.current !== revision) return
+  const managed = !!preferenceApi
+  const refreshList = useCallback(() => list.current?.request(), [])
+  const preferences = useMemo(() => preferenceApi && createSessionPreferences(preferenceApi, {
+    beforeWrite,
+    expired: onExpired,
+    committed(sid, { title, model, archived, customTitle }) {
+      setSessions((rows) => rows.map((row) => row.id === sid ? { ...row, title, model, archived, customTitle: customTitle ?? undefined } : row))
+      list.current?.afterWrite()
+    },
+    blocked(sid, issue) {
+      if (issue === 'busy' || issue === 'storage' || issue === 'readOnly' || issue === 'missing') {
+        if (live.current?.sid === sid) void live.current.stream.refresh()
+      }
+      refreshList()
+    }
+  }), [preferenceApi, beforeWrite, onExpired, refreshList])
+  useEffect(() => {
+    const refresh = createListRefresh(api.list, (next) => {
       setSessions(next)
       setListIssue((current) => current === 'createFailure' ? current : undefined)
-      const id = selectedRef.current ?? lastSession()
-      if (!id || !next.some((s) => s.id === id)) select(next[0]?.id ?? null)
-      else select(id)
-    } catch (e) {
-      if (listRevision.current !== revision) return
-      if (e instanceof HttpFailure && e.status === 401) onExpired()
+      select(sessionAfterRefresh(next, selectedRef.current, lastSession(), managed))
+      setListLoading(false)
+    }, (error) => {
+      if (error instanceof HttpFailure && error.status === 401) onExpired()
       else setListIssue('listFailure')
-    } finally {
-      if (listRevision.current === revision) setListLoading(false)
-    }
-  }, [api, onExpired, select])
-  useEffect(() => {
-    void refreshList()
-    const onFocus = (): void => { void refreshList() }
-    const timer = window.setInterval(() => { if (document.visibilityState === 'visible') onFocus() }, 20000)
-    window.addEventListener('focus', onFocus)
-    return () => { ++listRevision.current; window.clearInterval(timer); window.removeEventListener('focus', onFocus) }
-  }, [refreshList])
+      setListLoading(false)
+    })
+    list.current = refresh
+    const link = managed ? createSessionsStream({ origin: window.location.origin, invalidate: refresh.request, expired: onExpired }) : undefined
+    if (!link) refresh.request()
+    const timer = window.setInterval(() => { if (document.visibilityState === 'visible') refresh.request() }, 20000)
+    window.addEventListener('focus', refresh.request)
+    return () => { link?.close(); refresh.close(); list.current = undefined; window.clearInterval(timer); window.removeEventListener('focus', refresh.request) }
+  }, [api, managed, onExpired, select])
   useEffect(() => {
     if (!selected) return
     const sid = selected
@@ -76,7 +89,7 @@ export function useTextWorkbench(api: ChatTransport, beforeWrite: () => Promise<
       if (projection.status === 'expired') { onExpired(); return }
       setView({ sid, projection })
       const state = projection.snapshot?.state
-      if (state) setSessions((list) => {
+      if (!managed && state) setSessions((list) => {
         const previous = list.find((entry) => entry.id === sid)
         if (!previous) return list
         const { title, writable, model, personaId = previous.personaId, updatedAt = previous.updatedAt } = state
@@ -86,7 +99,7 @@ export function useTextWorkbench(api: ChatTransport, beforeWrite: () => Promise<
     } })
     live.current = { sid, stream }
     return () => { stream.close(); if (live.current?.stream === stream) live.current = undefined }
-  }, [api, onExpired, selected])
+  }, [api, managed, onExpired, selected])
 
   const current = (sid: string): ReturnType<typeof createChatStream> | undefined => live.current?.sid === sid ? live.current.stream : undefined
   async function create(personaId?: string): Promise<boolean> {
@@ -101,10 +114,9 @@ export function useTextWorkbench(api: ChatTransport, beforeWrite: () => Promise<
       await beforeWrite()
       const session = await api.create(id, personaId)
       retryCreate.delete(scope)
-      ++listRevision.current
       setSessions((list) => [session, ...list.filter((s) => s.id !== id)])
       select(id)
-      void refreshList()
+      list.current?.afterWrite()
       return true
     } catch (e) {
       if (e instanceof HttpFailure && e.status < 500 && e.status !== 408) retryCreate.delete(scope)
@@ -136,9 +148,11 @@ export function useTextWorkbench(api: ChatTransport, beforeWrite: () => Promise<
     }
     attachments.add(sid, files)
   }
-  async function send(sid: string, text: string, model: string): Promise<boolean> {
+  async function send(sid: string, text: string, model: string | null): Promise<boolean> {
     const projection = current(sid)?.current()
     if (projection?.status !== 'ready' || !projection.snapshot?.state.writable || projection.snapshot.state.active) return false
+    const preference = preferences?.get(sid)
+    if (preference && (preference.pending || preference.reading || preference.needsRead || preference.confirmed?.preferences.model !== model)) return false
     const ids = attachments ? readyAttachmentIds(attachments.get(sid)) : []
     if (!ids || (!text && !ids.length) || !begin(sid, 'send')) return false
     const previous = retrySend.get(sid)
@@ -159,8 +173,11 @@ export function useTextWorkbench(api: ChatTransport, beforeWrite: () => Promise<
       if (e instanceof HttpFailure && e.status === 401) onExpired()
       else {
         const code = e instanceof HttpFailure ? e.code : undefined
-        const issue = code === 'role_unavailable' ? 'roleUnavailable' : code === 'turn_in_progress' ? 'busy' : ['provider_not_found', 'not_chat_provider', 'model_not_enabled', 'chat_model_unavailable'].includes(code ?? '') ? 'modelFailure' : 'turnFailure'
+        const issue = code === 'role_unavailable' ? 'roleUnavailable' : code === 'turn_in_progress' ? 'busy' : code === 'session_model_changed' ? 'preferencesChanged'
+          : code === 'effort_unsupported' ? 'effortUnavailable'
+            : ['provider_not_found', 'not_chat_provider', 'model_not_enabled', 'chat_model_unavailable'].includes(code ?? '') ? 'modelFailure' : 'turnFailure'
         if (e instanceof HttpFailure && e.status < 500 && e.status !== 408) retrySend.delete(sid)
+        if (issue === 'preferencesChanged') { void preferences?.read(sid); refreshList() }
         const uploadIssue = ids.length ? attachmentTurnIssue(e) : undefined
         if (uploadIssue) attachments?.reportTurn(sid, ids, uploadIssue)
         else setTurnIssues((issues) => ({ ...issues, [sid]: issue }))
@@ -184,6 +201,6 @@ export function useTextWorkbench(api: ChatTransport, beforeWrite: () => Promise<
     }
   }
   return { sessions, selected, select, projection: view?.sid === selected ? view?.projection : undefined, listIssue, listLoading,
-    refreshList, create, createPending, pending: selected ? pending[selected] : undefined, drafts, attachments, addAttachments, send, stop,
+    refreshList, preferences, create, createPending, pending: selected ? pending[selected] : undefined, drafts, attachments, addAttachments, send, stop,
     turnIssue: selected ? turnIssues[selected] : undefined }
 }
