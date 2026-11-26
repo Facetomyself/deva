@@ -131,7 +131,31 @@ function sessionClient(port, sessionId, origin, signal, shutdown) {
     if (typeof id !== 'string' || !id || id.length > 256) throw new WebDriverError('select element', 'invalid element reference')
     return `/element/${encodeURIComponent(id)}`
   }
+  function pointer(kind, element, start = { x: 0, y: 0 }, end) {
+    elementPath(element) // Only accept W3C element references from this private client.
+    const position = point => {
+      if (!point || !Number.isFinite(point.x) || !Number.isFinite(point.y) || Math.abs(point.x) > 4096 || Math.abs(point.y) > 4096)
+        throw new WebDriverError('select fixture text','invalid element offset')
+      return { type:'pointerMove', duration:0, origin:{[elementKey]:element[elementKey]}, x:Math.round(point.x), y:Math.round(point.y) }
+    }
+    const down = button => ({type:'pointerDown',button}), up = button => ({type:'pointerUp',button})
+    const actions = [position(start)]
+    if (kind === 'double') actions.push(down(0),up(0),{type:'pause',duration:55},down(0),up(0))
+    else if (kind === 'context') actions.push(down(2),up(2))
+    else actions.push(down(0),{...position(end),duration:160},up(0))
+    return send('interact with fixture text','POST','/actions',{actions:[{type:'pointer',id:'fixture-mouse',parameters:{pointerType:'mouse'},actions}]})
+  }
+  // Linux CI browser gestures only, through W3C input. Never populate the clipboard or
+  // manufacture a DOM selection using JavaScript, CDP or the host OS.
+  const fixtureKeys = new Map([['paste','\uE009v\uE000'],['sidebar','\uE009b\uE000'],['select-all','\uE009a\uE000'],['context-menu','\uE008\uE03A\uE000']])
   return {
+    doubleClick: (element,offset) => pointer('double',element,offset),
+    contextClick: (element,offset) => pointer('context',element,offset),
+    dragText: (element,start,end) => pointer('drag',element,start,end),
+    shortcut(element, name) {
+      if (!fixtureKeys.has(name)) throw new WebDriverError('fixture shortcut','unknown fixture shortcut')
+      return send('perform fixture shortcut','POST',`${elementPath(element)}/value`,{text:fixtureKeys.get(name)})
+    },
     navigate(url) {
       const target = new URL(url)
       if (target.origin !== origin || target.username || target.password) throw new WebDriverError('navigate', 'non-workbench URL')
