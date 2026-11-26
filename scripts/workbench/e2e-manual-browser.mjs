@@ -55,7 +55,8 @@ async function preflight() {
   check(process.platform === 'linux' && process.getuid?.() > 0 && process.geteuid?.() === process.getuid(), 'NON_ROOT_LINUX_REQUIRED')
   step('preflight.sources')
   for (const file of ['apps/browser-worker/src/worker.mjs', 'apps/browser-worker/src/client.mjs', 'apps/browser-worker/src/egress/index.mjs',
-    'apps/headless/src/browser/manual-browser.mjs', 'apps/desktop/src/workbench/browser-panel.tsx']) await requireFile(file, 'MANUAL_BROWSER_SOURCE_MISSING')
+    'apps/browser-worker/src/engine/sandbox.mjs', 'apps/headless/src/browser/manual-browser.mjs',
+    'apps/desktop/src/workbench/browser-panel.tsx']) await requireFile(file, 'MANUAL_BROWSER_SOURCE_MISSING')
   step('preflight.dist')
   await requireFile('apps/headless/dist/provider-core.mjs', 'HEADLESS_BUILD_MISSING')
   for (const asset of ['index.html', 'manifest.json', 'workbench.js']) await requireFile(web + asset, 'WORKBENCH_BUILD_MISSING')
@@ -124,28 +125,90 @@ async function workerProcess() {
   return owned[0]
 }
 
-async function verifyUiSandbox(profile) {
-  const rows = await browserProcesses()
-  const candidates = rows.filter(row => row.argv.includes(`${profileArg}${profile}`) &&
-    row.argv.includes('--remote-debugging-pipe') && !row.argv.some(arg => arg.startsWith('--type=')))
-  check(candidates.length === 1, 'UI_CHROME_PROCESS_IDENTITY_MISMATCH')
-  const chrome = candidates[0]
-  const driver = rows.find(row => row.pid === chrome.parent && row.parent === process.pid && row.argv.includes('--port=0'))
-  check(driver, 'CHROMEDRIVER_PROCESS_IDENTITY_MISMATCH')
-  const field = (raw, key) => raw.split('\n').find(line => line.startsWith(`${key}:`))?.split(/\s+/).slice(1) ?? []
-  const status = pid => readFile(`/proc/${pid}/status`, 'utf8').catch(() => '')
-  const parent = await status(chrome.pid)
-  check(field(parent, 'NSpid').length > 0, 'UI_CHROME_PROCESS_IDENTITY_MISMATCH')
-  await until(async () => {
-    for (const row of await browserProcesses()) {
-      if (row.group !== chrome.group || !row.argv.includes('--type=renderer')) continue
-      const child = await status(row.pid)
-      if (field(child, 'NSpid').length > field(parent, 'NSpid').length && field(child, 'Seccomp')[0] === '2' &&
-          field(child, 'NoNewPrivs')[0] === '1' && Number(field(child, 'Seccomp_filters')[0]) > Number(field(parent, 'Seccomp_filters')[0])) return true
+const sameProc = (a, b) => !!a && !!b && a.pid === b.pid && a.parent === b.parent && a.start === b.start
+
+async function processTree(readIdentity) {
+  const names = (await readdir('/proc')).filter(name => /^\d+$/.test(name))
+  const rows = new Map(), children = new Map()
+  // Inventory only PID, PPid and lifetime on the host; argv is read for the owned branch below.
+  for (let offset = 0; offset < names.length; offset += 32) {
+    for (const row of await Promise.all(names.slice(offset, offset + 32).map(name => readIdentity(Number(name))))) {
+      if (!row) continue
+      rows.set(row.pid, row)
+      if (!children.has(row.parent)) children.set(row.parent, [])
+      children.get(row.parent).push(row)
     }
-    return false
-  }, 'UI_CHROMIUM_SANDBOX_REQUIRED', 5_000)
-  return { profile, group: driver.group }
+  }
+  function descendants(root) {
+    if (!sameProc(root, rows.get(root.pid))) return []
+    const seen = new Set([root.pid]), output = []
+    function visit(parent, depth) {
+      if (depth >= 20) return
+      for (const row of children.get(parent.pid) ?? []) {
+        if (seen.has(row.pid) || BigInt(row.start) < BigInt(parent.start)) continue
+        seen.add(row.pid)
+        output.push(row)
+        visit(row, depth + 1)
+      }
+    }
+    visit(root, 0)
+    return output
+  }
+  return { children, descendants }
+}
+
+async function ownedArguments(row, readIdentity) {
+  const raw = await readFile(`/proc/${row.pid}/cmdline`, 'utf8').catch(() => '')
+  return raw && sameProc(row, await readIdentity(row.pid)) ? raw.split('\0').filter(Boolean) : null
+}
+
+async function verifyUiSandbox(identity, { classifyRendererCmdline, procIdentity, verifyRendererSandbox }) {
+  const tree = await processTree(procIdentity)
+  const driverCandidates = []
+  for (const child of tree.children.get(process.pid) ?? []) {
+    if ((await ownedArguments(child, procIdentity))?.includes('--port=0')) driverCandidates.push(child)
+  }
+  check(driverCandidates.length === 1, 'CHROMEDRIVER_PROCESS_IDENTITY_MISMATCH')
+  const [driver] = driverCandidates
+  const candidates = []
+  for (const row of tree.descendants(driver)) {
+    const argv = await ownedArguments(row, procIdentity)
+    if (argv?.includes(`${profileArg}${identity.profile}`) && argv.includes('--remote-debugging-pipe') &&
+        !argv.some(arg => arg.startsWith('--type='))) candidates.push(row)
+  }
+  check(candidates.length === 1, 'UI_CHROME_PROCESS_IDENTITY_MISMATCH')
+  const [chrome] = candidates
+  identity.group = driver.pid // webdriver-local starts exactly this driver in a detached group.
+  identity.procs.set(driver.pid, driver)
+  identity.procs.set(chrome.pid, chrome)
+
+  // No Chrome debugging endpoint is added. The inventory is the exact live kernel PPid
+  // tree of the launched browser, including renderers outside Chrome's process group.
+  async function getProcessInfo() {
+    const live = await processTree(procIdentity)
+    if (!live.descendants(driver).some(row => sameProc(row, chrome))) return { processInfo: [] }
+    const processInfo = [{ id: chrome.pid, type: 'browser' }]
+    for (const row of live.descendants(chrome)) {
+      const argv = await ownedArguments(row, procIdentity)
+      if (!argv) return { processInfo: [] } // Retry if Chromium's process inventory moved.
+      identity.procs.set(row.pid, row)
+      const { explicitRenderer } = classifyRendererCmdline(argv)
+      processInfo.push({ id: row.pid, type: explicitRenderer ? 'renderer' : 'child' })
+    }
+    return { processInfo }
+  }
+  try {
+    await verifyRendererSandbox({ pid: driver.pid, uid: process.getuid(), profile: identity.profile,
+      signal: stop.signal, timeoutMs: 5_000, trustedBrowserInventory: false, getProcessInfo, observeOwned(rows) {
+        for (const row of rows) identity.procs.set(row.pid, row)
+      } })
+  } catch (error) {
+    if (error?.code === 'BROWSER_SANDBOX_REQUIRED') {
+      throw new Failure(error.diagnostic?.sandbox?.renderersListed === 0
+        ? 'UI_CHROMIUM_RENDERER_IDENTITY_UNAVAILABLE' : 'UI_CHROMIUM_SANDBOX_ATTESTATION_FAILED')
+    }
+    throw error
+  }
 }
 
 async function pathAbsent(path) {
@@ -430,6 +493,7 @@ async function run() {
     const { startEgress, parseSites } = await import('../../apps/browser-worker/src/egress/index.mjs')
     const { startWorker } = await import('../../apps/browser-worker/src/worker.mjs')
     const { openWorkerClient } = await import('../../apps/browser-worker/src/client.mjs')
+    const sandbox = await import('../../apps/browser-worker/src/engine/sandbox.mjs')
     step('start.private-runtime')
     const parent = await realpath('/tmp')
     const prefix = 'deva-wb-manual-'
@@ -475,7 +539,7 @@ async function run() {
     }])
     await privateSocket(worker.path, workerDir, 'worker.sock')
     const { state } = await openWorkerClient({ runDir: workerDir }).status()
-    const workerError = { 'binary-missing': 'CHROMIUM_PATH_MISSING', 'sandbox-startup-failure': 'WORKER_CHROMIUM_SANDBOX_REQUIRED',
+    const workerError = { 'binary-missing': 'CHROMIUM_PATH_MISSING', 'sandbox-startup-failure': 'WORKER_SANDBOX_STARTUP_FAILED',
       'egress-unavailable': 'EGRESS_UNAVAILABLE', unconfigured: 'WORKER_UNCONFIGURED' }
     check(state === 'ready', workerError[state] ?? 'WORKER_NOT_READY')
     check(fixture.documents.length === 0 && !fixture.failure, fixture.failure ?? 'SANDBOX_PROBE_CONTACTED_FIXTURE')
@@ -492,11 +556,17 @@ async function run() {
     step('start.webdriver-sandbox')
     process.env.CHROME_BIN = chrome
     process.env.CHROMEDRIVER_BIN = driver
-    let uiProcess, browser
+    let browser
+    const uiProcess = { profile, procs: new Map() }
     cleanup.push(['webdriver', async () => {
       try { await browser?.close() } finally {
-        // Also check exact profile helpers when Chrome was lost before sandbox verification.
-        await waitFor(() => processGone(uiProcess ?? { profile }, root), 'WEBDRIVER_CHROME_SURVIVED_CLEANUP', { timeout: 4_000 })
+        // Check tracked exact descendants even when they were in another process group.
+        await waitFor(async () => {
+          for (const row of uiProcess.procs.values()) {
+            if ((await sandbox.procIdentity(row.pid))?.start === row.start) return false
+          }
+          return processGone(uiProcess, root)
+        }, 'WEBDRIVER_CHROME_SURVIVED_CLEANUP', { timeout: 4_000 })
           .catch(() => { throw new Failure('WEBDRIVER_CHROME_SURVIVED_CLEANUP') })
       }
     }])
@@ -506,7 +576,9 @@ async function run() {
     step('ui.auth.claim-owner')
     const { credential } = await requestControl({ runDir, op: 'claim' })
     await browser.navigate(`${workbench.origin}/#claim=${encodeURIComponent(credential)}`)
-    uiProcess = await verifyUiSandbox(profile)
+    step('start.webdriver-attest')
+    await verifyUiSandbox(uiProcess, sandbox)
+    step('ui.auth.claim-password')
     await screen.element(password('new'), 'CLAIM_FORM_MISSING')
     check(await browser.execute('return location.hash === "";'), 'CLAIM_FRAGMENT_NOT_CLEARED')
     await authenticate(browser, screen, passwordValue, 'new')

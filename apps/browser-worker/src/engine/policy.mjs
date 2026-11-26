@@ -18,8 +18,9 @@ const DIAGNOSTIC_COMMANDS = new Set([
 const LAUNCH_HINTS = new Set(['silent', 'unclassified', 'missing-library', 'sandbox-denied', 'debug-pipe',
   'profile-lock', 'snap-wrapper', 'startup-fatal']);
 const SANDBOX_FIELDS = [
-  'childIdentity', 'inventory', 'browserListed', 'browserOwned', 'browserStatus', 'browserUidReadable', 'browserUid', 'browserIdentity',
-  'renderersListed', 'renderersOwned', 'renderersAttested', 'rendererStatus', 'rendererIdentity', 'rendererUidReadable', 'rendererUid',
+  'childIdentity', 'inventory', 'inventoryConsistent', 'browserListed', 'browserOwned', 'browserStatus', 'browserUidReadable', 'browserUid', 'browserIdentity',
+  'renderersListed', 'renderersOwned', 'renderersAttested', 'rendererStatus', 'rendererStable', 'rendererIdentity',
+  'rendererCmdlineReadable', 'rendererArgvMatch', 'rendererArgvContradiction', 'rendererUidReadable', 'rendererUid',
   'pidNamespaceReadable', 'pidNamespace', 'userNamespaceReadable', 'userNamespace', 'nnpReadable', 'nnp',
   'seccompReadable', 'seccomp', 'filterCountReadable', 'filterDelta',
 ];

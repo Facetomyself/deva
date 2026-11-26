@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { EngineError } from '../src/engine/chromium.mjs';
-import { verifyRendererSandbox } from '../src/engine/sandbox.mjs';
+import { classifyRendererCmdline, verifyRendererSandbox } from '../src/engine/sandbox.mjs';
 
 const profile = '/tmp/deva-browser-example';
 const uid = 997;
@@ -11,7 +11,8 @@ function stat(pid, parent, group, start = pid * 10) {
   return `${pid} (name with (parentheses)) S ${parent} ${group} ${Array(16).fill('0').join(' ')} ${start} 0`;
 }
 
-function fixture({ renderer = rendererStatus, rendererParent = 103, rendererMap = '997 997 1', inventory } = {}) {
+function fixture({ renderer = rendererStatus, rendererParent = 103, rendererMap = '997 997 1', inventory,
+  argv = 'chrome\0--type=renderer\0', trustedBrowserInventory = false, recycledRenderer = false } = {}) {
   const files = new Map(Object.entries({
     '/proc/101/stat': stat(101, 100, 101),
     '/proc/102/stat': stat(102, 101, 102),
@@ -20,12 +21,13 @@ function fixture({ renderer = rendererStatus, rendererParent = 103, rendererMap 
     '/proc/102/status': `${user}\nNSpid:\t102\nNoNewPrivs:\t0\nSeccomp:\t2\nSeccomp_filters:\t1\n`,
     '/proc/104/status': renderer,
     '/proc/102/cmdline': `chrome\0--user-data-dir=${profile}\0--remote-debugging-pipe\0`,
-    '/proc/104/cmdline': 'chrome\0--type=renderer\0',
+    '/proc/104/cmdline': argv,
     '/proc/102/uid_map': '0 0 4294967295',
     '/proc/104/uid_map': rendererMap,
   }));
   const reads = [];
   const owned = new Set();
+  let rendererStatRead = false;
   return {
     reads, owned, files,
     verify: () => verifyRendererSandbox({ pid: 101, uid, profile, signal: new AbortController().signal, timeoutMs: 0,

@@ -190,7 +190,7 @@ async function launch(policy, probeOnly, signal) {
     return await startChromiumSession({ writer: child.stdio[3], reader: child.stdio[4], policy, shutdown, probeOnly,
       signal: startup, abortCode, handshakeMs: HANDSHAKE_MS, async verifySandbox(getProcessInfo) {
         await verifyRendererSandbox({ pid: child.pid, uid: process.getuid(), profile, signal: startup, getProcessInfo,
-          observeOwned: control.observeOwned });
+          trustedBrowserInventory: true, observeOwned: control.observeOwned });
         stderr.finish();
       } });
   } catch (error) {

@@ -40,6 +40,46 @@ async function procArgs(pid, proc) {
   return (await proc.readFile(`/proc/${pid}/cmdline`, 'utf8').catch(() => '')).split('\0').filter(Boolean);
 }
 
+const CHROME_PROGRAM = /^(?:chrome|chromium|chrome-headless-shell|headless_shell)$/u;
+const TYPE_PREFIX = '--type=';
+const isSpace = (ch) => ch === ' ' || ch === '\t';
+
+function titleArguments(title) {
+  const program = /^([^ \t'"\\]+)[ \t]+/u.exec(title);
+  if (!program || !CHROME_PROGRAM.test(program[1].split('/').at(-1))) return [];
+  const args = [];
+  let start = program[0].length;
+  while (start < title.length) {
+    while (start < title.length && isSpace(title[start])) start++;
+    if (start === title.length) break;
+    let at = start, quote = '', literal = true;
+    for (; at < title.length; at++) {
+      const char = title[at];
+      if (char === '\\' && quote !== "'") { literal = false; at++; continue; }
+      if (quote) { if (char === quote) quote = ''; continue; }
+      if (char === '"' || char === "'") { literal = false; quote = char; continue; }
+      if (isSpace(char)) break;
+    }
+    args.push(literal ? title.slice(start, at) : null);
+    start = at + 1;
+  }
+  return args;
+}
+
+/** Safe local role evidence; consumers without a private Browser report must require explicitRenderer. */
+export function classifyRendererCmdline(raw) {
+  const argv = Array.isArray(raw) ? raw.filter((arg) => typeof arg === 'string') :
+    typeof raw === 'string' ? raw.split('\0').filter(Boolean) : [];
+  const realArgs = argv.slice(1);
+  const titleArgs = titleArguments(argv[0] ?? '');
+  const knownTypes = [...realArgs, ...titleArgs].filter((arg) => arg?.startsWith(TYPE_PREFIX));
+  const contradictory = knownTypes.some((arg) => arg !== '--type=renderer');
+  // A merged title has lost real argument boundaries. Only trust the canonical first
+  // switch after the known Chrome executable, never a type-like substring in an argument value.
+  const explicitRenderer = !contradictory && (realArgs.includes('--type=renderer') || titleArgs[0] === '--type=renderer');
+  return { readable: argv.length > 0, explicitRenderer, contradictory };
+}
+
 async function ancestry(pid, root, proc) {
   const visited = new Set();
   const found = [];
@@ -74,15 +114,20 @@ function differentUserNamespace(browser, renderer) {
   return { readable: false, isolated: false };
 }
 
-async function checkRenderer({ row, browser, browserNs, uid, proc }) {
+async function checkRenderer({ row, browserRoot, browser, browserNs, uid, proc, trustedBrowserInventory }) {
   const [status, argv, rendererNs] = await Promise.all([
     procStatus(row.pid, proc), procArgs(row.pid, proc), namespaceIdentity(row.pid, proc),
   ]);
   if (!status) return { rendererStatus: false, pass: false };
+  const role = classifyRendererCmdline(argv);
+  const after = await ancestry(row.pid, browserRoot, proc);
+  const rendererStable = after?.[0].start === row.start;
   const ns = differentUserNamespace(browserNs, rendererNs);
   const filterAvailable = browser.filters !== undefined || status.filters !== undefined;
   const evidence = {
-    rendererStatus: true, rendererIdentity: argv.includes('--type=renderer'),
+    rendererStatus: true, rendererStable, rendererCmdlineReadable: role.readable,
+    rendererArgvMatch: role.explicitRenderer, rendererArgvContradiction: role.contradictory,
+    rendererIdentity: rendererStable && !role.contradictory && (role.explicitRenderer || trustedBrowserInventory === true),
     rendererUidReadable: status.uid.length === 4 && status.uid.every(Number.isInteger), rendererUid: uidMatches(status, uid),
     pidNamespaceReadable: browser.nsDepth > 0 && status.nsDepth > 0, pidNamespace: status.nsDepth > browser.nsDepth,
     userNamespaceReadable: ns.readable, userNamespace: ns.isolated,
@@ -91,10 +136,12 @@ async function checkRenderer({ row, browser, browserNs, uid, proc }) {
     filterCountReadable: browser.filters !== undefined && status.filters !== undefined,
     filterDelta: !filterAvailable || (status.filters !== undefined && browser.filters !== undefined && status.filters > browser.filters),
   };
-  return { ...evidence, pass: Object.entries(evidence).every(([name, value]) => name === 'filterCountReadable' || value) };
+  const { rendererIdentity, rendererUid, pidNamespaceReadable, pidNamespace, userNamespace, nnp, seccomp, filterDelta } = evidence;
+  return { ...evidence, pass: rendererIdentity && rendererUid && pidNamespaceReadable && pidNamespace &&
+    userNamespace && nnp && seccomp && filterDelta };
 }
 
-async function snapshot({ launched, uid, profile, getProcessInfo, observeOwned, proc, evidence }) {
+async function snapshot({ launched, uid, profile, getProcessInfo, observeOwned, proc, evidence, trustedBrowserInventory }) {
   const { processInfo } = await getProcessInfo();
   if (!Array.isArray(processInfo) || processInfo.length > MAX_PROCS) return false;
   evidence.inventory = true;
@@ -116,18 +163,25 @@ async function snapshot({ launched, uid, profile, getProcessInfo, observeOwned, 
     !argv.some((arg) => arg.startsWith('--type='));
   if (!browser || !evidence.browserUid || !evidence.browserIdentity || !(await ancestry(browserRoot.pid, launched, proc))) return false;
   observeOwned(browserPath);
-  const seen = new Set();
+  const seen = new Map([[browserRoot.pid, 'browser']]);
   const renderers = [];
   for (const item of processInfo) {
-    if (!isPid(item?.id) || item.id === browserRoot.pid || seen.has(item.id)) continue;
-    seen.add(item.id);
+    if (!isPid(item?.id) || typeof item.type !== 'string') continue;
+    if (seen.has(item.id)) {
+      if (seen.get(item.id) !== item.type) { evidence.inventoryConsistent = false; return false; }
+      continue;
+    }
+    seen.set(item.id, item.type);
     const path = await ancestry(item.id, browserRoot, proc);
     if (!path) continue;
     observeOwned(path);
     if (item.type === 'renderer') renderers.push(path[0]);
   }
+  evidence.inventoryConsistent = true;
   evidence.renderersOwned = renderers.length;
-  const results = await Promise.all(renderers.map((row) => checkRenderer({ row, browser, browserNs, uid, proc })));
+  const results = await Promise.all(renderers.map((row) => checkRenderer({
+    row, browserRoot, browser, browserNs, uid, proc, trustedBrowserInventory,
+  })));
   evidence.renderersAttested = results.filter(({ pass }) => pass).length;
   // Report the evidence for the first failing renderer (or one passing renderer), never a PID or raw proc content.
   if (results.length) {
@@ -138,9 +192,9 @@ async function snapshot({ launched, uid, profile, getProcessInfo, observeOwned, 
     evidence.renderersAttested === evidence.renderersOwned;
 }
 
-/** Inspect only this private Browser's process IDs and their ancestor chains, not the system process list. */
+/** Inspect only candidate IDs and their ancestors. Only the launcher sets trustedBrowserInventory for its private root CDP. */
 export async function verifyRendererSandbox({ pid, uid, profile, signal, getProcessInfo, observeOwned = () => {},
-  proc = PROC, timeoutMs = SANDBOX_MS }) {
+  trustedBrowserInventory = false, proc = PROC, timeoutMs = SANDBOX_MS }) {
   const launched = await procIdentity(pid, proc);
   const deadline = Date.now() + timeoutMs;
   let evidence = { childIdentity: !!launched };
@@ -149,7 +203,7 @@ export async function verifyRendererSandbox({ pid, uid, profile, signal, getProc
       signal.throwIfAborted();
       evidence = { childIdentity: true };
       try {
-        if (await snapshot({ launched, uid, profile, getProcessInfo, observeOwned, proc, evidence })) return;
+        if (await snapshot({ launched, uid, profile, getProcessInfo, observeOwned, proc, evidence, trustedBrowserInventory })) return;
       } catch (error) {
         if (error?.code === 'BROWSER_ABORTED' || error?.code === 'BROWSER_TIMEOUT') throw error;
         evidence.inventory = false;
