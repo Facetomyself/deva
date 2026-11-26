@@ -154,6 +154,29 @@ test('operator opt-in and Unix permissions are enforced; replacement preserves m
   assert.deepEqual((await readdir(alpha)).filter(name => name.startsWith('.workspace-file-')), [])
 })
 
+test('nested saves work where Linux synthesizes birth time from change time', async t => {
+  const { root, alpha, id } = await setup(t)
+  await mkdir(join(alpha, 'nested')); const saved = join(alpha, 'nested', 'note.txt')
+  await writeFile(saved, 'before')
+  // Run the real fd walker and file replacement. Only the stat timestamp projection is
+  // overridden to model older kernels; directory creation, mount IDs and renames remain real.
+  const source = `
+    import fs from 'node:fs'; import {syncBuiltinESMExports} from 'node:module'; import assert from 'node:assert/strict';
+    const native=fs.fstatSync;
+    fs.fstatSync=function(fd,opts){const s=native(fd,opts); if(opts?.bigint) s.birthtimeNs=s.ctimeNs; return s};syncBuiltinESMExports();
+    const {openWorkspaceCatalog}=await import(${JSON.stringify(new URL('../src/business/workspace-catalog.mjs', import.meta.url).href)});
+    const {openWorkspaceFiles}=await import(${JSON.stringify(new URL('../src/files/workspace-files.mjs', import.meta.url).href)});
+    const catalog=openWorkspaceCatalog({root:process.argv[1]});
+    try { const files=openWorkspaceFiles({catalog,writable:true}); const path='nested/note.txt';
+      const a=await files.read(process.argv[2],path); const r=await files.write(process.argv[2],{path,content:'after',revision:a.revision});
+      assert.equal(r.revision,(await files.read(process.argv[2],path)).revision);
+      await assert.rejects(files.write(process.argv[2],{path,content:'stale',revision:a.revision}),{code:'ERR_WORKSPACE_FILE_CONFLICT'});
+    } finally {catalog.close()}
+  `
+  execFileSync(process.execPath, ['--input-type=module', '-e', source, root, id])
+  assert.equal(await readFile(saved, 'utf8'), 'after')
+})
+
 test('two tabs with the same revision race; external replacements and edits cause explicit conflict', async t => {
   const { files, id, alpha } = await setup(t)
   const file = join(alpha, 'doc')

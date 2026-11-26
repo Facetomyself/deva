@@ -6,7 +6,11 @@ export const PATH = 0o10000000 | C.O_NOFOLLOW
 export const DIRECTORY = PATH | C.O_DIRECTORY
 export const fdPath = (fd, name) => `/proc/self/fd/${fd}${name === undefined ? '' : `/${name}`}`
 export const stat = fd => fstatSync(fd, { bigint: true })
-export const sameInode = (a, b) => a.dev === b.dev && a.ino === b.ino && a.birthtimeNs === b.birthtimeNs
+// Compare the device/inode of *held* descriptors (mount ID is checked separately).
+// A live fd prevents this inode from being recycled. Older Linux stat APIs may return a
+// synthesized birthtime derived from ctime: creating a temp in an unchanged directory can
+// legitimately change that value. Use ctime/mtime/size/digest for file revisions, not identity.
+export const sameInode = (a, b) => a.dev === b.dev && a.ino === b.ino
 export const close = fd => { if (fd !== undefined) closeSync(fd) }
 
 export function mountId(fd) {
