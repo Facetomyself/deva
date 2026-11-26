@@ -81,6 +81,26 @@ jobs:
         timeout-minutes: 5
         run: node scripts/workbench/e2e-session-workspaces.mjs
 
+      - name: Verify native task inspection and a confirmed pause in Chrome
+        id: task_ui
+        if: ${{ !cancelled() && steps.host_tests.outcome == 'success' }}
+        timeout-minutes: 5
+        env:
+          DEVA_QA_LAYOUT_CAPTURE: '1'
+        run: node scripts/workbench/e2e-task-inspection.mjs
+
+      - name: Publish verified task layouts from synthetic data only
+        if: ${{ !cancelled() && steps.task_ui.outcome == 'success' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: task-workbench-layouts
+          path: |
+            test-results/task-inspection/tasks-wide.png
+            test-results/task-inspection/tasks-compact.png
+            test-results/task-inspection/layout.json
+          if-no-files-found: error
+          retention-days: 14
+
       - name: Select the same installed Chrome for UI and worker
         run: bash scripts/workbench/ci-select-chromium.sh
 
@@ -109,6 +129,30 @@ jobs:
       - name: Verify owner bindings across new containers and a removed grant
         timeout-minutes: 3
         run: node scripts/workbench/container-focus-ci.mjs
+
+  packaged-tasks:
+    name: Packaged native task management on amd64 Docker
+    if: ${{ github.event_name == 'pull_request' && github.head_ref == 'feat/web-workbench-task-inspection' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v5
+      - name: Build the production workbench image
+        timeout-minutes: 8
+        run: |
+          set -eu
+          test "$(uname -m)" = x86_64
+          docker build --platform linux/amd64 --target runtime -t deva-workbench:tasks-verify .
+          docker image inspect -f '{{.Os}}/{{.Architecture}} {{.Id}} {{.Size}} bytes' deva-workbench:tasks-verify
+      - name: Inspect, preview and pause real task records through the packaged HTTP server
+        timeout-minutes: 3
+        run: |
+          set -eu
+          test -f "$PWD/apps/headless/test/task-inspection-http.test.mjs"
+          docker run --rm --init --network none --read-only --user 1000:1000 --cap-drop ALL --security-opt no-new-privileges:true \
+            --pids-limit 128 --cpus 2 --memory 512m --tmpfs /tmp:rw,nosuid,nodev,noexec,mode=1777,size=96m \
+            --mount "type=bind,src=$PWD/apps/headless/test/task-inspection-http.test.mjs,dst=/opt/deva/apps/headless/ci/task-inspection.test.mjs,readonly" \
+            --entrypoint node deva-workbench:tasks-verify --test /opt/deva/apps/headless/ci/task-inspection.test.mjs
 
   sandbox:
     name: Private human browser worker
