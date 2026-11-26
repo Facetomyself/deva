@@ -1,4 +1,8 @@
 import { connectProvider } from './model-connection.mjs'
+import { createEventJournal } from '../events/index.mjs'
+import { createChatWebSocket } from '../events/websocket.mjs'
+import { createTextTurns } from '../chat/text-turns.mjs'
+import { chatRoutes } from '../chat/routes.mjs'
 import { HttpError, json, readJson } from '../http/policy.mjs'
 import { openSettings } from './settings.mjs'
 import { allowedModelOrigins } from './provider-fetch.mjs'
@@ -38,10 +42,16 @@ export async function openBusiness({ dataDir, vault, version, allowedOrigins = [
   const opts = { version, allowedOrigins: [...allowedModelOrigins(allowedOrigins)] }
   const settings = await openSettings({ dataDir, vault })
   const lifetime = new AbortController()
+  const journal = createEventJournal()
+  const turns = createTextTurns({ dataDir, settings, journal, ...opts })
+  const chats = chatRoutes(turns)
   return {
+    capabilities: Object.freeze({ textChat: true }),
+    createRealtime: ({ auth, policy }) => createChatWebSocket({ turns, journal, auth, policy }),
     getConfig: () => settings.getPublicConfig(),
     async handle(req, res, { auth, policy }) {
       const path = (req.url ?? '').split('?', 1)[0]
+      if (path === '/api/v1/chats' || path.startsWith('/api/v1/chats/')) return chats(req, res, { auth, policy })
       const match = keyPath.exec(path)
       if (!names.has(path) && !match) return false
       const methods = match ? ['PUT', 'DELETE'] : path === '/api/v1/settings' ? ['GET', 'PATCH'] : path.endsWith('models') ? ['POST'] : ['GET']
@@ -82,6 +92,6 @@ export async function openBusiness({ dataDir, vault, version, allowedOrigins = [
       }
       return true
     },
-    close() { lifetime.abort() }
+    async close() { lifetime.abort(); try { await turns.close() } finally { journal.close() } }
   }
 }

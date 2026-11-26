@@ -20,6 +20,8 @@ COPY --from=build /src/apps/headless/package.json ./apps/headless/package.json
 COPY --from=build /src/apps/desktop/package.json ./apps/desktop/package.json
 COPY --from=build /src/apps/headless/src ./apps/headless/src
 COPY --from=build /src/apps/headless/dist ./apps/headless/dist
+# ws has JS fallbacks for its optional native helpers; no desktop dependency tree is shipped.
+COPY --from=build /src/node_modules/ws ./apps/headless/node_modules/ws
 COPY --from=build /src/apps/desktop/out/workbench ./web
 # The source checkout may use umask 077. Keep code owned by root, but make it readable
 # and directories traversable for the unprivileged runtime. Private volumes are untouched.

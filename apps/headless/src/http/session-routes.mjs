@@ -28,7 +28,7 @@ function exactStrings(body, names) {
 }
 
 /** No route issues claim credentials. That action belongs to the private deployment control channel. */
-export function sessionRoutes({ auth, policy, version, getConfig }) {
+export function sessionRoutes({ auth, policy, version, getConfig, capabilities }) {
   if (!version || typeof getConfig !== 'function') throw new TypeError('Missing bootstrap dependencies')
   return async (req, res) => {
     const path = (req.url ?? '').split('?', 1)[0]
@@ -46,7 +46,8 @@ export function sessionRoutes({ auth, policy, version, getConfig }) {
       if (path === '/api/v1/bootstrap') {
         const { csrf, expiresAt } = auth.describe(cookie)
         const config = appearanceSnapshot(await getConfig())
-        json(res, 200, { protocol: 1, version, platform: process.platform, config, csrf, expiresAt })
+        json(res, 200, { protocol: 1, version, platform: process.platform, config, csrf, expiresAt,
+          capabilities: { textChat: capabilities?.textChat === true } })
         return true
       }
       if (path === '/api/v1/auth/logout') {

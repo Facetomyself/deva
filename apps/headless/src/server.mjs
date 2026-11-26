@@ -91,7 +91,7 @@ function controlHealth(req, res, body, code) {
 }
 
 function dispatcher({ auth, policy, version, business, web, isReady }) {
-  const sessions = sessionRoutes({ auth, policy, version, getConfig: () => business.getConfig() })
+  const sessions = sessionRoutes({ auth, policy, version, getConfig: () => business.getConfig(), capabilities: business.capabilities })
   const context = Object.freeze({ auth, policy })
   return async (req, res) => {
     const readOnly = req.method === 'GET' || req.method === 'HEAD'
@@ -147,7 +147,7 @@ function closeHttp(server, sockets, timeout) {
 /** Run one volume writer, auth service, private control endpoint, and same-origin HTTP host. */
 export async function startWorkbench(opts = {}) {
   const { dataDir, keyFile, runDir, webDir, host, port, version, shutdownTimeoutMs, policy } = options(opts)
-  let releaseLock, business, control, server, closing, dispatch
+  let releaseLock, business, control, server, realtime, closing, dispatch
   let stage = 'writer lock'
   const sockets = new Set()
   const active = new Set()
@@ -156,6 +156,7 @@ export async function startWorkbench(opts = {}) {
     return closing ??= (async () => {
       const results = await Promise.allSettled([
         closeHttp(server, sockets, shutdownTimeoutMs),
+        Promise.resolve().then(() => realtime?.close()),
         Promise.resolve().then(() => control?.close())
       ])
       try {
@@ -200,11 +201,17 @@ export async function startWorkbench(opts = {}) {
       sockets.add(socket)
       socket.once('close', () => sockets.delete(socket))
     })
-    server.on('upgrade', (_req, socket) => socket.destroy())
+    server.on('upgrade', (req, socket, head) => {
+      try {
+        if (closing || !realtime || (req.headersDistinct.host?.length ?? 0) !== 1 ||
+            (req.headersDistinct.origin?.length ?? 0) !== 1 || !realtime.upgrade(req, socket, head)) socket.destroy()
+      } catch { socket.destroy() }
+    })
     await listen(server, host, port)
     server.on('error', () => { void close().catch(() => {}) })
     const address = Object.freeze(server.address())
     const activePolicy = port === 0 && opts.publicUrl === undefined ? workbenchPolicy(undefined, host, address.port) : policy
+    realtime = business.createRealtime?.({ auth, policy: activePolicy })
     dispatch = dispatcher({ auth, policy: activePolicy, version, business, web, isReady: () => server.listening && !closing })
     return Object.freeze({ address, origin: activePolicy.origin, controlPath: control.path, close })
   } catch (error) {
