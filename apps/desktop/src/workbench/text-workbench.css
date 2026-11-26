@@ -19,6 +19,7 @@
 .wb-chat .wb-attachment__draft-status { display: flex; gap: 8px; justify-content: space-between; padding: 0 10px; font-size: 12px; overflow-wrap: anywhere; }
 .wb-chat .wb-attachment__hint { margin: 4px 0 0; padding-inline: 10px; font-size: 12px; color: var(--fg-muted); }
 .wb-chat .wb-attachment__preview-failed { text-align: center; font-size: 10px; padding: 2px; color: var(--fg-muted); }
+.wb-chat--session-prefs .cf-conv__head { padding-right: var(--space-4); }
 .wb-chat .wb-session-prefs__archive-link { display: inline-flex; gap: 4px; width: auto; min-width: 28px; padding-inline: 6px; }
 .wb-chat .wb-session-prefs__archive-link .cf-rail__count { margin-right: 0; }
 .wb-chat .wb-session-prefs__actions { display: flex; flex-shrink: 0; align-items: center; gap: 4px; }
@@ -26,11 +27,9 @@
 .wb-chat .wb-session-prefs__actions button:disabled, .wb-chat .cf-mp__model:disabled { opacity: .5; cursor: default; }
 .wb-session-prefs__notice { margin: 0; padding: 6px 12px; color: var(--fg-muted); font-size: 12px; overflow-wrap: anywhere; }
 .modal__card .wb-session-prefs__notice { padding-inline: 0; }
-.wb-chat .wb-session-model__menu > .model-pick__item { flex: none; }
-.wb-chat .wb-session-model__menu > .cf-mp__menu {
-  position: static; flex: 1; min-height: 0; width: 100%; min-width: 0; border: none; padding: 0; box-shadow: none;
-}
+.wb-chat--session-prefs .cf-mp__menu > .model-pick__item { flex: none; }
 @media (max-width: 700px) {
+  .wb-chat--session-prefs .cf-conv__head { gap: var(--space-2); flex-wrap: wrap; }
   .wb-chat .cf-modal__body { overflow: auto; }
   .wb-chat .cf-box__bar .cf-wschip:disabled { font-size: 0; }
 }

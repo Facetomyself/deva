@@ -140,7 +140,7 @@ export default function TextWorkbench({ transport, bootstrap, beforeWrite, onExp
   }, [])
   const start = (): void => { setQuery(''); setArchivedView(false); void wk.create() }
   const openSettings = (): void => setSettingsOpen(true)
-  const surface = <ChatSurface className="wb-chat" data-testid="workbench-chat">
+  const surface = <ChatSurface className={`wb-chat${preferences ? ' wb-chat--session-prefs' : ''}`} data-testid="workbench-chat">
     <div className="cf-body" style={{ '--cf-side': `${compact ? 0 : sidebar}px` } as React.CSSProperties}>
       {!compact && <ResizeHandle axis="x" value={sidebar} title={t('cf.resizeSidebar')}
         style={{ left: `calc(${ICONRAIL_W}px + ${sidebar}px)` }} onChange={setSidebarWidth}

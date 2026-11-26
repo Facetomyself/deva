@@ -1,8 +1,8 @@
 import { useEffect, useId, useRef } from 'react'
-import { Archive, ArchiveRestore, Check, ChevronDown, Pencil } from 'lucide-react'
+import { Archive, ArchiveRestore, Check, Pencil } from 'lucide-react'
 import { Modal } from '../renderer/src/components/Modal'
 import { useI18n } from '../renderer/src/i18n/i18n'
-import { ModelMenu, ModelSelectButton } from '../renderer/src/redesign/ModelMenu'
+import { ModelSelectButton } from '../renderer/src/redesign/ModelMenu'
 import { normalizeTitle, type PreferenceEntry, type PreferenceIssue, type SessionPreferenceController } from './session-preferences'
 
 const labels = {
@@ -99,18 +99,12 @@ export function SessionModelPicker({ open, active, groups, onToggle, onPick, fol
   const c = labels[locale]
   const name = pinned === null ? c.follow : active?.model.name ?? pinned ?? t('chat.selectModel')
   const id = useId()
-  return <>
-    <button className={`chip cf-mp__model${open && !disabled ? ' is-open' : ''}`} type="button" title={name} aria-label={name}
-      aria-expanded={open && !disabled} aria-controls={open && !disabled ? id : undefined} onClick={onToggle} disabled={disabled}>
-      <span className="chip__label">{name}</span><ChevronDown size={13} className="chip__caret" />
-    </button>
-    {open && !disabled && <div id={id} className="model-pick__menu cf-mp__menu wb-session-model__menu">
-      <button className={`model-pick__item${pinned === null ? ' is-active' : ''}`} type="button" aria-pressed={pinned === null}
-        data-testid="workbench-session-model-default" onClick={follow}>
+  return <ModelSelectButton open={open && !disabled} active={active} groups={groups} onToggle={onToggle} onPick={onPick}
+    label={name} menuId={id} disabled={disabled} leading={
+      <button className={`model-pick__item${pinned === null ? ' is-active' : ''}`} type="button" role="menuitemradio"
+        aria-checked={pinned === null} data-testid="workbench-session-model-default" onClick={follow}>
         <span className="model-pick__name">{c.follow}</span>
         <span className="cf-mp__check">{pinned === null && <Check size={14} className="model-pick__check" />}</span>
       </button>
-      <ModelMenu groups={groups} activePid={active?.provider.id ?? null} activeMid={active?.model.id ?? null} onPick={onPick} />
-    </div>}
-  </>
+    } />
 }
