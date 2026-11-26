@@ -177,13 +177,29 @@ export function checkManifest(manifest, inventory, isFile = actualFile) {
   return errors
 }
 
+// Publish mutually exclusive counts. A partial scope has tests but is still pending in the
+// canonical manifest; it must never silently increase the implemented count.
+function coverageReport(manifest) {
+  const blank = () => ({ implemented: 0, partial: 0, pendingWithoutScope: 0, desktopOnly: 0 })
+  const totals = blank()
+  const groups = manifest.groups.map(({ name, methods }) => {
+    const counts = blank()
+    for (const { web } of methods) {
+      const key = web.status === 'implemented' ? 'implemented' : web.status === 'desktop-only' ? 'desktopOnly' : web.partial ? 'partial' : 'pendingWithoutScope'
+      counts[key]++; totals[key]++
+    }
+    return { name, ...counts }
+  })
+  return { baseline: manifest.baseline, totals, groups, values: Object.fromEntries(manifest.values.map(({name, web}) => [name,web.status])) }
+}
+
 export function run(args, { stdout = console.log, stderr = console.error } = {}) {
-  if (args.length && (args.length !== 1 || !['--extract', '--help'].includes(args[0]))) {
-    stderr('Usage: node scripts/workbench/check-parity.mjs [--extract | --help]')
+  if (args.length && (args.length !== 1 || !['--extract', '--coverage', '--help'].includes(args[0]))) {
+    stderr('Usage: node scripts/workbench/check-parity.mjs [--extract | --coverage | --help]')
     return 2
   }
   if (args[0] === '--help') {
-    stdout('Usage: node scripts/workbench/check-parity.mjs [--extract | --help]\nDefault: validate manifest against the desktop preload AST. --extract: print the live inventory as JSON.')
+    stdout('Usage: node scripts/workbench/check-parity.mjs [--extract | --coverage | --help]\nDefault: validate manifest against the desktop preload AST. --extract: print the live inventory as JSON. --coverage: validate and print mutually exclusive per-namespace and total coverage as JSON.')
     return 0
   }
   try {
@@ -198,12 +214,14 @@ export function run(args, { stdout = console.log, stderr = console.error } = {})
       stderr(`Workbench parity check failed (${errors.length}):\n- ${errors.join('\n- ')}`)
       return 1
     }
+    const report = coverageReport(manifest)
+    if (args[0] === '--coverage') { stdout(JSON.stringify(report, null, 2)); return 0 }
     const { groups, methods, subscriptions, values } = inventoryCounts(inventory)
     const dispositions = manifest.groups.flatMap((group) => group.methods)
       .reduce((counts, row) => counts.set(row.web.status, (counts.get(row.web.status) ?? 0) + 1), new Map())
     const methodStatus = statuses.map((status) => `${status}=${dispositions.get(status) ?? 0}`).join(', ')
     const valueStatus = manifest.values.map(({ name, web }) => `${name}=${web.status}`).join(', ')
-    stdout(`Workbench parity inventory OK: ${groups} groups / ${methods} methods (${subscriptions} subscriptions) / ${values} value(s); methods: ${methodStatus}; values: ${valueStatus || 'none'}`)
+    stdout(`Workbench parity inventory OK: ${groups} groups / ${methods} methods (${subscriptions} subscriptions) / ${values} value(s); methods: ${methodStatus}; pending detail: ${report.totals.partial} partial, ${report.totals.pendingWithoutScope} without a recorded scope; values: ${valueStatus || 'none'}`)
     return 0
   } catch (error) {
     stderr(`Workbench parity check could not run: ${error.message}`)

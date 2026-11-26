@@ -23,7 +23,7 @@ export class WebDriverError extends Error {
 
 // This transport has no proxy, discovery, redirects, or externally supplied endpoint. Driver
 // messages and request bodies can contain secrets, so only fixed command names and codes leave it.
-function command(port, operation, method, path, payload, timeout, signal) {
+function command(port, operation, method, path, payload, timeout, signal, maxResponse = resultLimit) {
   return new Promise((resolve, reject) => {
     const failure = detail => reject(new WebDriverError(operation, detail))
     const body = payload === undefined ? undefined : JSON.stringify(payload)
@@ -37,7 +37,7 @@ function command(port, operation, method, path, payload, timeout, signal) {
       res.once('error', () => failure('response interrupted'))
       res.on('data', chunk => {
         size += chunk.length
-        if (size <= resultLimit) chunks.push(chunk)
+        if (size <= maxResponse) chunks.push(chunk)
         else { failure('response too large'); res.destroy() }
       })
       res.once('end', () => {
@@ -138,6 +138,15 @@ function sessionClient(port, sessionId, origin, signal, shutdown) {
       return send('navigate', 'POST', '/url', { url: target.href })
     },
     refresh: () => send('refresh', 'POST', '/refresh', {}),
+    // Test-only: fixed viewports for reproducing layout on the controlled fixture origin.
+    fixtureViewport(layout) {
+      const rect = layout === 'wide' ? {width:1280,height:1000} : layout === 'compact' ? {width:570,height:900} : null
+      if (!rect) throw new WebDriverError('set fixture viewport','unknown fixture size')
+      return send('set fixture viewport','POST','/window/rect',rect)
+    },
+    fixtureScreenshot() {
+      return command(port,'capture fixture viewport','GET',base+'/screenshot',undefined,12_000,signal,4*1024*1024)
+    },
     execute: (script, ...args) => send('observe page', 'POST', '/execute/sync', { script, args }),
     executeAsync: (script, ...args) => send('observe page asynchronously', 'POST', '/execute/async', { script, args }),
     click: element => send('click element', 'POST', `${elementPath(element)}/click`, {}),
