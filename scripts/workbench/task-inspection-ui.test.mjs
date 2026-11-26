@@ -158,6 +158,8 @@ test('the real Workbench mounts only the task main alongside the rail and restor
   assert.match(taskButton(invalidCapability), /disabled=""/)
   assert.doesNotMatch(invalidCapability, /workbench-tasks-toggle/)
   assert.match(taskButton(render(bootWithTasks, true)), /disabled=""/)
+  rail.onTab('tasks')
+  assert.deepEqual(f.calls, [])
   const original = render()
   assert.match(original, /<aside class="cf-rail"/)
   assert.match(original, /class="cf-conv__head"/)

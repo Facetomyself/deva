@@ -68,6 +68,7 @@
 .wb-tasks__allow { display: flex; align-items: center; gap: var(--space-2); margin-bottom: var(--space-3); }
 .wb-tasks__receipt { margin-top: var(--space-3); white-space: pre-wrap; overflow-wrap: anywhere; }
 .wb-tasks :is(button, input):focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.wb-chat .cf-iconrail .cf-navbtn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 @container (max-width: 610px) {
   .wb-tasks__body { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, auto) minmax(0, 1fr); }
   .wb-tasks__list { max-height: min(30vh, 14rem); border-inline-end: 0; border-bottom: 1px solid var(--border); }

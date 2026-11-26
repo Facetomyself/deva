@@ -200,11 +200,12 @@ export default function TextWorkbench({ transport, bootstrap, beforeWrite, onExp
   }, [])
   const start = (): void => { setQuery(''); setArchivedView(false); void wk.create() }
   const openSettings = (): void => { tasks?.close(); setSettingsOpen(true) }
+  const taskEntryDisabled = locked || settingsOpen || !!panel || (!!renameSid && renameSid === sid)
   const selectRailTab = (tab: RailTab): void => {
     if (tab === 'chats') {
       if (tasksVisible) tasks?.close()
       else setCompact((value) => !value)
-    } else if (tab === 'tasks' && tasks && !locked) {
+    } else if (tab === 'tasks' && tasks && !taskEntryDisabled) {
       if (tasksVisible) closeTasks()
       else void tasks.open()
     }
@@ -213,7 +214,7 @@ export default function TextWorkbench({ transport, bootstrap, beforeWrite, onExp
     <div className={`cf-body${tasksVisible ? ' wb-chat__body--tasks' : ''}`} style={{ '--cf-side': `${compact ? 0 : sidebar}px` } as React.CSSProperties}>
       <IconRail tab={tasksVisible ? 'tasks' : 'chats'} onTab={selectRailTab} listCollapsed={compact}
         onOpenSettings={openSettings} chatAlert={false} unavailable={c.unavailable}
-        taskInspection={tasks ? { panelId: tasksPanelId, disabled: locked, buttonRef: tasksButton } : undefined}
+        taskInspection={tasks ? { panelId: tasksPanelId, disabled: taskEntryDisabled, buttonRef: tasksButton } : undefined}
         library={library ? { openProfile: () => { tasks?.close(); setPanel('profile') }, openRoster: () => { tasks?.close(); setPanel('roster') } } : undefined} />
       {tasks && tasksVisible ? <main className="wb-tasks__main">
         {notice}
