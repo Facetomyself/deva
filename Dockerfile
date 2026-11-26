@@ -21,6 +21,9 @@ COPY --from=build /src/apps/desktop/package.json ./apps/desktop/package.json
 COPY --from=build /src/apps/headless/src ./apps/headless/src
 COPY --from=build /src/apps/headless/dist ./apps/headless/dist
 COPY --from=build /src/apps/desktop/out/workbench ./web
+# The source checkout may use umask 077. Keep code owned by root, but make it readable
+# and directories traversable for the unprivileged runtime. Private volumes are untouched.
+RUN chmod -R u=rwX,go=rX /opt/deva/apps /opt/deva/web
 USER node:node
 EXPOSE 8787
 ENTRYPOINT ["node", "/opt/deva/apps/headless/src/cli.mjs"]

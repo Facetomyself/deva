@@ -20,6 +20,20 @@ docker compose exec workbench node /opt/deva/apps/headless/src/cli.mjs claim
 - `GET /livez` 检查进程；`/readyz` 和 `/healthz` 检查已实现服务和构建产物是否就绪，不证明模型在线或所有桌面能力已经移植。
 - `data` 卷保存配置、账号验证信息和密文，`keys` 卷保存独立主密钥。停服务后一并备份，妥善分开保管；回滚镜像不应删除卷。启动时已有密库缺主密钥、密钥错误或数据损坏会报错，不会重置账户。不要让桌面和服务器同时写同一数据目录；迁移桌面配置先制备独立副本，默认不会静默改写桌面明文自定义头或解密桌面系统密钥。普通 `docker compose down` 保留这两个卷。
 
+### 已有内建 bridge、缺少端口发布 NAT 的主机
+
+默认 Compose 会新建项目网络并发布一个回环端口。如果主机现有 Docker `bridge` 可以使用，但新建 bridge/端口发布失败，可显式采用私有 bridge 模式。它不修改防火墙，不创建新的 Docker bridge，**宿主不发布应用端口**。仅在信任该内建 bridge 上其他工作负载时使用；工作台认证仍开启。
+
+```sh
+docker build -t deva-workbench:dev .
+docker compose -f compose.yaml -f compose.private-bridge.yaml up -d --no-build
+docker compose -f compose.yaml -f compose.private-bridge.yaml exec workbench node /opt/deva/apps/headless/src/cli.mjs claim
+cid=$(docker compose -f compose.yaml -f compose.private-bridge.yaml ps -q workbench)
+docker inspect -f '{{(index .NetworkSettings.Networks "bridge").IPAddress}}' "$cid"
+```
+
+从管理员电脑将本地回环 `18787` 转发到上一步得到的容器地址：`ssh -N -L 127.0.0.1:18787:<容器IP>:8787 <服务器SSH地址>`，然后访问认领链接。容器重建后重新读取 IP。Unix 控制通道始终留在容器内。
+
 ## 源码验证
 
 ```sh
