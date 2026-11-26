@@ -71,6 +71,11 @@ jobs:
         timeout-minutes: 5
         run: node scripts/workbench/e2e-deliveries.mjs
 
+      - name: Verify opt-in tracked Git inspection after repository packing
+        if: ${{ !cancelled() && steps.host_tests.outcome == 'success' }}
+        timeout-minutes: 5
+        run: node scripts/workbench/e2e-git-view.mjs
+
       - name: Select the same installed Chrome for UI and worker
         run: bash scripts/workbench/ci-select-chromium.sh
 

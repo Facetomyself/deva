@@ -38,6 +38,7 @@ import { useToast, type ToastOptions } from '../components/ToastProvider'
 import { Modal } from '../components/Modal'
 import { basename } from './shell-common'
 import { type CtxEntry, ContextMenu } from './ContextMenu'
+import { GitBranchPill } from './GitBranchPill'
 
 /* ─────────────────────────── Git 快捷面板（IDEA 式点击浮出） ───────────────────────────
  * 挂载工作区若是 git 仓库，则在挂载 chip 里跟一枚分支 pill，点击浮出常用操作。
@@ -455,20 +456,16 @@ export function GitWidget({ root, streaming }: { root: string; streaming: boolea
 
   return (
     <>
-      <button
+      <GitBranchPill
         ref={pillRef}
-        type="button"
-        className={`cf-gitchip${opBusy || busy ? ' is-busy' : ''}`}
+        label={label}
+        mergeLabel={status.mergeInProgress ? t('cf.git.merging') : undefined}
+        busy={opBusy || busy}
         title={t('cf.git.menuHint')}
         aria-label={t('cf.git.menuHint')}
         onClick={() => void openMenu()}
         disabled={opBusy}
       >
-        <GitBranch size={13} />
-        <span className="cf-gitchip__branch" title={label}>
-          {label}
-        </span>
-        {status.mergeInProgress && <span className="cf-gitchip__merge">{t('cf.git.merging')}</span>}
         {(status.ahead > 0 || status.behind > 0) && (
           <span className="cf-gitchip__ab">
             {status.ahead > 0 && (
@@ -485,7 +482,7 @@ export function GitWidget({ root, streaming }: { root: string; streaming: boolea
             )}
           </span>
         )}
-      </button>
+      </GitBranchPill>
       {menu && (
         <ContextMenu
           x={menu.x}

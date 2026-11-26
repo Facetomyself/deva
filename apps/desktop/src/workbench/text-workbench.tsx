@@ -20,6 +20,8 @@ import { createChatTransport, inputBytes, MAX_TEXT_INPUT, type ChatState } from 
 import { eligibleDeliveryReplies } from './deliveries-controller'
 import { createDeliveriesTransport, type DeliveriesTransport, type DeliveryGroup, type DeliveryLocation } from './deliveries-transport'
 import { BrowserDeliveryCard, DeliveryFeedback, DeliveryHistory, ReplyDeliveryActions, useDeliveries } from './deliveries-ui'
+import { createWorkspaceGitView } from './git-view-controller'
+import { createGitViewTransport } from './git-view-transport'
 import { createLibrary, type Roster } from './library-transport'
 import { LibraryWorkspace, type LibraryPanel } from './library-workspace'
 import { createPreferenceTransport, matchesPreferences, projectSession } from './session-preferences'
@@ -76,6 +78,9 @@ export default function TextWorkbench({ transport, bootstrap, beforeWrite, onExp
   const filesEnabled = bootstrap.capabilities?.workspaceFiles === true
   const files = useMemo(() => filesEnabled ? createWorkspaceFiles(createWorkspaceTransport(transport, bootstrap.csrf)) : undefined,
     [filesEnabled, transport, bootstrap.csrf])
+  const gitEnabled = filesEnabled && bootstrap.capabilities?.gitInspect === true
+  const git = useMemo(() => gitEnabled ? createWorkspaceGitView(createGitViewTransport(transport, bootstrap.csrf), onExpired) : undefined,
+    [gitEnabled, transport, bootstrap.csrf, onExpired])
   const [filesOpen, setFilesOpen] = useState(false)
   const workspaceLabel = locale === 'zh-CN' ? '工作区文件' : 'Workspace files'
   const openFiles = files ? () => { setFilesOpen(true); void files.loadProjects() } : undefined
@@ -246,7 +251,7 @@ export default function TextWorkbench({ transport, bootstrap, beforeWrite, onExp
     {settingsOpen && renderSettings(() => setSettingsOpen(false))}
     {browserOpen && browserVisible && <ManualBrowserDialog api={browserOpen.panel} dismiss={() => setBrowserOpen(undefined)} />}
     {files && <WorkspaceFilesPanel open={filesOpen || (!!sid && locatedFilesSid === sid && !locked)}
-      close={() => { setFilesOpen(false); setLocatedFilesSid(undefined) }} controller={files} />}
+      close={() => { setFilesOpen(false); setLocatedFilesSid(undefined) }} controller={files} git={locked ? undefined : git} />}
     {renameSid && renameSid === sid && preferences && preferenceEntry && <SessionRenameDialog key={sid} sid={sid} entry={preferenceEntry}
       store={preferences} disabled={preferenceLocked} close={() => setRenameSid(undefined)} reload={reloadPreferences} />}
   </ChatSurface>
