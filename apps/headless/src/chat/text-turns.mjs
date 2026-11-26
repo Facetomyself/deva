@@ -11,6 +11,10 @@ import {
   preferenceView, readPreferencePatch, resolveTurnModel, splitModel, unsupportedEffort, validPreferenceFields, validatePreferenceModel
 } from './session-preferences.mjs'
 import { ATTACHMENT_META, attachmentIds, createTurnAttachments } from './turn-attachments.mjs'
+import { createSessionWorkspaceDomain } from './session-workspace-domain.mjs'
+import {
+  WORKSPACE_META, readWorkspaceInput, validWorkspaceId, workspaceBinding, workspacePatch, workspaceRevision, workspaceUnavailable
+} from './session-workspace.mjs'
 
 const META = '_devaHeadlessTextTurns'
 const MAX_REQUESTS = 256 // Never evict an accepted ID and later interpret its retry as a fresh request.
@@ -33,7 +37,7 @@ const terminalReasons = new Map([
 ])
 const nativeTextFields = new Set([
   'id', 'title', 'createdAt', 'updatedAt', 'focusRoot', 'personaId', 'model', 'messages', 'notices',
-  'archived', 'effort', META, PREFERENCES_META
+  'archived', 'effort', META, PREFERENCES_META, WORKSPACE_META
 ])
 const complexFields = [
   'compacted', 'members', 'parentId', 'proposals', 'asks', 'summaries', 'delivered', 'background',
@@ -96,14 +100,15 @@ function inputRecord(input, keys, code) {
 }
 
 function createInput(input) {
-  if (input === undefined) return randomUUID()
+  if (input === undefined) return { id: randomUUID(), workspaceId: undefined }
   if (!input || ![Object.prototype, null].includes(Object.getPrototypeOf(input))) throw new HttpError(400, 'invalid_create')
-  if (Reflect.ownKeys(input).length === 0) return randomUUID()
-  const { sessionId } = inputRecord(input, ['sessionId'], 'invalid_create')
-  if (!validSid(sessionId) || !(desktopSid.test(sessionId) || uuidSid.test(sessionId))) {
+  const keys = ['sessionId', 'workspaceId'].filter(key => Object.hasOwn(input, key))
+  const { sessionId, workspaceId } = inputRecord(input, keys, 'invalid_create')
+  if (keys.includes('sessionId') && (!validSid(sessionId) || !(desktopSid.test(sessionId) || uuidSid.test(sessionId)))) {
     throw new HttpError(400, 'invalid_session_id')
   }
-  return sessionId
+  if (keys.includes('workspaceId') && workspaceId !== null && !validWorkspaceId(workspaceId)) throw new HttpError(400, 'invalid_workspace_id')
+  return { id: sessionId ?? randomUUID(), workspaceId }
 }
 
 function sendInput(input, supportsAttachments) {
@@ -185,8 +190,8 @@ function appendNotice(notices, after, status, reason, text) {
 }
 
 /** One instance per data directory and journal. The owner closes the journal after awaiting close().
- * resolveRole only reads trusted library state and returns the current enabled role projection. */
-export function createTextTurns({ dataDir, settings, journal, version, allowedOrigins, resolveRole, uploads, deliveries }) {
+ * resolveRole reads trusted library state. withWorkspace only supplies live pinned catalog grants. */
+export function createTextTurns({ dataDir, settings, journal, version, allowedOrigins, resolveRole, uploads, deliveries, withWorkspace }) {
   if (typeof settings?.getProvider !== 'function' || !['snapshot', 'snapshotAndSubscribe', 'publishChat', 'publishSessionsChanged']
     .every(fn => typeof journal?.[fn] === 'function')) throw new TypeError('Text turns require settings and an event journal')
   if (resolveRole !== undefined && typeof resolveRole !== 'function') throw new TypeError('resolveRole must be a function')
@@ -205,12 +210,25 @@ export function createTextTurns({ dataDir, settings, journal, version, allowedOr
   const hidden = new Set() // A failed create may leave a session only in the core's cache.
   const deliverySessions = deliveries === true ? new Map() : undefined
   let closing
+  const workspace = createSessionWorkspaceDomain({
+    dataDir, withWorkspace, validSid, isClosing: () => Boolean(closing), isActive: sid => active.has(sid),
+    isBlocked: sid => hidden.has(sid) || unconfirmed.has(sid), compatibility, lookupSession, commit, publishSessionsChanged,
+    quarantine: sid => unconfirmed.set(sid, null),
+    checkMedia(s, cached) {
+      const index = attachedIndex(s)
+      if (index && (mediaUnconfirmed.has(cached) || !attachments.available(index))) throw new HttpError(409, 'unsupported_history')
+    }
+  })
 
   function lookupSession(sid) {
     warned = false
     const s = hidden.has(sid) ? undefined : store.getSession(sid)
     if (s && warned) incomplete.add(s)
-    if (s && Object.hasOwn(s, META)) deliverySessions?.set(sid, s)
+    if (s && Object.hasOwn(s, META)) {
+      workspace.note(s)
+      deliverySessions?.set(sid, s)
+      workspace.stable(s)
+    }
     return s
   }
 
@@ -226,22 +244,24 @@ export function createTextTurns({ dataDir, settings, journal, version, allowedOr
   }
 
   function compatibility(s) {
+    const owns = Object.hasOwn(s, META)
+    const binding = workspaceBinding(s)
+    if (workspace.isDrifted(s.id) || binding === false || (!owns && binding)) return 'unsupported'
     if (s[ATTACHMENT_META] !== undefined) {
-      return attachments && !incomplete.has(s) && s.focusRoot == null &&
+      return attachments && !incomplete.has(s) &&
         (s.personaId === undefined || isChatRoleId(s.personaId)) && validLedger(s[META], s.messages.length) && validNotices(s) &&
         validPreferenceFields(s) &&
         Object.keys(s).every(key => s[key] === undefined || key === ATTACHMENT_META || nativeTextFields.has(key)) &&
         attachedIndex(s) ? 'text' : 'unsupported'
     }
     if (classifications.has(s)) return classifications.get(s)
-    const owns = Object.hasOwn(s, META)
     const complex = incomplete.has(s) || complexFields.some(key => {
       const value = s[key]
       return value && (typeof value !== 'object' || Object.keys(value).length)
     }) || s.messages.some(m => plainText(m.content) === null)
     const legacyNotices = !owns && s.notices !== undefined && (!Array.isArray(s.notices) || s.notices.length > 0)
     const kind = complex || legacyNotices || (owns && (
-      !validLedger(s[META], s.messages.length) || !validNotices(s) || !validPreferenceFields(s) || s.focusRoot != null ||
+      !validLedger(s[META], s.messages.length) || !validNotices(s) || !validPreferenceFields(s) ||
       (s.personaId !== undefined && !isChatRoleId(s.personaId)) ||
       Object.keys(s).some(key => s[key] !== undefined && !nativeTextFields.has(key))
     )) ? 'unsupported' : owns ? 'text' : 'legacy_text'
@@ -258,11 +278,13 @@ export function createTextTurns({ dataDir, settings, journal, version, allowedOr
     else if (closing) writeBlockReason = 'chat_closed'
     else if (unconfirmed.has(s.id)) writeBlockReason = 'chat_storage_unconfirmed'
     else if (s[META].requests.length >= MAX_REQUESTS) writeBlockReason = 'session_turn_limit'
+    const binding = kind === 'text' && workspaceBinding(s)
     return {
       id: s.id, title: s.title, createdAt: s.createdAt, updatedAt: s.updatedAt,
       ...(isChatRoleId(s.personaId) ? { personaId: s.personaId } : {}),
       model: kind === 'text' && typeof s.model === 'string' && s.model ? s.model : null,
       ...listPreferenceFields(s),
+      ...(binding && !unconfirmed.has(s.id) ? { workspaceRevision: workspaceRevision(s, binding) } : {}),
       compatibility: kind, writable: writeBlockReason === null, writeBlockReason,
       turnLimit: kind === 'text' ? MAX_REQUESTS : null
     }
@@ -270,29 +292,51 @@ export function createTextTurns({ dataDir, settings, journal, version, allowedOr
 
   function create(input, trustedRole) {
     if (closing) throw closedError()
-    const id = createInput(input)
+    const { id, workspaceId } = createInput(input)
     const role = trustedRole === undefined ? undefined : checkedRole(trustedRole)
     if (role && !resolveRole) throw roleServiceError()
-    if (hidden.has(id)) throw storageError()
-    const existing = lookupSession(id)
-    if (existing) {
-      if (compatibility(existing) !== 'text' || (role && existing.personaId !== role.id)) {
+    function replay() {
+      const native = workspace.nativeSession(id)
+      if (!native) return undefined
+      const s = native.value
+      if (compatibility(s) !== 'text' || (role && s.personaId !== role.id) ||
+          (workspaceId !== undefined && workspaceId !== (workspaceBinding(s)?.originalId ?? null))) {
         throw new HttpError(409, 'session_id_conflict')
       }
-      return summary(existing)
+      if (!native.privateMode) throw storageError()
+      return summary(s)
     }
-    let s
+    const existing = replay()
+    if (existing) return existing
+    let started = false
+    function persist(grant) {
+      started = true
+      try {
+        const s = store.ensureSession(id, role ? { personaId: role.id, model: role.model || undefined } : undefined)
+        s[META] = { version: 1, messageCount: 0, requests: [] }
+        if (grant) Object.assign(s, workspacePatch(id, grant, workspaceId === undefined ? 'role' : 'manual', grant.id))
+        store.saveStrict(id)
+        workspace.afterSave(s, true)
+        workspace.note(s)
+        deliverySessions?.set(id, s)
+        return summary(s)
+      } catch { throw storageError() }
+    }
+    let created
     try {
-      s = store.ensureSession(id, role ? { personaId: role.id, model: role.model || undefined } : undefined)
-      s[META] = { version: 1, messageCount: 0, requests: [] }
-      store.saveStrict(id)
-      deliverySessions?.set(id, s)
-    } catch {
-      hidden.add(id)
-      throw storageError()
+      const wanted = workspaceId === undefined ? trustedRole?.workspaceId : workspaceId
+      if (workspaceId === undefined && wanted != null && wanted !== '' && !validWorkspaceId(wanted)) throw roleServiceError()
+      if (validWorkspaceId(wanted)) {
+        created = workspace.withGrant(wanted, grant => replay() ?? persist(grant))
+        if (!created && workspaceId !== undefined) throw workspaceUnavailable()
+      }
+      created ??= replay() ?? persist()
+    } catch (err) {
+      if (started) { hidden.add(id); throw storageError() }
+      throw err
     }
-    publishSessionsChanged()
-    return summary(s)
+    if (started) publishSessionsChanged()
+    return created
   }
 
   function list() {
@@ -324,6 +368,12 @@ export function createTextTurns({ dataDir, settings, journal, version, allowedOr
     const s = preferencesSession(sid)
     confirmPreferenceStorage(dataDir, s)
     return preferenceView(s, s[META].requests.length)
+  }
+
+  function setWorkspace(sid, input, verifyOwner) {
+    if (!validSid(sid)) throw new HttpError(400, 'invalid_session_id')
+    const patch = readWorkspaceInput(inputRecord(input, ['workspaceId', 'revision'], 'invalid_workspace'))
+    return workspace.setWorkspace(sid, patch, verifyOwner)
   }
 
   function firstUser(s) {
@@ -434,20 +484,28 @@ export function createTextTurns({ dataDir, settings, journal, version, allowedOr
   // On a strict-save failure the main JSON might already be published, with only its index repair failing.
   // Restore the last confirmed in-memory view, block further mutation here, and let the next process read disk.
   function commit(s, patch, terminal = null, verify) {
+    if (!workspace.stable(s)) throw storageError()
     const before = new Map(Object.keys(patch).map(key => [key, Object.getOwnPropertyDescriptor(s, key)]))
-    for (const [key, value] of Object.entries(patch)) {
-      if (value === undefined) delete s[key]
-      else s[key] = value
-    }
-    try { store.saveStrict(s.id); verify?.() }
-    catch {
+    function restore() {
       for (const [key, descriptor] of before) {
         if (descriptor) Object.defineProperty(s, key, descriptor)
         else delete s[key]
       }
+    }
+    for (const [key, value] of Object.entries(patch)) {
+      if (value === undefined) delete s[key]
+      else s[key] = value
+    }
+    try {
+      store.saveStrict(s.id)
+      verify?.()
+      if (s[WORKSPACE_META] && !Object.hasOwn(patch, WORKSPACE_META)) workspace.afterSave(s, false)
+    } catch {
+      restore()
       unconfirmed.set(s.id, terminal)
       throw storageError()
     }
+    return restore
   }
 
   async function roleForTurn(id) {
@@ -672,7 +730,7 @@ export function createTextTurns({ dataDir, settings, journal, version, allowedOr
     }
   })
   return Object.freeze({
-    create, list, attach, snapshot, send, stop, close, getPreferences, patchPreferences,
+    create, list, attach, snapshot, send, stop, close, getPreferences, patchPreferences, getWorkspace: workspace.getWorkspace, setWorkspace,
     attachmentScope, describeCommittedAttachment, readCommittedAttachment, hasBrowserSession, ...records
   })
 }
