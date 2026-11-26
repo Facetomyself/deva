@@ -19,6 +19,10 @@ node --test scripts/workbench/parity.test.mjs
 
 执行 `node scripts/workbench/check-parity.mjs --coverage` 可在校验通过后读到 JSON 报表，按模块区分完整、部分、有待实现、桌面原生四种互斥计数。也可用 `node scripts/workbench/check-parity.mjs --extract` 查看 AST 提取的 JSON（用于人工逐项比对，不改文件）。[门禁](../../../scripts/workbench/check-parity.mjs)对比组名、方法名、IPC 模式/通道和顶层值来源，检查订阅是否返回匹配的清理函数，并校验清单的计数、状态、路径和用例引用。新增、删除、改名、改通道或无法可靠解析的形状均非零退出。仅移动 DTO/类型声明不应影响门禁；方法内部业务、参数/返回类型兼容、授权与端到端行为须由相应业务测试覆盖。
 
+### 导出可复核的 Excel 验收表
+
+在已安装锁定依赖的检出目录里执行 `node scripts/workbench/export-parity-workbook.mjs`。命令按当前 **Git HEAD** 核对真实 preload、清单和每个证据文件：源码与索引或提交内容不一致时退出，避免把工作树里的改动标成已发布版本。输出位于 `test-results/parity-<提交前7位>/`，含总览、逐方法验收、跨功能流程和平台值四张工作表，源码与用例链接固定到完整提交。相同版本和参数可重复执行；已有文件内容不同则原样保留。`--repo owner/repo` 可指定证据链接所属仓库，只有已知 PR 编号时才加 `--pr 15`。仓库的 PR 工作流直接从 PR 的 head commit 生成同一份附件。
+
 ## 如何维护清单
 
 1. 按 `组名.方法名` 补齐对应条目；`kind` 与 `channel` 记录桌面 IPC 事实，并非 Web RPC 名称。`desktop.surface` 区分 `ui`（链接到实际调用入口）、`bridge-only`（现有桥接，未见调用入口）与 `legacy-bridge`（历史桌面桥）。默认 `host` 在组上，特殊注册/推送位置可逐项覆盖。

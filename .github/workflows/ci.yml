@@ -273,6 +273,46 @@ jobs:
         timeout-minutes: 6
         run: node scripts/workbench/container-terminal-viewer.mjs
 
+  parity-workbook:
+    name: Export the capability workbook at the exact PR head
+    if: ${{ github.event_name == 'pull_request' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      ELECTRON_SKIP_BINARY_DOWNLOAD: 1
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          repository: ${{ github.event.pull_request.head.repo.full_name }}
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile --filter @deva/desktop
+      - name: Verify the preload AST and each linked Git blob, then generate the XLSX
+        env:
+          REPORT_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+          REPORT_LINK_REPOSITORY: ${{ github.repository }}
+          REPORT_PR: ${{ github.event.pull_request.number }}
+          REPORT_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -eu
+          test "$(git rev-parse HEAD)" = "$REPORT_SHA"
+          if [ "$REPORT_REPOSITORY" = "$REPORT_LINK_REPOSITORY" ]; then
+            node scripts/workbench/export-parity-workbook.mjs --repo "$REPORT_REPOSITORY" --pr "$REPORT_PR"
+          else
+            node scripts/workbench/export-parity-workbook.mjs --repo "$REPORT_REPOSITORY"
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: workbench-parity-workbook
+          path: test-results/parity-*/Deva-Web-*项能力验收清单.xlsx
+          if-no-files-found: error
+          retention-days: 14
+
   packaged-skills:
     name: Native skill preferences in the production amd64 workbench
     if: ${{ github.event_name == 'pull_request' && github.head_ref == 'feat/web-workbench-skill-library' }}
