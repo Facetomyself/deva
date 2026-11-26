@@ -1,0 +1,13 @@
+# Optional: choose one dedicated directory whose direct children are approved projects.
+# This grants project selection for role profiles and scoped memory, not arbitrary host file I/O.
+services:
+  workbench:
+    environment:
+      DEVA_WORKSPACE_ROOT: /workspaces
+    volumes:
+      - type: bind
+        source: ${DEVA_WORKSPACE_PARENT:?Set the absolute path to your dedicated project collection}
+        target: /workspaces
+        read_only: true
+        bind:
+          create_host_path: false

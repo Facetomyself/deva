@@ -85,7 +85,8 @@ export function IconRail({
   onChatsLeave,
   onOpenSettings,
   chatAlert,
-  unavailable
+  unavailable,
+  library
 }: {
   tab: RailTab
   /** 点亮着的「对话」图标也回调（由调用方切换会话列表的收起 / 展开）。 */
@@ -100,6 +101,7 @@ export function IconRail({
   chatAlert: boolean
   /** Explanation for features that this host does not expose. Omitted on desktop. */
   unavailable?: string
+  library?: { openProfile: () => void; openRoster: () => void }
 }): React.JSX.Element {
   const { t } = useI18n()
   const [profileOpen, setProfileOpen] = useState(false)
@@ -111,10 +113,11 @@ export function IconRail({
       <button
         type="button"
         className="cf-iconrail__me"
-        title={unavailable ?? t('cf.profile.open')}
-        disabled={!!unavailable}
+        title={library ? t('cf.profile.open') : unavailable ?? t('cf.profile.open')}
+        disabled={!!unavailable && !library}
+        data-testid={library ? 'workbench-profile' : undefined}
         aria-label={t('cf.profile.open')}
-        onClick={() => setProfileOpen(true)}
+        onClick={library?.openProfile ?? (() => setProfileOpen(true))}
       >
         <Avatar user size={34} />
       </button>
@@ -137,11 +140,12 @@ export function IconRail({
       </button>
       <button
         className={`cf-navbtn${tab === 'roster' ? ' is-active' : ''}`}
-        title={unavailable ?? t('cf.tabRoster')}
-        disabled={!!unavailable}
+        title={library ? t('cf.tabRoster') : unavailable ?? t('cf.tabRoster')}
+        disabled={!!unavailable && !library}
+        data-testid={library ? 'workbench-roster' : undefined}
         aria-label={t('cf.tabRoster')}
         aria-current={tab === 'roster'}
-        onClick={() => onTab('roster')}
+        onClick={library?.openRoster ?? (() => onTab('roster'))}
       >
         <Users size={20} />
       </button>
@@ -1227,7 +1231,7 @@ export function ThreadRow({
   )
 }
 
-function PersonaRow({
+export function PersonaRow({
   persona,
   active,
   dragging,
@@ -1237,21 +1241,23 @@ function PersonaRow({
   onDragStart,
   onDragOverRow,
   onDropRow,
-  onDragEnd
+  onDragEnd,
+  testId
 }: {
-  persona: Persona
+  persona: NonNullable<Parameters<typeof Avatar>[0]['persona']>
   active: boolean
+  testId?: string
   /** 本行正被拖动（淡化显示）。 */
-  dragging: boolean
+  dragging?: boolean
   /** 本行是当前落点时的插入边（上=before / 下=after），驱动放置指示线；非落点为 null。 */
-  dropEdge: 'before' | 'after' | null
+  dropEdge?: 'before' | 'after' | null
   onClick: () => void
-  onContext: (e: React.MouseEvent) => void
-  onDragStart: () => void
+  onContext?: (e: React.MouseEvent) => void
+  onDragStart?: () => void
   /** 拖动经过本行：据指针落在上/下半区回报插入边。 */
-  onDragOverRow: (edge: 'before' | 'after') => void
-  onDropRow: (edge: 'before' | 'after') => void
-  onDragEnd: () => void
+  onDragOverRow?: (edge: 'before' | 'after') => void
+  onDropRow?: (edge: 'before' | 'after') => void
+  onDragEnd?: () => void
 }): React.JSX.Element {
   // 指针在本行的上半区 → 插到本行之前；下半区 → 之后。
   const edgeAt = (e: React.DragEvent): 'before' | 'after' => {
@@ -1263,24 +1269,25 @@ function PersonaRow({
       className={`cf-prow${active ? ' is-active' : ''}${dragging ? ' is-dragging' : ''}${
         dropEdge ? ` drop-${dropEdge}` : ''
       }`}
-      draggable
+      data-testid={testId}
+      draggable={!!onDragStart}
       onClick={onClick}
       onContextMenu={onContext}
-      onDragStart={(e) => {
+      onDragStart={onDragStart && ((e) => {
         // 需要 dataTransfer 非空，拖拽才成立（内容用不到，仅占位）。
         e.dataTransfer.effectAllowed = 'move'
         e.dataTransfer.setData('text/plain', persona.id)
         onDragStart()
-      }}
-      onDragOver={(e) => {
+      })}
+      onDragOver={onDragOverRow && ((e) => {
         e.preventDefault()
         e.dataTransfer.dropEffect = 'move'
         onDragOverRow(edgeAt(e))
-      }}
-      onDrop={(e) => {
+      })}
+      onDrop={onDropRow && ((e) => {
         e.preventDefault()
         onDropRow(edgeAt(e))
-      }}
+      })}
       onDragEnd={onDragEnd}
     >
       <Avatar persona={persona} size={38} />

@@ -47,7 +47,7 @@ export function sessionRoutes({ auth, policy, version, getConfig, capabilities }
         const { csrf, expiresAt } = auth.describe(cookie)
         const config = appearanceSnapshot(await getConfig())
         json(res, 200, { protocol: 1, version, platform: process.platform, config, csrf, expiresAt,
-          capabilities: { textChat: capabilities?.textChat === true } })
+          capabilities: { textChat: capabilities?.textChat === true, library: capabilities?.library === true } })
         return true
       }
       if (path === '/api/v1/auth/logout') {

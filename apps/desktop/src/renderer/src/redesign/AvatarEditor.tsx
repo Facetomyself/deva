@@ -87,6 +87,9 @@ export function AvatarEditor({
   initialImage,
   title,
   busy,
+  saveDisabled,
+  allowImage = true,
+  webTestId,
   onCancel,
   onDone
 }: {
@@ -98,6 +101,9 @@ export function AvatarEditor({
   title?: string
   /** 「完成」需异步落盘时置 true，禁用两个按钮。 */
   busy?: boolean
+  saveDisabled?: boolean
+  allowImage?: boolean
+  webTestId?: string
   onCancel: () => void
   onDone: (spec: AvatarSpec, image: string) => void
 }): React.JSX.Element {
@@ -106,6 +112,8 @@ export function AvatarEditor({
   const [avatar, setAvatar] = useState<AvatarSpec>(initialSpec)
   const [avatarImage, setAvatarImage] = useState<string>(initialImage)
   const fileRef = useRef<HTMLInputElement | null>(null)
+  const fileSequence = useRef(0)
+  const [decoding, setDecoding] = useState(false)
   // 选图：先在渲染层归一成 256×256 方图再交主进程，故无论用户给多大的原图，落盘都是小图。
   const onPickImage = (e: React.ChangeEvent<HTMLInputElement>): void => {
     const file = e.target.files?.[0]
@@ -115,9 +123,12 @@ export function AvatarEditor({
       toast.show({ title: t('cf.avaImgTooBig'), variant: 'error' })
       return
     }
+    const sequence = ++fileSequence.current
+    setDecoding(true)
     void fileToAvatarDataUri(file)
-      .then(setAvatarImage)
-      .catch(() => toast.show({ title: t('cf.avaImgFailed'), variant: 'error' }))
+      .then((data) => { if (sequence === fileSequence.current) setAvatarImage(data) })
+      .catch(() => { if (sequence === fileSequence.current) toast.show({ title: t('cf.avaImgFailed'), variant: 'error' }) })
+      .finally(() => { if (sequence === fileSequence.current) setDecoding(false) })
   }
   // 各槽位部件缩略图：用中性默认配色一次性生成并 memo（大预览才反映实际配色，故此处不随配色重算）。
   const slotPreviews = useMemo(
@@ -145,9 +156,10 @@ export function AvatarEditor({
       <div className="cf-avaedit">
         <div className="cf-avaedit__side">
           {/* 头像本体就是上传入口：悬停整枚压暗、中间浮出图标，点击直接唤起系统文件选择器。 */}
-          <button
+          {allowImage ? <button
             type="button"
             className="cf-avaedit__preview"
+            disabled={busy}
             aria-label={t('cf.avaImgUpload')}
             onClick={() => fileRef.current?.click()}
           >
@@ -155,10 +167,11 @@ export function AvatarEditor({
             <span className="cf-avaedit__upload" title={t('cf.avaImgUpload')}>
               <ImagePlus size={20} aria-hidden="true" />
             </span>
-          </button>
+          </button> : <div className="cf-avaedit__preview"><PersonaFace seed={seed} spec={avatar} title={title || t('cf.fAvatar')} /></div>}
           {/* 用了自定义图时「随机」无从体现，换成「移除」让用户能退回生成头像。 */}
           {avatarImage ? (
-            <button type="button" className="cf-btn cf-avaedit__rand" onClick={() => setAvatarImage('')}>
+            <button type="button" className="cf-btn cf-avaedit__rand" data-testid={webTestId ? `${webTestId}-remove` : undefined}
+              disabled={busy || decoding} onClick={() => setAvatarImage('')}>
               {t('cf.avaImgRemove')}
             </button>
           ) : (
@@ -167,13 +180,14 @@ export function AvatarEditor({
             </button>
           )}
           {/* 系统文件选择器由 <input type="file"> 唤起：图只在渲染层解码，不经任何 Agent 工具。 */}
-          <input
+          {allowImage && <input
             ref={fileRef}
+            data-testid={webTestId ? `${webTestId}-file` : undefined}
             type="file"
             accept="image/png,image/jpeg,image/webp"
             hidden
             onChange={onPickImage}
-          />
+          />}
         </div>
 
         <div className="cf-avaedit__main">
@@ -257,7 +271,8 @@ export function AvatarEditor({
         <button
           type="button"
           className="cf-btn is-primary"
-          disabled={busy}
+          data-testid={webTestId ? `${webTestId}-save` : undefined}
+          disabled={busy || decoding || saveDisabled}
           onClick={() => onDone(avatar, avatarImage)}
         >
           {t('cf.avaDone')}

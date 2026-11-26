@@ -4,6 +4,8 @@ import type { ChatTurn } from './chat-transport'
 export function chatCopy(locale: Locale) {
   return locale === 'en' ? {
     scope: 'Text chat only. Roles, tasks, bots, tools, attachments and workspace access are desktop features.',
+    libraryScope: 'Text chat only. Tasks, bots, tools, attachments and workspace access are desktop features.',
+    roleUnavailable: 'This role is disabled or unavailable. Enable it in the role roster to continue.',
     unavailable: 'Available in the desktop app', empty: 'Start a conversation',
     loading: 'Loading conversation…', reconnecting: 'Syncing conversation…', missing: 'This conversation is no longer available.',
     readOnly: 'Read-only desktop conversation', unsupported: 'This desktop history contains features the text workbench does not display. Open it in the desktop app.',
@@ -22,6 +24,8 @@ export function chatCopy(locale: Locale) {
     limits: '{turns} turns per conversation · 12 KiB input · 65,536 UTF-16 code units of output', input: 'Message the assistant…', inputLimit: 'Messages can contain up to 12 KiB of UTF-8 text.', previous: 'Show earlier messages'
   } : {
     scope: '仅开放文本对话。角色、任务、机器人、工具、附件和工作区请在桌面应用中使用。',
+    libraryScope: '仅开放文本对话。任务、机器人、工具、附件和工作区请在桌面应用中使用。',
+    roleUnavailable: '这个角色已停用或已不可用。请在花名册中启用后继续。',
     unavailable: '请在桌面应用中使用此功能', empty: '开启一段对话',
     loading: '正在加载对话…', reconnecting: '正在同步对话…', missing: '这段对话已失效。',
     readOnly: '桌面历史 · 只读', unsupported: '这段桌面历史包含文本工作台尚未支持的内容，请在桌面应用中查看。',

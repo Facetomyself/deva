@@ -5,7 +5,7 @@
 | 同源地址 | 行为 |
 |---|---|
 | `GET /api/v1/chats` | 当前所有者的会话列表，含兼容性与可写状态。|
-| `POST /api/v1/chats` | `{}` 创建会话；`{sessionId}` 使用规范 UUID 或受限桌面 `sess_…` ID，重试不重复建会话。|
+| `POST /api/v1/chats` | `{}` 创建通用会话；`{sessionId}` 提供规范 UUID 或受限桌面 `sess_…` ID；可另给 `personaId` 绑定已启用的服务器角色并定格首选模型。客户端只传角色 ID，重复创建不会覆盖身份或触发新的模型请求。|
 | `GET /api/v1/chats/:sid` | 取历史、正在生成的部分文字、回合 ID、起始时间、最近终态和同一水位的游标。|
 | `POST /api/v1/chats/:sid/turns` | `{clientRequestId,text,model}`。新请求在用户消息及幂等记录落盘后回 `202`；相同 ID 与同内容重复调用返回原回合，内容不同时为 `409`。|
 | `POST /api/v1/chats/:sid/stop` | `{turnId}` 只停止目标回合。重建进程不会重发未完成的上游请求。|

@@ -1,84 +1,157 @@
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'fs'
-import { join } from 'path'
+import { randomBytes } from 'node:crypto'
+import {
+  closeSync, constants, fchmodSync, fstatSync, fsyncSync, linkSync, lstatSync, mkdirSync, openSync,
+  readSync, readdirSync, renameSync, rmSync, writeFileSync, type Stats
+} from 'node:fs'
+import { dirname, join } from 'node:path'
+import {
+  AVATAR_MAX_BYTES, AVATAR_MIME_BY_EXT, AVATAR_SLOT, PERSONA_AVATAR_SLOT_DIR,
+  avatarDataUri, avatarImageMime, decodeAvatarDataUri, personaAvatarSlotName, validPersonaAvatarId, type AvatarMime
+} from './avatar-image-core'
 
-/**
- * 自定义头像图片落盘（角色 personas/avatars/<id>.<ext>、用户 profile/avatar.<ext> 共用）。
- *
- * 「多次上传覆盖」= 一个 name 至多一张图：写入前先清掉**所有**扩展名变体，再按来图 MIME 落一个。
- * 格式不固定死 webp，是为了容错——渲染层若在某平台 webp 编码失败可回落 png/jpeg，主进程照收，
- * 读回时按扩展名还原 MIME，不会出现「存的是 png 却谎称 webp」的坏 data URI。
- *
- * name 的合法性（防路径穿越）由调用方负责：这里只拼 `${name}.${ext}`。
- */
-
-const AVATAR_EXT_MIME: Record<string, string> = {
-  webp: 'image/webp',
-  png: 'image/png',
-  jpg: 'image/jpeg'
+interface AvatarLocation {
+  legacyDir: string
+  managedDir: string
+  slotName: string
+  legacyStem: string
+  persona?: true
 }
-const AVATAR_MIME_EXT: Record<string, string> = {
-  'image/webp': 'webp',
-  'image/png': 'png',
-  'image/jpeg': 'jpg',
-  'image/jpg': 'jpg'
-}
-/** 解码后字节上限：渲染层已归一到 256×256（正常 <100KB），此处只兜底异常大图。 */
-const AVATAR_MAX_BYTES = 2 * 1024 * 1024
+interface Entry { path: string; mime: AvatarMime | null; stat: Stats | undefined }
+const readOnly = constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK
+const info = (path: string): Stats | undefined => lstatSync(path, { throwIfNoEntry: false })
+const sameInode = (a: Stats, b: Stats): boolean => a.ino === b.ino && a.dev === b.dev
+const sameFile = (a: Stats | undefined, b: Stats | undefined): boolean =>
+  !a || !b ? a === b : sameInode(a, b) && a.size === b.size && a.mtimeMs === b.mtimeMs && a.ctimeMs === b.ctimeMs
 
-/** 该 name 现存的头像图片路径（按扩展名优先序取首个命中）；没有则空串。 */
-function avatarImagePath(dir: string, name: string): string {
-  for (const ext of Object.keys(AVATAR_EXT_MIME)) {
-    const p = join(dir, `${name}.${ext}`)
-    if (existsSync(p)) return p
-  }
-  return ''
+function checkDirectory(path: string): Stats | undefined {
+  const stat = info(path)
+  if (stat && !stat.isDirectory()) throw new Error('Invalid avatar directory')
+  return stat
 }
 
-/** 读成 data URI 交付渲染层（无图 / 读失败 → 空串，回落生成头像）。 */
-export function readAvatarImage(dir: string, name: string): string {
-  const p = avatarImagePath(dir, name)
-  if (!p) return ''
-  const ext = p.slice(p.lastIndexOf('.') + 1)
-  const mime = AVATAR_EXT_MIME[ext]
-  if (!mime) return ''
+function entries(location: AvatarLocation): Entry[] {
+  const { legacyDir, managedDir, slotName, legacyStem, persona } = location
+  if (persona) checkDirectory(dirname(legacyDir))
+  const legacy = checkDirectory(legacyDir)
+  const managed = legacy && checkDirectory(managedDir)
+  // Require the literal legacy spelling even on a case-insensitive Desktop volume.
+  const exactNames = persona && legacy ? new Set(readdirSync(legacyDir)) : null
+  const path = join(managedDir, slotName)
+  return [{ path, mime: null, stat: managed ? info(path) : undefined },
+    ...Object.entries(AVATAR_MIME_BY_EXT).map(([extension, mime]) => {
+      const name = `${legacyStem}.${extension}`
+      const path = join(legacyDir, name)
+      return { path, mime, stat: legacy && (!exactNames || exactNames.has(name)) ? info(path) : undefined }
+    })]
+}
+
+function fileSafe(entry: Entry): boolean {
+  const { mime, stat } = entry
+  return !stat || (stat.isFile() && stat.nlink === 1 && stat.size <= AVATAR_MAX_BYTES && (!mime || stat.size > 0))
+}
+
+function readAvatar(location: AvatarLocation): string {
   try {
-    return `data:${mime};base64,${readFileSync(p).toString('base64')}`
-  } catch {
-    return ''
-  }
-}
-
-/** 删掉该 name 的所有头像图片变体（清除 / 覆盖前 / 删角色时调用）。 */
-export function clearAvatarImage(dir: string, name: string): void {
-  for (const ext of Object.keys(AVATAR_EXT_MIME)) {
+    const targets = entries(location)
+    if (!targets.every(fileSafe)) return ''
+    const entry = targets.find(item => item.stat)
+    if (!entry?.stat?.size) return '' // Canonical tombstone suppresses legacy fallback.
+    const fd = openSync(entry.path, readOnly)
     try {
-      rmSync(join(dir, `${name}.${ext}`), { force: true })
-    } catch {
-      /* 忽略：文件可能本就不存在 */
-    }
-  }
+      const before = fstatSync(fd)
+      if (!sameFile(before, entry.stat)) return ''
+      const bytes = Buffer.alloc(before.size + 1)
+      let offset = 0
+      while (offset < bytes.length) {
+        const count = readSync(fd, bytes, offset, bytes.length - offset, offset)
+        if (!count) break
+        offset += count
+      }
+      if (offset !== before.size || !sameFile(before, fstatSync(fd)) || !sameFile(before, info(entry.path))) return ''
+      const image = bytes.subarray(0, offset)
+      const mime = avatarImageMime(image)
+      return mime && (!entry.mime || mime === entry.mime) ? avatarDataUri(image, mime) : ''
+    } finally { closeSync(fd) }
+  } catch { return '' }
 }
 
-/** 写入自定义头像（data URI）。成功返回读回的 data URI；参数非法 / 写失败返回空串。 */
-export function writeAvatarImage(dir: string, name: string, dataUri: string): string {
-  if (typeof dataUri !== 'string') return ''
-  const m = /^data:([a-z]+\/[a-z0-9.+-]+);base64,([\s\S]+)$/i.exec(dataUri.trim())
-  if (!m) return ''
-  const ext = AVATAR_MIME_EXT[m[1].toLowerCase()]
-  if (!ext) return ''
-  let buf: Buffer
-  try {
-    buf = Buffer.from(m[2], 'base64')
-  } catch {
-    return ''
-  }
-  if (!buf.length || buf.length > AVATAR_MAX_BYTES) return ''
-  try {
-    mkdirSync(dir, { recursive: true })
-    clearAvatarImage(dir, name) // 先清干净，保证一个 name 只剩一张（换格式重传也不留旧图）
-    writeFileSync(join(dir, `${name}.${ext}`), buf)
-  } catch {
-    return ''
-  }
-  return readAvatarImage(dir, name)
+function ensureDirectories(location: AvatarLocation): void {
+  const { legacyDir, managedDir, persona } = location
+  if (persona && !checkDirectory(dirname(legacyDir))) mkdirSync(dirname(legacyDir), { mode: 0o700 })
+  if (!checkDirectory(legacyDir)) mkdirSync(legacyDir, { mode: 0o700 })
+  if (managedDir !== legacyDir && !checkDirectory(managedDir)) mkdirSync(managedDir, { mode: 0o700 })
 }
+
+function syncDirectory(path: string): boolean {
+  try {
+    const fd = openSync(path, constants.O_RDONLY)
+    try { fsyncSync(fd) } finally { closeSync(fd) }
+    return true
+  } catch { return process.platform === 'win32' }
+}
+
+function writeAvatar(location: AvatarLocation, dataUri: string): string {
+  const image = dataUri === '' ? null : decodeAvatarDataUri(dataUri)
+  if (!image && dataUri !== '') return ''
+  let temporary: string | undefined
+  let ownTemp: Stats | undefined
+  try {
+    const original = entries(location)
+    const [canonical, ...legacy] = original
+    if (!original.every(fileSafe)) return ''
+    if (!image && !canonical.stat?.size && legacy.every(entry => !entry.stat)) return ''
+    ensureDirectories(location)
+    const managed = checkDirectory(location.managedDir)
+    if (!managed || (managed.mode & 0o300) !== 0o300 || (canonical.stat && (canonical.stat.mode & 0o200) === 0)) return ''
+    const path = join(location.managedDir, `.avatar.${randomBytes(16).toString('hex')}.tmp`)
+    const fd = openSync(path, 'wx', 0o600)
+    temporary = path
+    try {
+      ownTemp = fstatSync(fd)
+      fchmodSync(fd, 0o600)
+      writeFileSync(fd, image?.bytes ?? Buffer.alloc(0))
+      fsyncSync(fd)
+      ownTemp = fstatSync(fd)
+    } finally { closeSync(fd) }
+    const current = entries(location)
+    const directory = checkDirectory(location.managedDir)
+    if (!directory || !sameInode(directory, managed) || !sameFile(ownTemp, info(path)) ||
+        original.some((entry, index) => !sameFile(entry.stat, current[index].stat))) return ''
+    if (canonical.stat) {
+      renameSync(path, canonical.path)
+      temporary = undefined
+    } else {
+      linkSync(path, canonical.path)
+      if (removeSnapshot(path, ownTemp)) temporary = undefined
+    }
+    // The durable slot is authoritative even if discarding a legacy extension fails.
+    if (syncDirectory(location.managedDir)) {
+      for (const entry of legacy) removeSnapshot(entry.path, entry.stat, sameFile)
+      if (location.legacyDir !== location.managedDir) syncDirectory(location.legacyDir)
+    }
+    return image ? avatarDataUri(image.bytes, image.mime) : ''
+  } catch { return '' }
+  finally { if (temporary) removeSnapshot(temporary, ownTemp) }
+}
+
+function removeSnapshot(path: string, before: Stats | undefined,
+  compare: (a: Stats, b: Stats) => boolean = sameInode): boolean {
+  try {
+    if (!before) return false
+    const current = info(path)
+    if (current && compare(before, current)) rmSync(path)
+    return true
+  } catch { return false }
+}
+
+const userLocation = (dir: string): AvatarLocation => ({ legacyDir: dir, managedDir: dir, slotName: AVATAR_SLOT, legacyStem: AVATAR_SLOT })
+const personaLocation = (dir: string, id: string): AvatarLocation => ({ legacyDir: dir, managedDir: join(dir, PERSONA_AVATAR_SLOT_DIR),
+  slotName: personaAvatarSlotName(id), legacyStem: id, persona: true })
+
+/** Desktop IPC retains its empty-string fallback; layout/codec match the Web adapter. */
+export const readProfileAvatarImage = (dir: string): string => readAvatar(userLocation(dir))
+export const writeProfileAvatarImage = (dir: string, dataUri: string): string => writeAvatar(userLocation(dir), dataUri)
+export const readAvatarImage = (dir: string, id: string): string => validPersonaAvatarId(id) ? readAvatar(personaLocation(dir, id)) : ''
+export const writeAvatarImage = (dir: string, id: string, dataUri: string): string =>
+  validPersonaAvatarId(id) ? writeAvatar(personaLocation(dir, id), dataUri) : ''
+export function clearAvatarImage(dir: string, id: string): void { writeAvatarImage(dir, id, '') }

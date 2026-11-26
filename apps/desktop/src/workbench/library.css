@@ -1,0 +1,30 @@
+/* Workbench-only additions to the shared desktop profile, editor and roster surfaces. */
+.wb-library__modal { max-height: min(82dvh, 720px); }
+.wb-library__editor { min-height: 0; overflow-y: auto; }
+.wb-library__field { display: grid; gap: 5px; color: var(--fg-muted); font-size: 13px; }
+.wb-library__field > .cf-input { width: 100%; min-width: 0; }
+.wb-library__hint, .wb-library__status { margin: 0; color: var(--fg-muted); font-size: 13px; line-height: 1.45; }
+.wb-library__status { padding: 8px 16px; }
+.wb-library__issue { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; color: var(--danger, #c74f55); padding: 8px 16px; font-size: 13px; }
+.wb-library__manual { flex-basis: 100%; text-align: start; }
+.wb-chat .cf-me__actions:has(.wb-library__manual) { flex-wrap: wrap; }
+.wb-library__actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.wb-library__roster { display: grid; grid-template-columns: minmax(115px, 1fr) minmax(0, 2.2fr); min-height: 240px; overflow: auto; }
+.wb-library__roles { min-width: 0; align-self: stretch; border-inline-end: 1px solid var(--border); padding: 12px 8px; }
+.wb-library__roles > .cf-btn { margin: 0 0 8px; width: 100%; }
+.wb-library__roles > .cf-prow { width: 100%; }
+.wb-library__role-body { min-width: 0; display: flex; flex-direction: column; gap: 12px; padding: 12px; }
+.wb-library__role-body .cf-phead__name { margin: 0; overflow-wrap: anywhere; }
+.wb-library__role-body .cf-phead__spec { white-space: normal; overflow-wrap: anywhere; }
+.wb-library__memory { display: flex; min-height: 0; flex-direction: column; gap: 8px; }
+.wb-library__memory .cf-memdetail { min-height: 235px; padding-inline: 0; }
+.wb-library__modal > .cf-memdetail { min-height: 260px; }
+.wb-library__modal .cf-promptpage { min-height: 280px; }
+.wb-chat__persona { display: inline-flex; align-items: center; gap: 6px; color: var(--fg-muted); font-size: 12px; overflow-wrap: anywhere; }
+@media (max-width: 560px) {
+  .wb-library__roster { grid-template-columns: 1fr; }
+  .wb-library__roles { display: flex; gap: 4px; overflow-x: auto; border-inline-end: 0; border-block-end: 1px solid var(--border); }
+  .wb-library__roles > .cf-btn { margin: 0; flex: 0 0 auto; width: auto; }
+  .wb-library__roles > .cf-prow { width: auto; min-width: 108px; }
+}
+EOF

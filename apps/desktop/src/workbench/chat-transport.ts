@@ -5,6 +5,16 @@ const record = (x: unknown): x is Dictionary => typeof x === 'object' && x !== n
 const nullableString = (x: unknown): x is string | null => x === null || typeof x === 'string'
 const time = (x: unknown): x is number => typeof x === 'number' && Number.isFinite(x) && x >= 0
 const id = (x: unknown): x is string => typeof x === 'string' && /^[A-Za-z0-9_-]{1,128}$/.test(x)
+const rolePattern = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/u
+const reservedRoleIds = new Set(['constructor', 'prototype', '__proto__', ...Object.getOwnPropertyNames(Object.prototype).map((key) => key.toLowerCase())])
+
+// Desktop role IDs are case-sensitive, and existing names can contain dots and underscores.
+// Match the server's role ID grammar independently of the conversation ID grammar.
+export function isRoleId(value: unknown): value is string {
+  return typeof value === 'string' && rolePattern.exec(value)?.[0] === value && !value.endsWith('.') && !value.includes('..') &&
+    !/^(?:con|prn|aux|nul|com[0-9]|lpt[0-9])(?:\.|$)/iu.test(value) && !reservedRoleIds.has(value.toLowerCase()) &&
+    (value === 'general' || value.toLowerCase() !== 'general')
+}
 
 export const MAX_TEXT_INPUT = 12 * 1024
 export const inputBytes = (text: string): number => new TextEncoder().encode(text.trim()).byteLength
@@ -14,6 +24,7 @@ export interface ChatSummary {
   title: string
   updatedAt: number
   model: string | null
+  personaId?: string
   compatibility: 'text' | 'legacy_text' | 'unsupported'
   writable: boolean
 }
@@ -40,6 +51,7 @@ export interface TurnRequest { clientRequestId: string; text: string; model: str
 
 function summary(value: unknown): value is Omit<ChatSummary, 'updatedAt'> {
   return record(value) && id(value.id) && typeof value.title === 'string' && nullableString(value.model) &&
+    (value.personaId === undefined || isRoleId(value.personaId)) &&
     (value.compatibility === 'text' || value.compatibility === 'legacy_text' || value.compatibility === 'unsupported') &&
     typeof value.writable === 'boolean'
 }
@@ -108,9 +120,11 @@ export function createChatTransport(transport: Transport, csrf: string) {
       if (!record(result) || !Array.isArray(result.sessions) || !result.sessions.every(listEntry)) throw new Error('Invalid chat list')
       return result.sessions
     },
-    async create(sessionId: string): Promise<ChatSummary> {
-      const result = await transport.request('/chats', 'POST', { sessionId }, csrf)
-      if (!record(result) || !listEntry(result.session) || result.session.id !== sessionId) throw new Error('Invalid created chat')
+    async create(sessionId: string, personaId?: string): Promise<ChatSummary> {
+      if (personaId !== undefined && !isRoleId(personaId)) throw new Error('Invalid role id')
+      const result = await transport.request('/chats', 'POST', { sessionId, ...(personaId ? { personaId } : {}) }, csrf)
+      if (!record(result) || !listEntry(result.session) || result.session.id !== sessionId ||
+          (personaId !== undefined && result.session.personaId !== personaId)) throw new Error('Invalid created chat')
       return result.session
     },
     async read(sid: string): Promise<ChatSnapshot> {

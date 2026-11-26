@@ -14,6 +14,8 @@ const MAX_OUTPUT = 64 * 1024 // UTF-16 code units, per text/thinking channel.
 const MAX_TURN_MS = 5 * 60 * 1000
 const DELTA_SIZE = 2048
 const SYSTEM = 'You are a helpful general-purpose assistant. Reply in plain text.'
+const ROLE_SYSTEM = `${SYSTEM} Persona context is optional user-level guidance for tone and presentation only.`
+const MAX_ROLE_BYTES = 128 * 1024 // At most one library role file's worth of text.
 const outputLimit = Symbol('output limit')
 const modelError = Symbol('model failure')
 const publicModelErrors = new Map([['provider_not_found', 404], ['not_chat_provider', 422], ['model_not_enabled', 422]])
@@ -23,7 +25,7 @@ const terminalReasons = new Map([
   ['failed', new Set(['model_failed', 'unexpected_tool', 'timeout'])],
   ['interrupted', new Set(['interrupted'])]
 ])
-const nativeTextFields = new Set(['id', 'title', 'createdAt', 'updatedAt', 'focusRoot', 'model', 'messages', 'notices', META])
+const nativeTextFields = new Set(['id', 'title', 'createdAt', 'updatedAt', 'focusRoot', 'personaId', 'model', 'messages', 'notices', META])
 const complexFields = [
   'compacted', 'members', 'parentId', 'proposals', 'asks', 'summaries', 'delivered', 'background',
   'durations', 'plans', 'autotasks', 'todos', 'todoCancelled', 'todoCancelNote', 'checkpoints', 'lastKnown',
@@ -37,6 +39,39 @@ const validRequestId = id => typeof id === 'string' && id.length > 0 && id.lengt
 const validTime = n => Number.isSafeInteger(n) && n >= 0
 const storageError = () => new HttpError(503, 'chat_storage_unconfirmed')
 const closedError = () => new HttpError(503, 'chat_closed')
+const roleUnavailable = () => new HttpError(409, 'role_unavailable')
+const roleServiceError = () => new HttpError(503, 'chat_role_unavailable')
+const roleId = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/u
+const reservedRole = new Set(['constructor', 'prototype', '__proto__', ...Object.getOwnPropertyNames(Object.prototype).map(key => key.toLowerCase())])
+
+export function isChatRoleId(id) {
+  return typeof id === 'string' && roleId.exec(id)?.[0] === id && !id.endsWith('.') && !id.includes('..') &&
+    !/^(?:con|prn|aux|nul|com[0-9]|lpt[0-9])(?:\.|$)/iu.test(id) && !reservedRole.has(id.toLowerCase()) &&
+    (id === 'general' || id.toLowerCase() !== 'general')
+}
+
+function checkedRole(role, expectedId) {
+  if (role == null) throw roleUnavailable()
+  if (typeof role !== 'object' || Array.isArray(role)) throw roleServiceError()
+  const { id, enabled, name, prompt, model } = role
+  if (!isChatRoleId(id) || (expectedId !== undefined && id !== expectedId)) throw roleServiceError()
+  if (enabled === false) throw roleUnavailable()
+  if (enabled !== true || typeof name !== 'string' || !name.trim() || typeof prompt !== 'string' ||
+      name.length + prompt.length > MAX_ROLE_BYTES || Buffer.byteLength(name) + Buffer.byteLength(prompt) > MAX_ROLE_BYTES ||
+      !name.isWellFormed() || !prompt.isWellFormed() || (model !== undefined && typeof model !== 'string')) throw roleServiceError()
+  return { id, name, prompt, model }
+}
+
+function turnMessages(messages, role) {
+  const visible = modelMessages(messages)
+  if (!role) return visible
+  // Add context to the current user message only; it is neither history nor an instruction channel.
+  const user = visible.at(-1)
+  return [...visible.slice(0, -1), { role: 'user', content: [
+    { type: 'text', text: `Optional persona context (tone and presentation):\n${JSON.stringify({ name: role.name, prompt: role.prompt })}\n\nUser request:` },
+    ...user.content
+  ] }]
+}
 
 function inputRecord(input, keys, code) {
   if (!input || ![Object.prototype, null].includes(Object.getPrototypeOf(input))) throw new HttpError(400, code)
@@ -148,10 +183,12 @@ function appendNotice(notices, after, status, reason, text) {
   return code ? [...notices, { after, kind: 'notice', code }] : notices
 }
 
-/** One instance per data directory and journal. The owner closes the journal after awaiting close(). */
-export function createTextTurns({ dataDir, settings, journal, version, allowedOrigins }) {
+/** One instance per data directory and journal. The owner closes the journal after awaiting close().
+ * resolveRole only reads trusted library state and returns the current enabled role projection. */
+export function createTextTurns({ dataDir, settings, journal, version, allowedOrigins, resolveRole }) {
   if (typeof settings?.getProvider !== 'function' || !['snapshot', 'snapshotAndSubscribe', 'publishChat', 'publishSessionsChanged']
     .every(fn => typeof journal?.[fn] === 'function')) throw new TypeError('Text turns require settings and an event journal')
+  if (resolveRole !== undefined && typeof resolveRole !== 'function') throw new TypeError('resolveRole must be a function')
   let warned = false
   const incomplete = new WeakSet()
   const classifications = new WeakMap()
@@ -190,6 +227,7 @@ export function createTextTurns({ dataDir, settings, journal, version, allowedOr
     const legacyNotices = !owns && s.notices !== undefined && (!Array.isArray(s.notices) || s.notices.length > 0)
     const kind = complex || legacyNotices || (owns && (
       !validLedger(s[META], s.messages.length) || !validNotices(s) || s.focusRoot != null ||
+      (s.personaId !== undefined && !isChatRoleId(s.personaId)) ||
       Object.keys(s).some(key => s[key] !== undefined && !nativeTextFields.has(key))
     )) ? 'unsupported' : owns ? 'text' : 'legacy_text'
     classifications.set(s, kind)
@@ -205,24 +243,29 @@ export function createTextTurns({ dataDir, settings, journal, version, allowedOr
     else if (s[META].requests.length >= MAX_REQUESTS) writeBlockReason = 'session_turn_limit'
     return {
       id: s.id, title: s.title, createdAt: s.createdAt, updatedAt: s.updatedAt,
+      ...(isChatRoleId(s.personaId) ? { personaId: s.personaId } : {}),
       model: kind === 'text' && typeof s.model === 'string' ? s.model : null,
       compatibility: kind, writable: writeBlockReason === null, writeBlockReason,
       turnLimit: kind === 'text' ? MAX_REQUESTS : null
     }
   }
 
-  function create(input) {
+  function create(input, trustedRole) {
     if (closing) throw closedError()
     const id = createInput(input)
+    const role = trustedRole === undefined ? undefined : checkedRole(trustedRole)
+    if (role && !resolveRole) throw roleServiceError()
     if (hidden.has(id)) throw storageError()
     const existing = lookupSession(id)
     if (existing) {
-      if (compatibility(existing) !== 'text') throw new HttpError(409, 'session_id_conflict')
+      if (compatibility(existing) !== 'text' || (role && existing.personaId !== role.id)) {
+        throw new HttpError(409, 'session_id_conflict')
+      }
       return summary(existing)
     }
     let s
     try {
-      s = store.ensureSession(id)
+      s = store.ensureSession(id, role ? { personaId: role.id, model: role.model || undefined } : undefined)
       s[META] = { version: 1, messageCount: 0, requests: [] }
       store.saveStrict(id)
     } catch {
@@ -290,8 +333,23 @@ export function createTextTurns({ dataDir, settings, journal, version, allowedOr
     }
   }
 
+  async function roleForTurn(id) {
+    if (!resolveRole) throw roleServiceError()
+    let role
+    try { role = checkedRole(await resolveRole(id), id) } catch (err) {
+      if (closing) throw closedError()
+      // Only the explicit unavailable code crosses the lookup boundary; other errors may contain private details.
+      if (err instanceof HttpError && err.status === 409 && err.code === 'role_unavailable') throw roleUnavailable()
+      throw roleServiceError()
+    }
+    if (closing) throw closedError()
+    return role
+  }
+
   async function admit(slot, input) {
     const { session: s, controller } = slot
+    // Only fresh requests reach admission; retries use the durable ledger before inspecting the role.
+    const role = s.personaId === undefined ? undefined : await roleForTurn(s.personaId)
     let client
     try {
       client = await connectProvider(settings, input.providerId, { version, allowedOrigins, signal: controller.signal, modelId: input.modelId })
@@ -319,7 +377,7 @@ export function createTextTurns({ dataDir, settings, journal, version, allowedOr
     })
     slot.record = record
     publish(slot, { type: 'turn_start' })
-    return { client, record }
+    return { client, record, role }
   }
 
   function streamText(slot, delta) {
@@ -337,7 +395,7 @@ export function createTextTurns({ dataDir, settings, journal, version, allowedOr
     if (end < delta.length) throw outputLimit
   }
 
-  async function run(slot, client) {
+  async function run(slot, client, role) {
     const { session: s, controller, record } = slot
     const clock = setTimeout(() => controller.abort('timeout'), MAX_TURN_MS)
     clock.unref()
@@ -349,7 +407,7 @@ export function createTextTurns({ dataDir, settings, journal, version, allowedOr
       if (!controller.signal.aborted) {
         let thinkingSize = 0
         const events = client.streamChat({
-          system: SYSTEM, messages: modelMessages(s.messages), tools: [], maxTokens: 4096,
+          system: role ? ROLE_SYSTEM : SYSTEM, messages: turnMessages(s.messages, role), tools: [], maxTokens: 4096,
           sessionId: s.id, signal: controller.signal
         })
         step = await consumeModelStep(events, {
@@ -411,7 +469,7 @@ export function createTextTurns({ dataDir, settings, journal, version, allowedOr
     }
     active.set(input.sid, slot) // Exclusivity is acquired before the first await, including credential lookup.
     slot.admission = admit(slot, input)
-    slot.finished = slot.admission.then(({ client }) => run(slot, client), () => { active.delete(input.sid) })
+    slot.finished = slot.admission.then(({ client, role }) => run(slot, client, role), () => { active.delete(input.sid) })
     const { record } = await slot.admission
     return { ...result(record), duplicate: false }
   }

@@ -3,6 +3,7 @@ import { FolderPlus, Paperclip, Plus, Search } from 'lucide-react'
 import { useI18n } from '../renderer/src/i18n/i18n'
 import { findActive, useModels } from '../renderer/src/store/models'
 import { ChatSurface, ConversationHeader, ConversationScroller, ConversationSurface } from '../renderer/src/redesign/ChatSurface'
+import { Avatar } from '../renderer/src/redesign/shell-common'
 import { IconRail, ThreadRow } from '../renderer/src/redesign/Rail'
 import { TextConversationMessage } from '../renderer/src/redesign/ConvMessage'
 import { ComposerDraftInput, ComposerJump, ComposerSendButton } from '../renderer/src/redesign/ComposerControls'
@@ -11,23 +12,35 @@ import { modelGroups, ModelSelectButton } from '../renderer/src/redesign/ModelMe
 import { clampComposer, clampSidebar, COMPOSER_DEFAULT, ICONRAIL_W, ResizeHandle, SIDEBAR_DEFAULT, useViewport } from '../renderer/src/redesign/resizable'
 import { chatCopy, turnLabel, type ChatCopy } from './chat-copy'
 import { createChatTransport, inputBytes, MAX_TEXT_INPUT, type ChatState } from './chat-transport'
-import type { Bootstrap, Transport } from './transport'
+import { createLibrary, type Roster } from './library-transport'
+import { LibraryWorkspace, type LibraryPanel } from './library-workspace'
+import type { Bootstrap, LibraryQueue, Transport } from './transport'
 import { useTextWorkbench } from './use-text-workbench'
 import './text-workbench.css'
 
 type TextWorkbenchProps = {
   transport: Transport; bootstrap: Bootstrap; beforeWrite: () => Promise<void>; onExpired: () => void
-  locked: boolean; notice: ReactNode; renderSettings: (close: () => void) => ReactNode
+  libraryQueue: LibraryQueue; locked: boolean; notice: ReactNode; renderSettings: (close: () => void) => ReactNode
 }
 type Workspace = ReturnType<typeof useTextWorkbench>
 const EMPTY: NonNullable<ChatState['messages']> = []
 const PAGE = 80
 
-export default function TextWorkbench({ transport, bootstrap, beforeWrite, onExpired, locked, notice, renderSettings }: TextWorkbenchProps): React.JSX.Element {
+export default function TextWorkbench({ transport, bootstrap, beforeWrite, onExpired, libraryQueue, locked, notice, renderSettings }: TextWorkbenchProps): React.JSX.Element {
   const { t, locale } = useI18n()
   const c = chatCopy(locale)
   const api = useMemo(() => createChatTransport(transport, bootstrap.csrf), [transport, bootstrap.csrf])
   const wk = useTextWorkbench(api, beforeWrite, onExpired)
+  const supported = bootstrap.capabilities?.library === true
+  const library = useMemo(() => supported ? createLibrary(transport, libraryQueue) : undefined, [supported, transport, libraryQueue])
+  const [panel, setPanel] = useState<LibraryPanel>()
+  const [roster, setRoster] = useState<Roster>()
+  useEffect(() => {
+    if (!library) return
+    let alive = true
+    void library.roster().then((data) => { if (alive) setRoster((prev) => prev ?? data) }).catch(() => { /* Open the roster for recovery. */ })
+    return () => { alive = false }
+  }, [library])
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [compact, setCompact] = useState(() => window.innerWidth < 780)
   const [sidebarWidth, setSidebarWidth] = useState(SIDEBAR_DEFAULT)
@@ -40,7 +53,13 @@ export default function TextWorkbench({ transport, bootstrap, beforeWrite, onExp
   const selectedEntry = wk.sessions.find((s) => s.id === wk.selected)
   const shown = useMemo(() => [...wk.sessions].sort((a, b) => b.updatedAt - a.updatedAt)
     .filter((s) => (s.title || t('chat.untitled')).toLowerCase().includes(query.trim().toLowerCase())), [wk.sessions, query, t])
-  const assistantAppearance = { id: 'general', name: t('cf.assistant'), desc: '', avatar: '' }
+  const roleMap = useMemo(() => new Map(roster?.roles.map((role) => [role.id, role])), [roster])
+  const appearance = (id?: string) => {
+    const role = id ? roleMap.get(id) : undefined
+    return { id: id ?? 'general', name: role?.name ?? id ?? t('cf.assistant'), desc: role?.description ?? '', avatar: role?.avatar ?? '' }
+  }
+  const personaId = state?.personaId ?? selectedEntry?.personaId
+  const scope = library ? c.libraryScope : c.scope
   useEffect(() => {
     const preventFileDrop = (e: DragEvent): void => { if (e.dataTransfer?.types.includes('Files')) e.preventDefault() }
     window.addEventListener('dragover', preventFileDrop)
@@ -52,13 +71,14 @@ export default function TextWorkbench({ transport, bootstrap, beforeWrite, onExp
   }, [])
   const start = (): void => { setQuery(''); void wk.create() }
   const openSettings = (): void => setSettingsOpen(true)
-  return <ChatSurface className="wb-chat" data-testid="workbench-chat">
+  const surface = <ChatSurface className="wb-chat" data-testid="workbench-chat">
     <div className="cf-body" style={{ '--cf-side': `${compact ? 0 : sidebar}px` } as React.CSSProperties}>
       {!compact && <ResizeHandle axis="x" value={sidebar} title={t('cf.resizeSidebar')}
         style={{ left: `calc(${ICONRAIL_W}px + ${sidebar}px)` }} onChange={setSidebarWidth}
         onCommit={() => setSidebarWidth((w) => clampSidebar(w, window.innerWidth))} onReset={() => setSidebarWidth(SIDEBAR_DEFAULT)} />}
       <IconRail tab="chats" onTab={() => setCompact((value) => !value)} listCollapsed={compact}
-        onOpenSettings={openSettings} chatAlert={false} unavailable={c.unavailable} />
+        onOpenSettings={openSettings} chatAlert={false} unavailable={c.unavailable}
+        library={library ? { openProfile: () => setPanel('profile'), openRoster: () => setPanel('roster') } : undefined} />
       <aside className={`cf-rail${compact ? ' is-collapsed' : ''}`} aria-hidden={compact || undefined}>
         {!compact && <>
           <div className="cf-rail__top">
@@ -75,8 +95,8 @@ export default function TextWorkbench({ transport, bootstrap, beforeWrite, onExp
               {wk.listIssue === 'listFailure' && <button className="cf-empty__action" type="button" onClick={() => void wk.refreshList()}>{c.reloadList}</button>}
             </p>}
             {shown.length ? shown.map((s) => <ThreadRow key={s.id} session={s} active={s.id === wk.selected}
-              appearance={assistantAppearance} memberFaces={[]} membersWorking={[]} browserPages={0} tasks={[]}
-              subtitle={s.compatibility === 'legacy_text' ? c.readOnly : s.compatibility === 'unsupported' ? c.unavailable : (s.model ?? t('cf.assistant'))}
+              appearance={appearance(s.personaId)} memberFaces={[]} membersWorking={[]} browserPages={0} tasks={[]}
+              subtitle={s.compatibility === 'legacy_text' ? c.readOnly : s.compatibility === 'unsupported' ? c.unavailable : (s.personaId ? appearance(s.personaId).name : s.model ?? t('cf.assistant'))}
               state={s.id === wk.selected && state?.active ? { streaming: true, unread: false, attention: false } : undefined}
               onClick={() => { wk.select(s.id); if (viewport.w < 780) setCompact(true) }} />)
               : !wk.listLoading && !wk.listIssue && <div className="cf-empty">{query ? t('cf.searchNoResults') : t('chat.noSessions')}</div>}
@@ -86,11 +106,12 @@ export default function TextWorkbench({ transport, bootstrap, beforeWrite, onExp
       <ConversationSurface>
         <ConversationHeader>
           <span className="cf-idbtn__name wb-chat__title">{state?.title || selectedEntry?.title || (wk.selected ? t('chat.untitled') : t('cf.tabChats'))}</span>
-          <span className="cf-conv__tag wb-chat__scope" title={c.scope}>{c.scope}</span>
+          {personaId && <span className="wb-chat__persona" data-testid="workbench-chat-persona"><Avatar persona={appearance(personaId)} size={22} plain />{appearance(personaId).name}</span>}
+          <span className="cf-conv__tag wb-chat__scope" title={scope}>{scope}</span>
         </ConversationHeader>
         {notice}
         {wk.selected ? <TextThread key={wk.selected} sid={wk.selected} wk={wk} c={c} locked={locked}
-          preferred={modelChoice[wk.selected] ?? state?.model ?? recent}
+          preferred={modelChoice[wk.selected] ?? state?.model ?? selectedEntry?.model ?? (personaId ? null : recent)}
           onPick={(id) => { const sid = wk.selected; if (sid) setModelChoice((choices) => ({ ...choices, [sid]: id })); setRecent(id) }} openSettings={openSettings} />
           : <div className="wb-chat__empty cf-empty">
             {wk.listLoading ? <span role="status">{c.loading}</span> : <>
@@ -105,6 +126,12 @@ export default function TextWorkbench({ transport, bootstrap, beforeWrite, onExp
     </div>
     {settingsOpen && renderSettings(() => setSettingsOpen(false))}
   </ChatSurface>
+  return library ? <LibraryWorkspace api={library} panel={panel} locked={locked} notice={notice} onRoster={setRoster}
+    close={() => setPanel(undefined)} openProjects={() => setPanel('projects')} createChat={async (role) => {
+      const created = await wk.create(role.id)
+      if (created) setQuery('')
+      return created
+    }}>{surface}</LibraryWorkspace> : surface
 }
 
 function TextThread({ sid, wk, c, locked, preferred, onPick, openSettings }: {
@@ -141,7 +168,8 @@ function TextThread({ sid, wk, c, locked, preferred, onPick, openSettings }: {
   }
   const start = Math.max(0, messages.length - windowSize)
   const writeBanner = state?.compatibility === 'unsupported' ? c.unsupported : state?.compatibility === 'legacy_text' ? c.readOnly
-    : state?.writeBlockReason === 'session_turn_limit' ? c.limit : state && !state.writable ? c.locked : undefined
+    : state?.writeBlockReason === 'role_unavailable' ? c.roleUnavailable
+      : state?.writeBlockReason === 'session_turn_limit' ? c.limit : state && !state.writable ? c.locked : undefined
   return <>
     <div className="cf-convmid">
       <ConversationScroller scrollRef={scroll} onScroll={(event) => {

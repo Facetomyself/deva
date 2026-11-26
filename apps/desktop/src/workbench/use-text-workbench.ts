@@ -4,7 +4,7 @@ import type { ChatSummary, ChatTransport, TurnRequest } from './chat-transport'
 import { HttpFailure } from './transport'
 
 type ListIssue = 'listFailure' | 'createFailure'
-type TurnIssue = 'turnFailure' | 'busy' | 'modelFailure' | 'stopFailure'
+type TurnIssue = 'turnFailure' | 'busy' | 'modelFailure' | 'stopFailure' | 'roleUnavailable'
 const savedSelection = 'deva-workbench.chat'
 function lastSession(): string | null {
   try { return window.sessionStorage.getItem(savedSelection) } catch { return null }
@@ -25,7 +25,7 @@ export function useTextWorkbench(api: ChatTransport, beforeWrite: () => Promise<
   const listRevision = useRef(0)
   const creating = useRef<string>()
   const [createPending, setCreatePending] = useState(false)
-  const retryCreate = useRef<string>()
+  const retryCreate = useRef(new Map<string, string>()).current
   const [view, setView] = useState<{ sid: string; projection: ChatProjection }>()
   const live = useRef<{ sid: string; stream: ReturnType<typeof createChatStream> }>()
   const [pending, setPending] = useState<Record<string, 'send' | 'stop'>>({})
@@ -76,9 +76,9 @@ export function useTextWorkbench(api: ChatTransport, beforeWrite: () => Promise<
       if (state) setSessions((list) => {
         const previous = list.find((entry) => entry.id === sid)
         if (!previous) return list
-        const { title, writable, model, updatedAt = previous.updatedAt } = state
-        if (previous.title === title && previous.writable === writable && previous.model === model && previous.updatedAt === updatedAt) return list
-        return list.map((entry) => entry === previous ? { ...entry, title, writable, model, updatedAt } : entry)
+        const { title, writable, model, personaId = previous.personaId, updatedAt = previous.updatedAt } = state
+        if (previous.title === title && previous.writable === writable && previous.model === model && previous.personaId === personaId && previous.updatedAt === updatedAt) return list
+        return list.map((entry) => entry === previous ? { ...entry, title, writable, model, personaId, updatedAt } : entry)
       })
     } })
     live.current = { sid, stream }
@@ -86,24 +86,28 @@ export function useTextWorkbench(api: ChatTransport, beforeWrite: () => Promise<
   }, [api, onExpired, selected])
 
   const current = (sid: string): ReturnType<typeof createChatStream> | undefined => live.current?.sid === sid ? live.current.stream : undefined
-  async function create(): Promise<void> {
-    if (creating.current) return
-    const id = retryCreate.current ?? crypto.randomUUID()
+  async function create(personaId?: string): Promise<boolean> {
+    if (creating.current) return false
+    const scope = personaId ?? ''
+    const id = retryCreate.get(scope) ?? crypto.randomUUID()
     creating.current = id
-    retryCreate.current = id
+    retryCreate.set(scope, id)
     setCreatePending(true)
     setListIssue(undefined)
     try {
       await beforeWrite()
-      const session = await api.create(id)
-      retryCreate.current = undefined
+      const session = await api.create(id, personaId)
+      retryCreate.delete(scope)
       ++listRevision.current
       setSessions((list) => [session, ...list.filter((s) => s.id !== id)])
       select(id)
       void refreshList()
+      return true
     } catch (e) {
+      if (e instanceof HttpFailure && e.status < 500 && e.status !== 408) retryCreate.delete(scope)
       if (e instanceof HttpFailure && e.status === 401) onExpired()
-      else setListIssue('createFailure')
+      else if (!personaId) setListIssue('createFailure')
+      return false
     } finally {
       creating.current = undefined
       setCreatePending(false)
@@ -139,7 +143,7 @@ export function useTextWorkbench(api: ChatTransport, beforeWrite: () => Promise<
       if (e instanceof HttpFailure && e.status === 401) onExpired()
       else {
         const code = e instanceof HttpFailure ? e.code : undefined
-        const issue = code === 'turn_in_progress' ? 'busy' : ['provider_not_found', 'not_chat_provider', 'model_not_enabled', 'chat_model_unavailable'].includes(code ?? '') ? 'modelFailure' : 'turnFailure'
+        const issue = code === 'role_unavailable' ? 'roleUnavailable' : code === 'turn_in_progress' ? 'busy' : ['provider_not_found', 'not_chat_provider', 'model_not_enabled', 'chat_model_unavailable'].includes(code ?? '') ? 'modelFailure' : 'turnFailure'
         if (e instanceof HttpFailure && e.status < 500 && e.status !== 408) retrySend.delete(sid)
         setTurnIssues((issues) => ({ ...issues, [sid]: issue }))
         const stream = current(sid)

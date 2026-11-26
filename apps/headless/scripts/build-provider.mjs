@@ -21,3 +21,4 @@ async function compile(name, entry) {
 await mkdir(dest, { recursive: true })
 await compile('provider-core', 'apps/desktop/src/main/providers/core.ts')
 await compile('chat-core', 'apps/headless/scripts/chat-core.ts')
+await compile('library-core', 'apps/headless/scripts/library-core.ts')
