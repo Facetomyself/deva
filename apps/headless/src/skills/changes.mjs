@@ -74,7 +74,9 @@ export function openSkillChanges({revision,auth,intervalMs=1000,readBudgetMs=450
       return new Promise((resolve,reject)=>{
         const w={actor,after:body.after,end:now()+body.waitMs,verify,signal,resolve,reject}
         w.cancel=()=>finish(w,fail(503,'skill_unavailable'))
-        w.budget=setTimeout(w.cancel,body.waitMs+readBudgetMs);w.budget.unref?.()
+        // Keep one deadline referenced while a caller is actually waiting. Otherwise
+        // an embedded Node host with no other active handle can exit before it gets a reply.
+        w.budget=setTimeout(w.cancel,body.waitMs+readBudgetMs)
         waiters.add(w);signal?.addEventListener('abort',w.cancel,{once:true})
         wake()
       })
