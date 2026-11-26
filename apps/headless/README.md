@@ -1,6 +1,6 @@
 # Deva 无桌面 Web 工作台（开发版）
 
-当前可在 Linux 服务器独立启动：在浏览器认领实例、登录、打开**原桌面版的模型设置页**，配置服务商、密钥和自定义请求头，向真实端点拉取模型，刷新或重启后继续使用设置。该页面不是手机版或中转。完整桌面工作台的前端也从同一套 React 源码构建；目前尚未接通对话、工作区、任务及内置浏览器接管，勿把设置页当作完整版。
+在无图形桌面的 Linux 服务器上，从浏览器认领实例、登录，使用**桌面同源的会话布局、编辑器、消息气泡和模型设置**。网页现可用配置好的服务商进行通用文本对话：新建会话、选择模型、看到流式回复、中途停止、刷新续接并读取已保存的历史。模型设置、密钥和自定义头仍由同一已认证实例管理。这不是手机版、中转或完整 Agent 桌面：工具、附件、工作区、协作任务、内置浏览器接管仍待移植。
 
 ## Docker Compose（linux/amd64）
 
@@ -16,7 +16,7 @@ docker compose exec workbench node /opt/deva/apps/headless/src/cli.mjs claim
 
 - HTTPS 反代：设置 `DEVA_PUBLIC_URL=https://你的域名` 并重建容器。反代须保留公共 `Host`，应用忽略 `X-Forwarded-Host`；认证 Cookie 在 HTTPS 下为 `Secure`、`HttpOnly`、`SameSite=Strict`。变更宿主回环端口可用 `DEVA_PUBLISHED_PORT`。
 - 通常可在桌面设置页直接添加公网 HTTPS 模型。要连接内网、回环或明文 HTTP 模型，部署者须在 `DEVA_PROVIDER_ORIGINS` 明确列出允许的**精确 origin**，多个以逗号分隔。容器中的 `localhost` 只代表本容器；本机服务应通过设计好的私有网络连接，而非向公网发布。服务按持久化配置匹配地址和凭据，固定解析结果，不带工作台 Cookie，不随重定向发送鉴权头。
-- 模型自定义请求头的值与 API key 存入加密密库。设置回读只显示保存状态/占位值；修改端点后要为新端点重新录入凭据。并发编辑发生冲突时刷新设置，而不是覆盖另一标签页的配置。当前页面是设置入口，选择/启用供模型运行使用的最终聊天面板正在接入。
+- 模型自定义请求头的值与 API key 存入加密密库。设置回读只显示保存状态/占位值；修改端点后要为新端点重新录入凭据。并发编辑发生冲突时刷新设置，而不是覆盖另一标签页的配置。在设置页启用所需模型后，回到会话输入区选择该模型。[文本回合限制、恢复和幂等语义](src/chat/README.md)。
 - `GET /livez` 检查进程；`/readyz` 和 `/healthz` 检查已实现服务和构建产物是否就绪，不证明模型在线或所有桌面能力已经移植。
 - `data` 卷保存配置、账号验证信息和密文，`keys` 卷保存独立主密钥。停服务后一并备份，妥善分开保管；回滚镜像不应删除卷。启动时已有密库缺主密钥、密钥错误或数据损坏会报错，不会重置账户。不要让桌面和服务器同时写同一数据目录；迁移桌面配置先制备独立副本，默认不会静默改写桌面明文自定义头或解密桌面系统密钥。普通 `docker compose down` 保留这两个卷。
 
@@ -44,6 +44,6 @@ pnpm workbench:check
 pnpm headless:test
 ```
 
-`node scripts/workbench/e2e-browser.mjs` 用真实、非 root 的沙箱 Chrome 与匹配的 ChromeDriver 检查认领、模型设置、拉取/添加、刷新和登出。它只连接本地测试工作台与测试模型；浏览器或沙箱不可用时测试失败，不计作通过。应用的服务端内置浏览器 worker 是另一个能力，与用户浏览器打开 Web 页面是两件事。
+`node scripts/workbench/e2e-browser.mjs` 用真实、非 root 的沙箱 Chrome 与匹配的 ChromeDriver 检查认领、模型设置、拉取/添加、两轮真实协议请求、流中刷新续接、停止后的历史以及登出。它只连接本地测试工作台与测试模型；浏览器或沙箱不可用时测试失败，不计作通过。应用的服务端内置浏览器 worker 是另一个能力，与用户浏览器打开 Web 页面是两件事。
 
 裸机需要 Node 22、Linux `/usr/bin/flock`、`/proc/self/fd` 和支持文件锁/目录 fsync 的本地文件系统。`node apps/headless/src/cli.mjs --help` 可查看 `init-key`、`serve`、`claim`、`status` 等参数。一次性凭据与登录口令不要写入源码、镜像或日志。完整功能进度见[能力清单](../../docs/development/web-workbench/parity-manifest.json)。

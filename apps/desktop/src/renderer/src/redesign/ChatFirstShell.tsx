@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { BotsPane } from './BotsPane'
 // 关于页的应用图标：直接用安装包图标的源文件，图形只维护一份
-import './redesign.css'
+import { ChatSurface } from './ChatSurface'
 import type { Persona } from '../mock/extensions'
 import type { MemberMeta, TaskRecord } from '../../../preload'
 import {
@@ -590,9 +590,7 @@ export function ChatFirstShell(): React.JSX.Element {
   }
 
   return (
-    <div
-      className={`cf-shell${IS_MAC ? ' is-mac' : ''}${trafficLights ? ' has-traffic-lights' : ''}`}
-    >
+    <ChatSurface className={[IS_MAC && 'is-mac', trafficLights && 'has-traffic-lights'].filter(Boolean).join(' ')}>
       {/* 无独立标题栏（微信式）：最小化/最大化/关闭用系统原生窗口控件叠加（titleBarOverlay），
           此处不再自绘按钮，避免与原生按钮重影。拖拽交给图标栏与对话头。 */}
       <div
@@ -782,6 +780,6 @@ export function ChatFirstShell(): React.JSX.Element {
           }}
         />
       )}
-    </div>
+    </ChatSurface>
   )
 }

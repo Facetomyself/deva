@@ -14,12 +14,13 @@ export interface Bootstrap {
   config: RecordValue
   csrf: string
   expiresAt: number
+  capabilities?: { textChat?: true }
 }
 
 export type SessionScreen = { mode: 'authenticated'; bootstrap: Bootstrap } | { mode: 'claim' | 'login' }
 
 export class HttpFailure extends Error {
-  constructor(readonly status: number) {
+  constructor(readonly status: number, readonly code?: string) {
     super(`HTTP ${status}`)
   }
 }
@@ -70,7 +71,10 @@ export function createTransport(send: Fetch = fetch) {
       credentials: 'same-origin', mode: 'same-origin', redirect: 'error',
       cache: 'no-store', referrerPolicy: 'no-referrer'
     })
-    if (!response.ok) throw new HttpFailure(response.status)
+    if (!response.ok) {
+      const failure: unknown = await response.json().catch(() => undefined)
+      throw new HttpFailure(response.status, record(failure) && typeof failure.error === 'string' ? failure.error : undefined)
+    }
     return response.json()
   }
 
@@ -81,7 +85,9 @@ export function createTransport(send: Fetch = fetch) {
         typeof result.csrf !== 'string' || !result.csrf || typeof result.expiresAt !== 'number' ||
         !Number.isFinite(result.expiresAt)) throw new Error('Invalid session bootstrap')
     const { protocol, version, platform, config, csrf, expiresAt } = result
-    return { protocol, version, platform, config, csrf, expiresAt }
+    const capabilities = record(result.capabilities) && result.capabilities.textChat === true
+      ? { textChat: true as const } : undefined
+    return { protocol, version, platform, config, csrf, expiresAt, ...(capabilities ? { capabilities } : {}) }
   }
 
   return {
@@ -256,7 +262,12 @@ export function createSettingsBridge({ transport, bootstrap, onFailure, updateBr
     }
   }
 
-  return { api, ready, logout }
+  async function beforeChatWrite(): Promise<void> {
+    await flush()
+    if (blocked || closing || !csrf) throw new Error('Reload settings before continuing')
+  }
+
+  return { api, ready, logout, beforeChatWrite }
 }
 
 /** Install just the features required by the lazy desktop ModelSettings subtree. */

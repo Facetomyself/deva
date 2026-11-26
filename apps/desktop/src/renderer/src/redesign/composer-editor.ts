@@ -194,7 +194,7 @@ function $swapForMention(piece: TextNode): void {
  * 换上。每次只改一处后返回——改动会再次弄脏 root，Lexical 先合并相邻普通文本再重跑本变换，直到收敛。
  * 返回值：是否还有只上色、未成标签的 `@名字`（光标移开时要再同步一次把它定形）。
  */
-function $syncTokens(isToken: (name: string, whole: string) => boolean, mentionNames: readonly string[]): boolean {
+function $syncTokens(isToken: ComposerEditorHandlers['isToken'], mentionNames: readonly string[]): boolean {
   const root = $getRoot()
   const block = root.getFirstChild()
   const leaves = $isElementNode(block) ? block.getChildren() : []
@@ -202,7 +202,7 @@ function $syncTokens(isToken: (name: string, whole: string) => boolean, mentionN
   const want: { start: number; end: number; chip: boolean }[] = []
   const whole = root.getTextContent().trim()
   for (const tk of slashTokens(text))
-    if (isToken(tk.name, whole)) want.push({ start: tk.start, end: tk.end, chip: false })
+    if (isToken?.(tk.name, whole)) want.push({ start: tk.start, end: tk.end, chip: false })
   const caret = $caretOffset(block, leaves)
   for (const r of mentionRanges(text, mentionNames))
     if (!want.some((w) => r.start < w.end && w.start < r.end))
@@ -311,17 +311,17 @@ export interface ComposerEditorHandlers {
   /** 文本变化（含程序写入）；内容未变的更新（如仅移动光标）不触发。 */
   onChange: (text: string) => void
   /** 光标处的联想触发词变了（打字、移动光标都会；见 ComposerTrigger）。 */
-  onTrigger: (trigger: ComposerTrigger | null) => void
+  onTrigger?: (trigger: ComposerTrigger | null) => void
   /** 返回 true = 已处理（须自行 preventDefault），false = 交还编辑器默认行为。 */
   onKey: (key: ComposerKey, e: KeyboardEvent) => boolean
   /** 粘贴：返回 true = 已接管（如粘贴文件转附件），false = 按纯文本粘贴。 */
-  onPaste: (e: ClipboardEvent) => boolean
+  onPaste?: (e: ClipboardEvent) => boolean
   /** 开头 `/name` 是否会生效（name 为去掉斜杠的原文，whole 为去首尾空白的整条消息）。 */
-  isToken: (name: string, whole: string) => boolean
+  isToken?: (name: string, whole: string) => boolean
   /** 正文里 `@名字` 会生效的名字（本对话成员、可 @ 的角色、新建成员标记）；空 = 不认 @。 */
   mentionNames: readonly string[]
   /** 成员标签的头像（图片地址，名字不含 @）；null = 不放头像（如「新建成员」）。 */
-  mentionFace: (name: string) => string | null
+  mentionFace?: (name: string) => string | null
 }
 
 export interface ComposerEditor {
@@ -356,7 +356,7 @@ export function useComposerEditor(handlers: ComposerEditorHandlers): ComposerEdi
   const [empty, setEmpty] = useState(true)
 
   useEffect(() => {
-    mentionFaces.set(editor, (name) => handlersRef.current.mentionFace(name))
+    mentionFaces.set(editor, (name) => handlersRef.current.mentionFace?.(name) ?? null)
     let lastText = ''
     /** 组字期间跳过了指令识别（改动正在组字的节点会打断输入法），组字结束后补一次。 */
     let skipped = false
@@ -406,7 +406,7 @@ export function useComposerEditor(handlers: ComposerEditorHandlers): ComposerEdi
         if (textChanged || triggerChanged)
           flushSync(() => {
             if (textChanged) handlersRef.current.onChange(text)
-            if (triggerChanged) handlersRef.current.onTrigger(trigger)
+            if (triggerChanged) handlersRef.current.onTrigger?.(trigger)
           })
         if (skipped && !editor.isComposing()) {
           skipped = false
@@ -420,7 +420,7 @@ export function useComposerEditor(handlers: ComposerEditorHandlers): ComposerEdi
       key(KEY_ESCAPE_COMMAND, 'escape'),
       editor.registerCommand(
         PASTE_COMMAND,
-        (e) => e instanceof ClipboardEvent && handlersRef.current.onPaste(e),
+        (e) => e instanceof ClipboardEvent && (handlersRef.current.onPaste?.(e) ?? false),
         COMMAND_PRIORITY_HIGH
       ),
       // 拖入文件：不让 Lexical 按文本落入，事件继续冒泡，由外层在窗口级统一转成附件。

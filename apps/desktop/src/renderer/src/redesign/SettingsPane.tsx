@@ -30,6 +30,7 @@ import { Select } from '../components/Select'
 import { PersonaFace, parseAvatarSpec } from '../components/humation'
 import { useTheme } from '../theme/ThemeContext'
 import { readChatFontSize, saveChatFontSize, type ChatFontSize } from '../theme/chatFontSize'
+import { SettingsFrame } from './SettingsFrame'
 import { ModelSettings } from '../features/settings/ModelSettings'
 import { clipName, IS_MAC, AvatarStack, Segmented, Toggle } from './shell-common'
 
@@ -51,40 +52,24 @@ export function Settings({ initial, onClose }: { initial?: SettingsInit; onClose
     { id: 'about', icon: <Info size={15} />, label: t('settings.about') }
   ]
   return (
-    // 遮罩层不响应点击：设置弹框只能通过右上角关闭按钮手动关闭，避免误触丢失上下文
-    <div className="cf-modal__backdrop">
-      <div className="cf-modal" role="dialog" aria-label={t('cf.settings')}>
-        <div className="cf-modal__head">
-          <span className="cf-modal__title">{t('cf.settings')}</span>
-          <button className="cf-modal__close" title={t('common.close')} onClick={onClose}>
-            ✕
-          </button>
-        </div>
-        <div className="cf-modal__body">
-          <nav className="cf-nav">
-            {nav.map((n) => (
-              <button
-                key={n.id}
-                className={`cf-nav__item${section === n.id ? ' is-active' : ''}`}
-                onClick={() => {
-                  setSection(n.id)
-                  setExtTarget(null)
-                }}
-              >
-                <span className="cf-nav__icon">{n.icon}</span>
-                {n.label}
-              </button>
-            ))}
-          </nav>
-          <div className="cf-pane">
-            {section === 'general' && <GeneralPane />}
-            {section === 'models' && <ModelSettings />}
-            {section === 'extensions' && <ExtensionsPane initialOpen={extTarget} />}
-            {section === 'about' && <AboutPane />}
-          </div>
-        </div>
-      </div>
-    </div>
+    <SettingsFrame onClose={onClose} navigation={nav.map((n) => (
+      <button
+        key={n.id}
+        className={`cf-nav__item${section === n.id ? ' is-active' : ''}`}
+        onClick={() => {
+          setSection(n.id)
+          setExtTarget(null)
+        }}
+      >
+        <span className="cf-nav__icon">{n.icon}</span>
+        {n.label}
+      </button>
+    ))}>
+      {section === 'general' && <GeneralPane />}
+      {section === 'models' && <ModelSettings />}
+      {section === 'extensions' && <ExtensionsPane initialOpen={extTarget} />}
+      {section === 'about' && <AboutPane />}
+    </SettingsFrame>
   )
 }
 

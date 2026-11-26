@@ -105,23 +105,27 @@ const components: Components = {
   }
 }
 
+const textComponents: Components = { ...components, img: ({ alt }) => <>{alt}</> }
 const remarkPlugins: Options['remarkPlugins'] = [remarkGfm]
 const rehypePlugins: Options['rehypePlugins'] = [[rehypeHighlight, { ignoreMissing: true }]]
 
 /** 渲染一段 Markdown。muted：思考块用弱化配色。 */
 export const Markdown = memo(function Markdown({
   text,
-  muted
+  muted,
+  textOnly
 }: {
   text: string
   muted?: boolean
+  /** Keep image alt text without making image requests in the text-only workbench. */
+  textOnly?: boolean
 }): React.JSX.Element {
   return (
     <div className={muted ? 'md md--muted' : 'md'}>
       <ReactMarkdown
         remarkPlugins={remarkPlugins}
         rehypePlugins={rehypePlugins}
-        components={components}
+        components={textOnly ? textComponents : components}
       >
         {text}
       </ReactMarkdown>

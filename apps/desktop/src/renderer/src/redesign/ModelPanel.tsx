@@ -10,20 +10,16 @@
  * 本对话已选 → 否则回落最近使用（与主进程 resolveModelRef 的兜底一致）。
  */
 import { useEffect, useState } from 'react'
-import { ChevronDown } from 'lucide-react'
 import { useChatActions, useChatState } from '../store/chat'
 import { findActive, useModels } from '../store/models'
-import { useI18n } from '../i18n/i18n'
 import { ContextRing } from './ContextRing'
 import { EffortPicker } from './EffortPicker'
-import { ModelMenu, type ModelGroup } from './ModelMenu'
+import { ModelSelectButton, modelGroups } from './ModelMenu'
 import { useContextUsage } from './context-usage'
-import './model-panel.css'
 
 type Menu = 'context' | 'model' | 'effort'
 
 export function ModelPanel(): React.JSX.Element {
-  const { t } = useI18n()
   const { activeModel, providers, setActiveModel, activeEffort, setActiveEffort } = useModels()
   const { currentBinding, currentSessionId, sessions } = useChatState()
   const { setSessionModel, setSessionEffort } = useChatActions()
@@ -31,10 +27,7 @@ export function ModelPanel(): React.JSX.Element {
   const toggle = (m: Menu): void => setOpen((o) => (o === m ? null : m))
 
   // 只列对话模型（purpose==='llm'）：决策模型（如 Jev）不生成文本，绝不可被选为对话模型。
-  const groups: ModelGroup[] = providers
-    .filter((p) => p.enabled && (p.purpose ?? 'llm') === 'llm')
-    .map((p) => ({ p, models: p.models.filter((m) => m.enabled) }))
-    .filter((g) => g.models.length > 0)
+  const groups = modelGroups(providers)
   const active = findActive(providers, currentBinding.model ?? null) ?? activeModel
   const modelRef = active ? `${active.provider.id}:${active.model.id}` : null
   const usage = useContextUsage(
@@ -64,7 +57,6 @@ export function ModelPanel(): React.JSX.Element {
     return () => window.removeEventListener('keydown', onKey, true)
   }, [open])
 
-  const modelName = active ? active.model.name : t('chat.selectModel')
   return (
     <div className="cf-mp">
       {open && <div className="model-pick__backdrop" onClick={() => setOpen(null)} />}
@@ -72,31 +64,12 @@ export function ModelPanel(): React.JSX.Element {
         <ContextRing usage={usage} open={open === 'context'} onToggle={() => toggle('context')} />
       )}
       <div className="model-pick">
-        <button
-          className={`chip cf-mp__model${open === 'model' ? ' is-open' : ''}`}
-          type="button"
-          title={open === 'model' ? undefined : modelName}
-          aria-label={modelName}
-          aria-haspopup="menu"
-          aria-expanded={open === 'model'}
-          onClick={() => toggle('model')}
-        >
-          <span className="chip__label">{modelName}</span>
-          <ChevronDown size={13} className="chip__caret" />
-        </button>
-        {open === 'model' && (
-          <ModelMenu
-            groups={groups}
-            activePid={active?.provider.id ?? null}
-            activeMid={active?.model.id ?? null}
-            onPick={(pid, mid) => {
-              // ① 记入本对话属性；② 记为「最近使用」，充当后续新对话未选时的默认。
-              setSessionModel(`${pid}:${mid}`)
-              setActiveModel(pid, mid)
-              setOpen(null)
-            }}
-          />
-        )}
+        <ModelSelectButton open={open === 'model'} onToggle={() => toggle('model')} groups={groups} active={active}
+          onPick={(pid, mid) => {
+            setSessionModel(`${pid}:${mid}`)
+            setActiveModel(pid, mid)
+            setOpen(null)
+          }} />
       </div>
       <EffortPicker
         active={active}

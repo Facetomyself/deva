@@ -47,6 +47,7 @@ import {
   ConvMessage
 } from './ConvMessage'
 import { type SlashCommand, type ComposerPrefill, MemberProgressNotice, Composer } from './Composer'
+import { ConversationHeader, ConversationScroller, ConversationSurface } from './ChatSurface'
 
 /** 距底 ≤ 此像素即视为「贴住底部」，留缓冲避免临界抖动。 */
 const BOTTOM_THRESHOLD = 64
@@ -765,8 +766,8 @@ export function Conversation({
       ]
 
   const view = (
-    <main className="cf-conv">
-      <div className="cf-conv__head">
+    <ConversationSurface>
+      <ConversationHeader>
         {memberView ? (
           <MemberLogHead view={memberView} streaming={streaming} />
         ) : taskView ? (
@@ -816,18 +817,12 @@ export function Conversation({
             </button>
           </>
         )}
-      </div>
+      </ConversationHeader>
 
       {/* 删除入口在聊天区右键唤起（见 onMsgsContextMenu）；选择态由右键菜单的「选择删除」开启。 */}
       {/* .cf-convmid 只为给右侧轮次索引面板提供定位上下文（.cf-msgs 自身会滚动，面板不能放里面）。 */}
       <div className="cf-convmid">
-        <div
-          className="cf-msgs"
-          ref={scrollRef}
-          onScroll={onScroll}
-          onContextMenu={onMsgsContextMenu}
-        >
-          <div className={`cf-msgs__inner${selecting ? ' is-selecting' : ''}`}>
+        <ConversationScroller scrollRef={scrollRef} selecting={selecting} onScroll={onScroll} onContextMenu={onMsgsContextMenu}>
             {messages.length === 0 ? (
               <>
                 <div className="cf-empty">
@@ -899,8 +894,7 @@ export function Conversation({
                 {isTail && needModelSetup && !streaming && <ModelSetupCard />}
               </>
             )}
-          </div>
-        </div>
+        </ConversationScroller>
         {/* 轮次索引：只在轮次够多且非选择态时出现（选择态要让位给勾选交互）。 */}
         {!selecting && tocItems.length >= TOC_MIN_TURNS && (
           <TurnIndex items={tocItems} active={activeTurn} onJump={jumpToTurn} />
@@ -1005,7 +999,7 @@ export function Conversation({
           onPrefill={onPrefill}
         />
       )}
-    </main>
+    </ConversationSurface>
   )
   // 执行步骤里成员名前的小头像（见 blocks.tsx MemberFaceContext）；成员对话里没有成员工具，不提供。
   return (

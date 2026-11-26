@@ -11,7 +11,7 @@ import {
   resolveShape,
   shapeMask
 } from '../components/humation'
-import { useProfile } from '../store/profile'
+import { useOptionalProfile } from '../store/profile'
 
 /** 路径末段（跨平台）。 */
 export function basename(p: string): string {
@@ -44,7 +44,7 @@ export function DragBar(): React.JSX.Element {
   return <div className="cf-dragbar" aria-hidden="true" />
 }
 
-export const IS_MAC = window.deva.platform === 'darwin'
+export const IS_MAC = window.deva?.platform === 'darwin' && typeof window.deva.window?.onFullScreen === 'function'
 
 /** 系统默认角色 id（首启种子「Deva」，id 恒为 general）：兼作兜底身份，且不允许删除。 */
 export const DEFAULT_PERSONA_ID = 'general'
@@ -274,7 +274,7 @@ export function Avatar({
   plain,
   compact
 }: {
-  persona?: Persona
+  persona?: Pick<Persona, 'id' | 'name' | 'desc' | 'avatar'> & Partial<Pick<Persona, 'avatarImage' | 'model'>>
   user?: boolean
   size?: number
   /** 不挂悬停提示：名字已经写在旁边的地方用（标题栏成员条、对话里成员名前的小头像）。 */
@@ -288,11 +288,11 @@ export function Avatar({
   /** 有新消息未读：右上角红点。 */
   unread?: boolean
 }): React.JSX.Element | null {
-  const profile = useProfile()
+  const profile = useOptionalProfile()
   const style = { ...(size ? { '--sz': `${size}px` } : {}) } as React.CSSProperties
   const cls = `cf-ava${user ? ' is-user' : ''}`
   const seed = user ? USER_AVATAR_SEED : (persona?.id ?? '')
-  const spec = user ? profile.avatar : parseAvatarSpec(persona?.avatar)
+  const spec = user ? (profile?.avatar ?? null) : parseAvatarSpec(persona?.avatar)
   // 红点排在 .cf-ava__face 之后，靠文档顺序压在头像之上。
   const marks = unread || attention ? <span className="cf-ava__dot" aria-hidden="true" /> : null
   // 非用户、非角色（理论上罕见）：空占位圈。
@@ -312,7 +312,7 @@ export function Avatar({
         <PersonaFace
           seed={seed}
           spec={spec}
-          image={user ? profile.avatarImage : (persona as Persona).avatarImage}
+          image={user ? profile?.avatarImage : (persona as Persona).avatarImage}
           title={title}
           compact={compact ?? (size ?? 28) <= 20}
           busy={busy}
