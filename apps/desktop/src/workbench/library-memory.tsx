@@ -84,8 +84,9 @@ export function LibraryMemoryPane({ api, scope, locked }: { api: Library; scope:
   </div>
 }
 
-export function ProjectMemoryDialog({ api, locked, notice, onClose }: {
+export function ProjectMemoryDialog({ api, locked, notice, onClose, lockedProject }: {
   api: Library; locked: boolean; notice: React.ReactNode; onClose: () => void
+  lockedProject?: { id: string; name: string | null; signal: AbortSignal }
 }): React.JSX.Element {
   const { locale } = useI18n()
   const c = libraryCopy(locale)
@@ -96,7 +97,15 @@ export function ProjectMemoryDialog({ api, locked, notice, onClose }: {
     setWorkspaces(next)
     setId((prev) => next.some((item) => item.id === prev) ? prev : '')
   }))
-  useEffect(() => { load() }, [])
+  useEffect(() => { if (!lockedProject) load() }, [])
+  if (lockedProject) return <LibraryDialog title={c.projectMemory} testId="workbench-project-memory" onClose={onClose}>
+    {notice}
+    <div className="cf-editor wb-library__editor">
+      {lockedProject.name && <p className="wb-library__hint">{lockedProject.name}</p>}
+      {!lockedProject.signal.aborted && <LibraryMemoryPane key={lockedProject.id} api={api}
+        scope={{ kind: 'project', id: lockedProject.id, signal: lockedProject.signal }} locked={locked} />}
+    </div>
+  </LibraryDialog>
   return <LibraryDialog title={c.projectMemory} testId="workbench-project-memory" onClose={onClose}>
     {notice}
     <div className="cf-editor wb-library__editor">

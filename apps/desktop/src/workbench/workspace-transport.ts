@@ -31,8 +31,8 @@ function relative(path: string, root = false): string {
 export function createWorkspaceTransport(transport: Transport, csrf: string) {
   const resource = (id: string, action: 'list' | 'read' | 'file'): string => `/workspaces/${idOf(id)}/${action}`
   return {
-    async projects(): Promise<WorkspaceOption[]> {
-      const result = object(await transport.request('/workspaces'))
+    async projects(signal?: AbortSignal): Promise<WorkspaceOption[]> {
+      const result = object(await transport.request('/workspaces', 'GET', undefined, undefined, signal ? { signal } : undefined))
       if (!Array.isArray(result.workspaces)) return invalid()
       const seen = new Set<string>()
       return result.workspaces.map((item) => {
@@ -43,8 +43,8 @@ export function createWorkspaceTransport(transport: Transport, csrf: string) {
         return { id: key, name }
       })
     },
-    async list(id: string, path: string): Promise<WorkspaceDirectory> {
-      const result = object(await transport.request(resource(id, 'list'), 'POST', { path: relative(path, true) }, csrf))
+    async list(id: string, path: string, signal?: AbortSignal): Promise<WorkspaceDirectory> {
+      const result = object(await transport.request(resource(id, 'list'), 'POST', { path: relative(path, true) }, csrf, signal ? { signal } : undefined))
       if (result.path !== path || !Array.isArray(result.entries)) return invalid()
       const prefix = path === '' ? '' : `${path}/`
       const seen = new Set<string>()

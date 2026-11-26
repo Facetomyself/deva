@@ -22,14 +22,17 @@ import { createDeliveriesTransport, type DeliveriesTransport, type DeliveryGroup
 import { BrowserDeliveryCard, DeliveryFeedback, DeliveryHistory, ReplyDeliveryActions, useDeliveries } from './deliveries-ui'
 import { createWorkspaceGitView } from './git-view-controller'
 import { createGitViewTransport } from './git-view-transport'
+import { ProjectMemoryDialog } from './library-memory'
 import { createLibrary, type Roster } from './library-transport'
 import { LibraryWorkspace, type LibraryPanel } from './library-workspace'
 import { createPreferenceTransport, matchesPreferences, projectSession } from './session-preferences'
 import { SessionHeaderActions, SessionModelPicker, SessionPreferenceStatus, SessionRenameDialog } from './session-preference-ui'
+import { createSessionWorkspaceTransport } from './session-workspace-transport'
+import { AttachedWorkspaceLabel, SessionWorkspaceControls, useSessionWorkspace } from './session-workspace-ui'
 import type { Bootstrap, LibraryQueue, Transport } from './transport'
 import { useTextWorkbench } from './use-text-workbench'
 import { WorkspaceFilesPanel } from './workspace-dialog'
-import { createWorkspaceFiles } from './workspace-files'
+import { createWorkspaceFiles, openWorkspaceProject } from './workspace-files'
 import { createWorkspaceTransport } from './workspace-transport'
 import './text-workbench.css'
 
@@ -51,7 +54,8 @@ export default function TextWorkbench({ transport, bootstrap, beforeWrite, onExp
   const preferenceEnabled = bootstrap.capabilities?.sessionPreferences === true
   const preferenceApi = useMemo(() => preferenceEnabled ? createPreferenceTransport(transport, bootstrap.csrf) : undefined,
     [preferenceEnabled, transport, bootstrap.csrf])
-  const wk = useTextWorkbench(api, beforeWrite, onExpired, bootstrap.capabilities?.attachments === true, preferenceApi)
+  const workspacesEnabled = bootstrap.capabilities?.sessionWorkspaces === true
+  const wk = useTextWorkbench(api, beforeWrite, onExpired, bootstrap.capabilities?.attachments === true, preferenceApi, workspacesEnabled)
   const preferences = wk.preferences
   const preferenceVersion = useSyncExternalStore(preferences?.subscribe ?? emptySubscribe, preferences?.version ?? emptyVersion)
   const [archivedView, setArchivedView] = useState(false)
@@ -83,8 +87,29 @@ export default function TextWorkbench({ transport, bootstrap, beforeWrite, onExp
     [gitEnabled, transport, bootstrap.csrf, onExpired])
   const [filesOpen, setFilesOpen] = useState(false)
   const workspaceLabel = locale === 'zh-CN' ? '工作区文件' : 'Workspace files'
-  const openFiles = files ? () => { setFilesOpen(true); void files.loadProjects() } : undefined
   const sid = wk.selected
+  const selectedEntry = wk.sessions.find((s) => s.id === sid)
+  const workspaceSid = !locked && selectedEntry?.compatibility === 'text' && wk.projection?.status !== 'missing' ? selectedEntry.id : undefined
+  const workspaceWritable = !!workspaceSid && wk.projection?.status === 'ready' && state?.compatibility === 'text' && !state.active && !wk.pending
+  const workspaceApi = useMemo(() => workspacesEnabled ? createSessionWorkspaceTransport(transport, bootstrap.csrf) : undefined,
+    [workspacesEnabled, transport, bootstrap.csrf])
+  const { controller: binding, view: bound } = useSessionWorkspace(workspaceApi, workspaceSid, selectedEntry?.workspaceRevision,
+    state?.workspaceRevision, workspaceWritable, beforeWrite, onExpired, wk.refreshList)
+  const controlledOpen = files && binding && workspaceSid ? () => void binding.open(workspaceSid, 'files', ({ workspace, signal }) =>
+    openWorkspaceProject(files, workspace.id, signal)) : undefined
+  const manualFilesSid = useRef<string | null>()
+  const openFiles = files ? () => {
+    if (controlledOpen && bound.confirmed?.workspace?.state === 'available' && !bound.pending && !bound.needsReview) {
+      controlledOpen()
+      return
+    }
+    if (workspacesEnabled && manualFilesSid.current !== sid) void files.select('')
+    manualFilesSid.current = sid
+    setFilesOpen(true)
+    void files.loadProjects()
+  } : undefined
+  const notes = library && binding && workspaceSid ? () => void binding.open(workspaceSid, 'notes') : undefined
+  const approvedProject = bound.access
   const deliveryEnabled = bootstrap.capabilities?.deliveries === true
   const deliveryApi = useMemo(() => deliveryEnabled ? createDeliveriesTransport(transport, bootstrap.csrf) : undefined,
     [deliveryEnabled, transport, bootstrap.csrf])
@@ -95,7 +120,6 @@ export default function TextWorkbench({ transport, bootstrap, beforeWrite, onExp
     setLocatedFilesSid(sid)
     return true
   }, [files, sid])
-  const selectedEntry = wk.sessions.find((s) => s.id === sid)
   const preferenceEntry = sid ? preferences?.get(sid) : undefined
   const projectedEntry = selectedEntry ? projectSession(selectedEntry, preferenceEntry?.pending) : undefined
   useEffect(() => {
@@ -211,6 +235,7 @@ export default function TextWorkbench({ transport, bootstrap, beforeWrite, onExp
           <span className="cf-idbtn__name wb-chat__title">{(preferences ? projectedEntry?.title ?? state?.title : state?.title || selectedEntry?.title)
             || (sid ? t('chat.untitled') : t('cf.tabChats'))}</span>
           {personaId && <span className="wb-chat__persona" data-testid="workbench-chat-persona"><Avatar persona={appearance(personaId)} size={22} plain />{appearance(personaId).name}</span>}
+          <AttachedWorkspaceLabel view={bound} locale={locale} open={controlledOpen} />
           {preferences && selectedEntry && <SessionHeaderActions archived={!!projectedEntry?.archived} disabled={preferenceControlsDisabled}
             blocked={preferenceBlockReason}
             rename={renameSession} archive={archiveSession} />}
@@ -223,6 +248,7 @@ export default function TextWorkbench({ transport, bootstrap, beforeWrite, onExp
           <span className="cf-conv__tag wb-chat__scope" title={scope}>{scope}</span>
         </ConversationHeader>
         {notice}
+        {binding && <SessionWorkspaceControls controller={binding} view={bound} locale={locale} writable={workspaceWritable} openNotes={notes} />}
         {preferenceEntry && renameSid !== sid && <SessionPreferenceStatus entry={preferenceEntry} reload={reloadPreferences} locked={locked} />}
         {sid ? <TextThread key={sid} sid={sid} wk={wk} c={c} locked={locked}
           preferred={modelChoice[sid] ?? state?.model ?? selectedEntry?.model ?? (personaId ? null : recent)}
@@ -250,8 +276,11 @@ export default function TextWorkbench({ transport, bootstrap, beforeWrite, onExp
     </div>
     {settingsOpen && renderSettings(() => setSettingsOpen(false))}
     {browserOpen && browserVisible && <ManualBrowserDialog api={browserOpen.panel} dismiss={() => setBrowserOpen(undefined)} />}
-    {files && <WorkspaceFilesPanel open={filesOpen || (!!sid && locatedFilesSid === sid && !locked)}
-      close={() => { setFilesOpen(false); setLocatedFilesSid(undefined) }} controller={files} git={locked ? undefined : git} />}
+    {files && <WorkspaceFilesPanel open={filesOpen || (!!sid && locatedFilesSid === sid && !locked) || approvedProject?.kind === 'files'}
+      close={() => { setFilesOpen(false); setLocatedFilesSid(undefined); binding?.closeProject() }} controller={files} git={locked ? undefined : git} />}
+    {library && !panel && !settingsOpen && approvedProject?.kind === 'notes' && <ProjectMemoryDialog
+      key={`${workspaceSid}:${approvedProject.workspace.id}`} api={library} locked={locked} notice={notice}
+      lockedProject={{ ...approvedProject.workspace, signal: approvedProject.signal }} onClose={() => binding?.closeProject()} />}
     {renameSid && renameSid === sid && preferences && preferenceEntry && <SessionRenameDialog key={sid} sid={sid} entry={preferenceEntry}
       store={preferences} disabled={preferenceLocked} close={() => setRenameSid(undefined)} reload={reloadPreferences} />}
   </ChatSurface>

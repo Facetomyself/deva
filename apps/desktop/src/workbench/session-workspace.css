@@ -1,0 +1,17 @@
+.wb-session-workspace {
+  display: grid;
+  gap: 4px;
+  padding: 4px 16px;
+  border-bottom: 1px solid var(--border);
+}
+.wb-session-workspace__actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+}
+.wb-session-workspace .cf-input { width: auto; max-width: min(100%, 240px); font-size: 12px; }
+.wb-session-workspace p { margin: 0; font-size: 12px; color: var(--fg-subtle); }
+.wb-session-workspace p[role='alert'] { color: var(--danger); }
+.wb-session-workspace__label .cf-wschip__main:not(button) { cursor: default; }
+.wb-session-workspace__label button:disabled { opacity: .55; cursor: default; }

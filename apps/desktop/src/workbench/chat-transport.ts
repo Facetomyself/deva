@@ -1,5 +1,7 @@
 import type { Transport } from './transport'
 
+export const isWorkspaceRevision = (value: unknown): value is string => typeof value === 'string' && value.length === 64 && /^[a-f0-9]+$/u.test(value)
+
 type Dictionary = Record<string, unknown>
 const record = (x: unknown): x is Dictionary => typeof x === 'object' && x !== null && !Array.isArray(x)
 const nullableString = (x: unknown): x is string | null => x === null || typeof x === 'string'
@@ -29,6 +31,7 @@ export interface ChatSummary {
   personaId?: string
   archived?: boolean
   customTitle?: string
+  workspaceRevision?: string
   compatibility: 'text' | 'legacy_text' | 'unsupported'
   writable: boolean
 }
@@ -83,6 +86,7 @@ function summary(value: unknown): value is Omit<ChatSummary, 'updatedAt'> {
     (value.personaId === undefined || isRoleId(value.personaId)) &&
     (value.archived === undefined || typeof value.archived === 'boolean') &&
     (value.customTitle === undefined || typeof value.customTitle === 'string') &&
+    (value.workspaceRevision === undefined || isWorkspaceRevision(value.workspaceRevision)) &&
     (value.compatibility === 'text' || value.compatibility === 'legacy_text' || value.compatibility === 'unsupported') &&
     typeof value.writable === 'boolean'
 }

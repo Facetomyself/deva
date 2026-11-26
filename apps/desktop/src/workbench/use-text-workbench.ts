@@ -21,7 +21,7 @@ function remember(id: string | null): void {
 }
 
 export function useTextWorkbench(api: ChatTransport, beforeWrite: () => Promise<void>, onExpired: () => void, uploadsEnabled: boolean,
-  preferenceApi?: ReturnType<typeof createPreferenceTransport>) {
+  preferenceApi?: ReturnType<typeof createPreferenceTransport>, sessionWorkspaces = false) {
   const [sessions, setSessions] = useState<ChatSummary[]>([])
   const [selected, setSelected] = useState<string | null>(null)
   const selectedRef = useRef<string | null>(null)
@@ -75,12 +75,13 @@ export function useTextWorkbench(api: ChatTransport, beforeWrite: () => Promise<
       setListLoading(false)
     })
     list.current = refresh
-    const link = managed ? createSessionsStream({ origin: window.location.origin, invalidate: refresh.request, expired: onExpired }) : undefined
-    if (!link) refresh.request()
+    const link = managed || sessionWorkspaces ? createSessionsStream({ origin: window.location.origin,
+      invalidate: refresh.request, expired: onExpired }) : undefined
+    if (!managed) refresh.request()
     const timer = window.setInterval(() => { if (document.visibilityState === 'visible') refresh.request() }, 20000)
     window.addEventListener('focus', refresh.request)
     return () => { link?.close(); refresh.close(); list.current = undefined; window.clearInterval(timer); window.removeEventListener('focus', refresh.request) }
-  }, [api, managed, onExpired, select])
+  }, [api, managed, onExpired, select, sessionWorkspaces])
   useEffect(() => {
     if (!selected) return
     const sid = selected
