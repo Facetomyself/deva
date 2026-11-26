@@ -4,6 +4,7 @@ import { chmod, lstat, readFile, realpath, writeFile } from 'node:fs/promises'
 import { isIPv4 } from 'node:net'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { parseBlankDiagnostic } from '../../apps/browser-worker/src/blank-diagnostic.mjs'
 import { parseSites, sitePolicy } from '../../apps/browser-worker/src/egress/sites.mjs'
 import { selectAddress } from '../../apps/browser-worker/src/egress/address.mjs'
 import { CheckFailure, check } from './container-client-interactions-docker.mjs'
@@ -76,6 +77,7 @@ const kernel={arch:process.arch,uid:process.getuid(),gid:process.getgid(),nnp:pi
   maxUserns:await bucket('/proc/sys/user/max_user_namespaces'),apparmorUserns:await bucket('/proc/sys/kernel/apparmor_restrict_unprivileged_userns')};
 console.log(JSON.stringify(process.argv[1]==='kernel-only'?kernel:{...kernel,
   noNet:Object.values(networkInterfaces()).flat().every(a=>a.internal),
+  coreZero:/^Max core file size\\s+0\\s+0\\s+/m.test(await read('/proc/self/limits')??''),
   data:await mode('/data','isDirectory',0o700),keys:await mode('/keys','isDirectory',0o700),key:await mode('/keys/master.key','isFile',0o600),
   mainSocket:await mode('/run/deva/workbench-control.sock','isSocket',0o600),
   controlDir:await mode('/run/deva-browser-control','isDirectory',0o700),control:await mode('/run/deva-browser-control/worker.sock','isSocket',0o600),
@@ -127,12 +129,19 @@ export function hostedDocker(root, port) {
   const pinned = {}, registered = new Map()
   let active = false, site, fixtureOrigin, bridgeId
 
-  function docker(args, code, { timeout = 20_000 } = {}) {
+  function docker(args, code, { timeout = 20_000, blankDiagnostic = false } = {}) {
     return new Promise((resolve, reject) => {
       execFile('docker', ['--host=unix:///var/run/docker.sock', ...args], {
         cwd: root, env: { PATH: process.env.PATH ?? '/usr/bin:/bin', LANG: 'C.UTF-8', DOCKER_CONFIG: root },
-        encoding: 'utf8', maxBuffer: 512 * 1024, timeout,
-      }, (error, stdout) => {
+        encoding: 'utf8', maxBuffer: blankDiagnostic ? 1024 : 512 * 1024, timeout,
+      }, (error, stdout, stderr) => {
+        if (blankDiagnostic && (!error || error.code === 1)) {
+          const exitCode = error ? 1 : 0
+          const report = parseBlankDiagnostic(stdout, stderr, exitCode)
+          if (report) resolve({ exitCode, report })
+          else reject(new CheckFailure('WORKER_BLANK_DIAGNOSTIC_OUTPUT_INVALID'))
+          return
+        }
         if (!error) { resolve(stdout.trim()); return }
         const category = error.code === 'ENOENT' ? 'EXEC_MISSING' : error.killed ? 'TIMEOUT' : 'FAILED'
         reject(new CheckFailure(`${code}_${category}`))
@@ -206,6 +215,7 @@ export function hostedDocker(root, port) {
       h.NetworkMode === network && (h.Init === true) === init, 'PRODUCTION_ENTRYPOINT_OR_NETWORK_MISMATCH')
     if (meta.State.Running) check(only(meta.NetworkSettings.Networks, network), 'EXTRA_SERVICE_NETWORK')
     const workbench = kind === 'workbench', peer = kind.startsWith('browser-'), broker = kind === 'browser-egress', worker = kind === 'browser-worker'
+    if (worker) check(h.Ulimits?.some(limit => limit.Name === 'core' && limit.Soft === 0 && limit.Hard === 0), 'WORKER_CORE_FILE_LIMIT_MISSING')
     const oneLoopback = ports => only(ports, '8787/tcp') && same(ports['8787/tcp'], [{ HostIp: '127.0.0.1', HostPort: String(port) }])
     check(workbench ? oneLoopback(h.PortBindings) && (!meta.State.Running || oneLoopback(meta.NetworkSettings.Ports))
       : only(h.PortBindings) && nonePublished(meta.NetworkSettings.Ports), 'UNEXPECTED_PORT_PUBLICATION')
@@ -349,9 +359,19 @@ export function hostedDocker(root, port) {
     if (kind.startsWith('browser-')) {
       check(value.sites === site.data.trim() && !value.data && !value.keys && !value.key && !value.mainSocket && value.egressDir && value.egress,
         'BROWSER_PEER_FILE_SCOPE_MISMATCH')
-      if (kind === 'browser-worker') check(value.noNet && value.controlDir && value.control, 'WORKER_NOT_PRIVATE_OR_NETWORKLESS')
+      if (kind === 'browser-worker') check(value.noNet && value.coreZero && value.controlDir && value.control, 'WORKER_NOT_PRIVATE_OR_NETWORKLESS')
     }
     return value
+  }
+  async function diagnoseSandbox() {
+    const kind = 'browser-worker', id = registered.get(kind)
+    const { meta, kind: actual } = await ownContainer(id)
+    check(actual === kind && meta.State.Running, 'WORKER_BLANK_DIAGNOSTIC_TARGET_NOT_RUNNING')
+    verifyService(meta, kind)
+    // Inherit the verified service UID and confinement; no shell, TTY or overrides.
+    return docker(['exec', id, 'node', browserCLI, 'diagnose-sandbox'], 'WORKER_BLANK_DIAGNOSTIC_EXEC', {
+      timeout: 35_000, blankDiagnostic: true,
+    })
   }
   async function stopExact(id, graceful = false) {
     const before = (await ownContainer(id)).meta
@@ -386,7 +406,7 @@ export function hostedDocker(root, port) {
     check(failures === 0 && remaining === 0, 'EXACT_DOCKER_RESOURCE_CLEANUP_UNCONFIRMED')
     return true
   }
-  return { origin, prepare, composeCreate, start, scope, cleanup, fixtureStatus, fixtureOrigin: () => fixtureOrigin,
+  return { origin, prepare, composeCreate, start, scope, cleanup, diagnoseSandbox, fixtureStatus, fixtureOrigin: () => fixtureOrigin,
     stopWorker: () => stopExact(registered.get('browser-worker'), true),
     processes: async () => JSON.parse(await exec('browser-worker', processesProgram, 'WORKER_PROCESS_PROBE')),
     claimURL: async () => {

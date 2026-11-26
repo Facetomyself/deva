@@ -5,6 +5,9 @@ import { pathToFileURL } from 'node:url'
 import { parseSites, probeEgress, startEgress } from './egress/index.mjs'
 import { openWorkerClient } from './client.mjs'
 import { startWorker } from './worker.mjs'
+import { runBlankDiagnostic } from './blank-diagnostic.mjs'
+
+const chromiumPath = env => env.DEVA_CHROMIUM_PATH || '/usr/bin/chromium'
 
 function absolute(value, label) {
   if (typeof value !== 'string' || !isAbsolute(value) || value.includes('\0')) throw Error(label)
@@ -31,14 +34,18 @@ export async function launch(mode, env) {
   if (!sites.length) throw Error('configuration')
   if (mode === 'worker') {
     return startWorker({ runDir: control, egressSocket: join(egress, 'egress.sock'), sites,
-      executablePath: absolute(env.DEVA_CHROMIUM_PATH || '/usr/bin/chromium', 'chromium') })
+      executablePath: absolute(chromiumPath(env), 'chromium') })
   }
   const privateOrigins = (env.DEVA_BROWSER_PRIVATE_ORIGINS ?? '').split(',').map(s => s.trim()).filter(Boolean)
   return startEgress({ runDir: egress, sites, privateOrigins })
 }
 
 if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) {
-  if (process.argv.includes('--help')) console.log('Usage: node cli.mjs egress|worker|check-egress|check-worker')
+  if (process.argv[2] === 'diagnose-sandbox') {
+    const report = await runBlankDiagnostic(chromiumPath(process.env), { extraArgs: process.argv.length !== 3 })
+    console.log(JSON.stringify(report))
+    process.exitCode = report.available ? 0 : 1
+  } else if (process.argv.includes('--help')) console.log('Usage: node cli.mjs egress|worker|check-egress|check-worker|diagnose-sandbox')
   else {
     let resource, signalled = false, closing
     function stop() {

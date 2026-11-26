@@ -22,6 +22,16 @@
 
    `ready` 指真实沙箱探针通过，`unconfigured`、`egress-unavailable`、`binary-missing`、`sandbox-startup-failure` 分别表示未配置、受限出口不可达、未找到浏览器、实际启动/沙箱验证失败。Compose 要支持相应目标架构、本地命名卷和 bind 配置；这个覆盖文件不把宿主浏览器、工作台 Cookie 或历史目录挂入工作器。部署前应确认操作系统、容器引擎和 seccomp 配置本来就能运行非特权 Chromium。若不具备，保留默认工作台，不改变宿主安全策略来冒充通过。
 
+### 单独核对工作器容器里的 Chromium 沙箱
+
+```sh
+docker compose -f compose.yaml -f compose.browser.yaml exec -T browser-worker node /opt/browser-worker/src/cli.mjs diagnose-sandbox
+```
+
+这是本地运维命令，不是网页接口或后台健康检查。它只在新的私有 profile 中启动一次 Chromium，配置不可达的回环代理，渲染空白页并验证实际渲染器的内核沙箱，随后关闭进程。退出码 0 及 `BROWSER_BLANK_VERIFIED` 表示这条链成功；非零时，JSON 只显示固定的阶段和故障类别，不输出浏览器原始日志。它不连接已注册站点，因此不能代替表单提交、同标签页交还或工作台登录测试。
+
+工作器保留禁用浏览器崩溃报告的常规设置，但不传 Chromium 的测试专用 Crashpad 开关：实测该开关会令部分版本的网络子进程在首次请求前反复重启，即便空白页的沙箱验证已经通过。Compose 仅为此工作器设置 core 文件软、硬上限为 0，继续使用只读根、独立临时文件系统、无出站网络和最小权限。
+
 ## 验证
 
 ```sh

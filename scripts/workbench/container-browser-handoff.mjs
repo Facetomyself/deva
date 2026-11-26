@@ -137,8 +137,15 @@ async function rejectSandbox({ req, docker, owner, path, sid, workerScope, openR
   await tabList(req, path, owner)
   check(await readiness(req) && zero(await docker.fixtureStatus()), 'SANDBOX_REJECTION_SIDE_EFFECTS')
   await ensureIdle(req, owner, sid)
-  await stopWorker(req, docker, owner)
-  check(zero(await docker.fixtureStatus()), 'SANDBOX_REJECTION_TARGET_ACTIVITY_AFTER_STOP')
+  try {
+    const { exitCode, report } = await docker.diagnoseSandbox()
+    const direct = report.available ? 'blank-verified-typed-rejection-remains' : 'blank-failed'
+    console.log(`${label} diagnostic typed=sandbox-startup-failure direct=${direct} exit=${exitCode} ${JSON.stringify(report)}`)
+  } finally {
+    check(zero(await docker.fixtureStatus()), 'SANDBOX_REJECTION_DIAGNOSTIC_TOUCHED_FIXTURE')
+    await stopWorker(req, docker, owner)
+    check(zero(await docker.fixtureStatus()), 'SANDBOX_REJECTION_TARGET_ACTIVITY_AFTER_STOP')
+  }
   console.log(`${label} fail-closed evidence: authenticated open=503, /readyz=200, tabs=0, fixture GET=0 POST=0, worker stopped and socket removed`)
   throw new CheckFailure('WORKER_SANDBOX_STARTUP_FAILED')
 }
