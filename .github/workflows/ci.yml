@@ -39,3 +39,5 @@ jobs:
       - run: pnpm workbench:build
 
       - run: pnpm workbench:check
+
+      - run: pnpm headless:test

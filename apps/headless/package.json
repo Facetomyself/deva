@@ -1,0 +1,12 @@
+{
+  "name": "@deva/headless",
+  "version": "0.1.17",
+  "private": true,
+  "type": "module",
+  "description": "Deva 无桌面 Web 宿主",
+  "license": "MIT",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "test": "node --test --test-concurrency=1 test/*.test.mjs"
+  }
+}
