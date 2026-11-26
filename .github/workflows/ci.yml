@@ -53,3 +53,7 @@ jobs:
       - name: Verify manual project file edits in real sandboxed Chrome
         timeout-minutes: 5
         run: node scripts/workbench/e2e-workspaces.mjs
+
+      - name: Verify explicit file selection, send and private history previews in Chrome
+        timeout-minutes: 5
+        run: node scripts/workbench/e2e-attachments.mjs

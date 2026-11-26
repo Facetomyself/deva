@@ -4,7 +4,9 @@ type Dictionary = Record<string, unknown>
 const record = (x: unknown): x is Dictionary => typeof x === 'object' && x !== null && !Array.isArray(x)
 const nullableString = (x: unknown): x is string | null => x === null || typeof x === 'string'
 const time = (x: unknown): x is number => typeof x === 'number' && Number.isFinite(x) && x >= 0
-const id = (x: unknown): x is string => typeof x === 'string' && /^[A-Za-z0-9_-]{1,128}$/.test(x)
+const id = (x: unknown): x is string => typeof x === 'string' && /^[A-Za-z0-9_-]{1,128}$/u.exec(x)?.[0] === x
+const attachmentId = (x: unknown): x is string => typeof x === 'string' && x.length === 36 &&
+  /^[0-9a-f]{8}-(?:[0-9a-f]{4}-)4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u.test(x)
 const rolePattern = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/u
 const reservedRoleIds = new Set(['constructor', 'prototype', '__proto__', ...Object.getOwnPropertyNames(Object.prototype).map((key) => key.toLowerCase())])
 
@@ -34,11 +36,14 @@ export interface ChatTurn {
   status: string
   reason: string | null
 }
+export const MAX_CHAT_ATTACHMENTS = 4
+export interface ChatAttachment { id: string; name: string; mime: string; kind: 'text' | 'image' | 'document'; size: number }
+export interface ChatMessage { role: 'user' | 'assistant'; content: string; attachments?: ChatAttachment[] }
 export interface ChatState extends Omit<ChatSummary, 'updatedAt'> {
   updatedAt?: number
   writeBlockReason: string | null
   turnLimit: number | null
-  messages: { role: 'user' | 'assistant'; content: string }[] | null
+  messages: ChatMessage[] | null
   active: { text: string; turnId: string; startedAt: number } | null
   lastTurn: ChatTurn | null
 }
@@ -47,7 +52,29 @@ export interface ChatSnapshot { cursor: ChatCursor; state: ChatState }
 export type ChatFrame = ({ t: 'snapshot' } & ChatSnapshot) | {
   t: 'event'; cursor: ChatCursor; sessionId: string; turnId: string; type: 'chat'; event: { type: string; text?: string }
 }
-export interface TurnRequest { clientRequestId: string; text: string; model: string }
+export interface TurnRequest { clientRequestId: string; text: string; model: string; attachments?: string[] }
+
+type TurnDraft = Omit<TurnRequest, 'clientRequestId'>
+export function sameTurnDraft(a: TurnDraft | undefined, b: TurnDraft): boolean {
+  const prior = a?.attachments ?? []
+  const next = b.attachments ?? []
+  return !!a && a.text === b.text && a.model === b.model && prior.length === next.length && prior.every((value, i) => value === next[i])
+}
+
+const rasterMime = new Set(['image/png', 'image/jpeg', 'image/webp'])
+function attachment(value: unknown): value is ChatAttachment {
+  return record(value) && Object.keys(value).length === 5 && attachmentId(value.id) && typeof value.name === 'string' &&
+    !!value.name && value.name.length <= 255 && Number.isSafeInteger(value.size) && (value.size as number) > 0 &&
+    typeof value.mime === 'string' && (
+      value.kind === 'image' ? rasterMime.has(value.mime) : value.kind === 'document' ? value.mime === 'application/pdf' :
+        value.kind === 'text' && value.mime === 'text/plain')
+}
+function message(value: unknown): value is ChatMessage {
+  if (!record(value) || (value.role !== 'user' && value.role !== 'assistant') || typeof value.content !== 'string') return false
+  const { attachments } = value
+  return attachments === undefined || (Array.isArray(attachments) && attachments.length <= MAX_CHAT_ATTACHMENTS &&
+    attachments.every(attachment) && new Set(attachments.map((entry) => entry.id)).size === attachments.length)
+}
 
 function summary(value: unknown): value is Omit<ChatSummary, 'updatedAt'> {
   return record(value) && id(value.id) && typeof value.title === 'string' && nullableString(value.model) &&
@@ -66,8 +93,7 @@ function state(value: unknown): value is ChatState {
   const { updatedAt, writeBlockReason, turnLimit, messages, active, lastTurn } = value
   return summary(value) && (updatedAt === undefined || time(updatedAt)) && nullableString(writeBlockReason) &&
     (turnLimit === null || (typeof turnLimit === 'number' && Number.isSafeInteger(turnLimit) && turnLimit > 0)) &&
-    (messages === null || (Array.isArray(messages) && messages.every((m) => record(m) &&
-      (m.role === 'user' || m.role === 'assistant') && typeof m.content === 'string'))) &&
+    (messages === null || (Array.isArray(messages) && messages.every(message))) &&
     (active === null || (record(active) && id(active.turnId) && time(active.startedAt) && typeof active.text === 'string')) &&
     (lastTurn === null || turn(lastTurn))
 }
@@ -100,16 +126,26 @@ function path(sid: string): string {
   return `/chats/${sid}`
 }
 
+function attachmentPath(sid: string, aid: string): string {
+  if (!attachmentId(aid)) throw new Error('Invalid attachment id')
+  return `${path(sid)}/attachments/${aid}`
+}
+
+export function attachmentPreviewUrl(sid: string, aid: string): string {
+  return `/api/v1${attachmentPath(sid, aid)}/preview`
+}
+
+function utf8Base64url(text: string): string {
+  const bytes = new TextEncoder().encode(text)
+  return btoa(Array.from(bytes, (byte) => String.fromCharCode(byte)).join('')).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
+}
+
 export function chatStreamUrl(origin: string, sid: string, applied?: ChatCursor): string {
   const url = new URL(`/api/v1${path(sid)}/stream`, origin)
   if (url.protocol === 'https:') url.protocol = 'wss:'
   else if (url.protocol === 'http:') url.protocol = 'ws:'
   else throw new Error('Invalid workbench origin')
-  if (applied) {
-    const bytes = new TextEncoder().encode(JSON.stringify(applied))
-    const encoded = btoa(Array.from(bytes, (byte) => String.fromCharCode(byte)).join(''))
-    url.searchParams.set('cursor', encoded.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, ''))
-  }
+  if (applied) url.searchParams.set('cursor', utf8Base64url(JSON.stringify(applied)))
   return url.href
 }
 
@@ -132,8 +168,24 @@ export function createChatTransport(transport: Transport, csrf: string) {
       if (!snapshot(result, sid)) throw new Error('Invalid chat snapshot')
       return result
     },
+    async uploadAttachment(sid: string, file: File, mime: string): Promise<ChatAttachment> {
+      const name = file.name.normalize('NFC')
+      const result = await transport.uploadAttachment(sid, file, utf8Base64url(name), mime, csrf)
+      if (!record(result) || !attachment(result.attachment) || result.attachment.name !== name || result.attachment.mime !== mime ||
+          result.attachment.size !== file.size)
+        throw new Error('Invalid attachment acknowledgement')
+      return result.attachment
+    },
+    async removeAttachment(sid: string, aid: string): Promise<void> {
+      const result = await transport.request(attachmentPath(sid, aid), 'DELETE', undefined, csrf)
+      if (result !== undefined && (!record(result) || result.ok !== true)) throw new Error('Invalid attachment removal acknowledgement')
+    },
     async send(sid: string, request: TurnRequest): Promise<ChatTurn & { duplicate: boolean }> {
-      const result = await transport.request(`${path(sid)}/turns`, 'POST', request, csrf)
+      const ids = request.attachments
+      if (ids !== undefined && (!Array.isArray(ids) || ids.length > MAX_CHAT_ATTACHMENTS ||
+          !ids.every(attachmentId) || new Set(ids).size !== ids.length)) throw new Error('Invalid turn attachments')
+      const { clientRequestId, text, model } = request
+      const result = await transport.request(`${path(sid)}/turns`, 'POST', { clientRequestId, text, model, ...(ids?.length ? { attachments: ids } : {}) }, csrf)
       if (!record(result) || !turn(result) || typeof result.duplicate !== 'boolean') throw new Error('Invalid chat acknowledgement')
       return { ...result, duplicate: result.duplicate }
     },

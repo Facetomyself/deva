@@ -3,7 +3,7 @@
  */
 import { createContext, memo, useContext, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { ChevronDown, Bot } from 'lucide-react'
-import { AttachmentList } from './attachments'
+import { AttachmentList, type AttachEntry } from './attachments'
 import type { Persona } from '../mock/extensions'
 import { Markdown } from '../features/chat/Markdown'
 import {
@@ -289,15 +289,16 @@ function AssistantBubble({ face, header, children, dataTurn, streaming }: {
   </div>
 }
 
-/** Plain-text projection of the same desktop bubbles; no business cards or host actions. */
-export const TextConversationMessage = memo(function TextConversationMessage({ role, text, streaming }: {
-  role: 'user' | 'assistant'; text: string; streaming?: boolean
+/** Workbench projection of the desktop bubbles, with display-only attachment metadata. */
+export const TextConversationMessage = memo(function TextConversationMessage({ role, text, streaming, attachments }: {
+  role: 'user' | 'assistant'; text: string; streaming?: boolean; attachments?: AttachEntry[]
 }): React.JSX.Element {
   const { t } = useI18n()
-  if (role === 'user') return <UserBubble text={text} />
+  const files = attachments?.length ? <AttachmentList variant="sent" entries={attachments} testId="workbench-message-attachments" /> : null
+  if (role === 'user') return <UserBubble text={text}>{files}</UserBubble>
   const name = t('cf.assistant')
   return <AssistantBubble face={<Avatar persona={{ id: 'general', name, desc: '', avatar: '' }} size={32} plain />} header={<span className="cf-msg__name">{name}</span>} streaming={streaming}>
-    <div className="msg__content">{text && <div className="msg__text"><Markdown text={text} textOnly /></div>}</div>
+    <div className="msg__content">{files}{text && <div className="msg__text"><Markdown text={text} textOnly /></div>}</div>
   </AssistantBubble>
 })
 
