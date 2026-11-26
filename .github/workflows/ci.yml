@@ -81,4 +81,9 @@ jobs:
       - name: Select the installed browser for pipe-based verification
         run: bash scripts/workbench/ci-select-chromium.sh
       - name: Exercise a real sandboxed worker, handoff and shutdown
+        id: handoff
         run: node apps/browser-worker/test-real/engine-handoff.mjs
+      - name: Distinguish local document navigation failures on real Chrome
+        if: ${{ failure() && steps.handoff.outcome == 'failure' }}
+        timeout-minutes: 4
+        run: node apps/browser-worker/test-real/engine-navigation-matrix.mjs
