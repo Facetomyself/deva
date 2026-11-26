@@ -31,8 +31,20 @@ export const ENTRY_EVENTS = Object.freeze([
   'targetCreated', 'targetAttach', 'targetDetach', 'frameNavigated', 'mainFrameNavigated', 'withinDocument', 'mainFrameLoad',
 ]);
 
+const TARGET_TYPES = new Set(['missing', 'page', 'iframe', 'worker', 'shared_worker', 'service_worker', 'tab', 'browser', 'other']);
+const URL_KINDS = new Set(['empty', 'blank', 'http', 'other']);
+const TARGET_VALUES = {
+  event: new Set(['snapshot', 'created', 'attached', 'detached', 'destroyed', 'attach-result', 'get-info', 'main-frame', 'crashed']),
+  eventStage: new Set([...DIAGNOSTIC_STAGES, 'live']),
+  type: TARGET_TYPES, snapshotType: TARGET_TYPES,
+  urlKind: URL_KINDS, snapshotUrlKind: URL_KINDS,
+  context: new Set(['omitted', 'unbound', 'same', 'different', 'invalid']),
+};
+const TARGET_FLAGS = ['root', 'sameTarget', 'sameSession', 'opener', 'postNavigation', 'waiting',
+  'snapshotContext', 'snapshotOpener', 'snapshotAttached'];
+
 export class EngineError extends Error {
-  constructor(code, { stage, command, launchHint, sandbox, entryNavigation } = {}) {
+  constructor(code, { stage, command, launchHint, sandbox, entryNavigation, target } = {}) {
     super(code);
     this.name = 'EngineError';
     this.code = code;
@@ -57,6 +69,15 @@ export class EngineError extends Error {
         if (Number.isInteger(value) && value >= 0 && value <= 256) counts[name] = value;
       }
       if (Object.keys(counts).length) safe.entryNavigation = Object.freeze(counts);
+    }
+    if (target && typeof target === 'object') {
+      const fields = {};
+      for (const [name, allowed] of Object.entries(TARGET_VALUES)) if (allowed.has(target[name])) fields[name] = target[name];
+      for (const name of TARGET_FLAGS) if (typeof target[name] === 'boolean') fields[name] = target[name];
+      if (Number.isInteger(target.snapshotCount) && target.snapshotCount >= 0 && target.snapshotCount <= 256) {
+        fields.snapshotCount = target.snapshotCount;
+      }
+      if (Object.keys(fields).length) safe.target = Object.freeze(fields);
     }
     if (Object.keys(safe).length) this.diagnostic = Object.freeze(safe);
   }

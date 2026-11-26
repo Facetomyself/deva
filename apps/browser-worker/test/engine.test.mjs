@@ -25,7 +25,8 @@ Buffer.from('0000000049454e44ae426082', 'hex').copy(png, 33);
 const FRAME = png.toString('base64');
 
 function protocolFixture({ probeOnly, verifySandbox = async () => {}, navigationMs = 400, commandMs = 350, signal,
-  initiallyHeld = [], launchTargets, unexpectedDiscovered, fetchNavigation = false, holdNavigationCommit = false } = {}) {
+  initiallyHeld = [], launchTargets, discoveryTargets, unexpectedDiscovered, duringDownload, omitAttachedContext = false,
+  fetchNavigation = false, holdNavigationCommit = false } = {}) {
   const writer = new PassThrough();
   const reader = new PassThrough();
   const commands = [];
@@ -65,12 +66,16 @@ function protocolFixture({ probeOnly, verifySandbox = async () => {}, navigation
       case 'Browser.getVersion': return respond(request, { product: 'Chrome/140.0.0.0' });
       case 'Target.getTargets': return respond(request, { targetInfos: initialTargets });
       case 'Target.setDiscoverTargets': {
-        for (const initial of initialTargets) emit('Target.targetCreated', { targetInfo: initial }, null);
+        for (const initial of discoveryTargets ?? initialTargets) emit('Target.targetCreated', { targetInfo: initial }, null);
         if (unexpectedDiscovered) emit('Target.targetCreated', { targetInfo: unexpectedDiscovered }, null);
         return respond(request);
       }
+      case 'Browser.setDownloadBehavior':
+        if (duringDownload) emit(duringDownload.method, duringDownload.params, null);
+        return respond(request);
       case 'Target.attachToTarget':
-        emit('Target.attachedToTarget', { sessionId: session, targetInfo: { ...info }, waitingForDebugger: false }, null);
+        emit('Target.attachedToTarget', { sessionId: session, targetInfo: { ...info,
+          ...(omitAttachedContext ? { browserContextId: undefined } : {}) }, waitingForDebugger: false }, null);
         return respond(request, { sessionId: session });
       case 'Target.getTargetInfo': return respond(request, { targetInfo: { ...info } });
       case 'Page.getFrameTree': return respond(request, { frameTree: { frame: { url: info.url, id: main } } });
@@ -178,13 +183,63 @@ test('startup attaches only to the single openerless initial blank and rejects f
   for (const launchTargets of [[{ ...initial, url: OTHER }], [{ ...initial, openerId: 'other' }], [{ ...initial, attached: true }],
     [initial, { ...initial, targetId: 'another' }]]) {
     const unexpected = protocolFixture({ launchTargets });
-    await assert.rejects(unexpected.engine, { code: 'BROWSER_TARGET_LOST', diagnostic: { stage: 'discover-bootstrap' } });
+    await assert.rejects(unexpected.engine, (error) => {
+      assert.equal(error.code, 'BROWSER_TARGET_LOST');
+      assert.equal(error.diagnostic.stage, 'discover-bootstrap');
+      assert.equal(error.diagnostic.target.event, 'snapshot');
+      assert.equal(error.diagnostic.target.snapshotCount, launchTargets.length);
+      return true;
+    });
     assert.equal(unexpected.closed, 1);
     assert.ok(!unexpected.commands.some(({ method }) => method === 'Page.navigate'));
   }
   const discovered = protocolFixture({ unexpectedDiscovered: { targetId: 'browser-worker', type: 'worker' } });
-  await assert.rejects(discovered.engine, { code: 'BROWSER_TARGET_LOST', diagnostic: { stage: 'watch-targets' } });
+  await assert.rejects(discovered.engine, (error) => {
+    assert.equal(error.code, 'BROWSER_TARGET_LOST');
+    assert.equal(error.diagnostic.stage, 'watch-targets');
+    assert.equal(error.diagnostic.target.type, 'worker');
+    assert.equal(error.diagnostic.target.sameTarget, false);
+    return true;
+  });
   assert.equal(discovered.closed, 1);
+});
+
+test('root reports may omit context or briefly omit URL only for the pinned blank', async (t) => {
+  const blank = { targetId: 'single-target', type: 'page', url: 'about:blank', attached: false };
+  const fixture = protocolFixture({ launchTargets: [blank], discoveryTargets: [{ ...blank, url: '',
+    browserContextId: 'default-private-profile' }], omitAttachedContext: true,
+  duringDownload: { method: 'Target.detachedFromTarget', params: {} } });
+  const engine = await fixture.engine;
+  t.after(() => engine.close());
+  assert.deepEqual(await engine.getPageInfo(), { origin: ORIGIN, title: 'Fixture' });
+  assert.equal(fixture.commands.filter(({ method }) => method === 'Target.attachToTarget').length, 1);
+});
+
+test('a conflicting explicit context during download guard yields only fixed target facts', async () => {
+  const fixture = protocolFixture({ duringDownload: { method: 'Target.targetCreated', params: {
+    targetInfo: { targetId: 'single-target', type: 'page', url: START, browserContextId: 'unknown-private-context' },
+  } } });
+  await assert.rejects(fixture.engine, (error) => {
+    assert.equal(error.code, 'BROWSER_TARGET_LOST');
+    assert.equal(error.diagnostic.stage, 'download-guard');
+    const { target } = error.diagnostic;
+    assert.equal(target.event, 'created');
+    assert.equal(target.eventStage, 'download-guard');
+    assert.equal(target.type, 'page');
+    assert.equal(target.context, 'different');
+    assert.equal(target.urlKind, 'http');
+    assert.equal(target.sameTarget, true);
+    assert.equal(target.postNavigation, false);
+    assert.equal(target.snapshotCount, 1);
+    assert.equal(target.snapshotUrlKind, 'blank');
+    assert.ok(!JSON.stringify(target).includes(START));
+    assert.ok(!JSON.stringify(target).includes('unknown-private-context'));
+    return true;
+  });
+  assert.equal(fixture.closed, 1);
+  const unsafe = new EngineError('BROWSER_TARGET_LOST', { target: { event: START, type: START, sameTarget: START,
+    root: true, snapshotCount: 1, observedUrl: START } });
+  assert.deepEqual(unsafe.diagnostic.target, { root: true, snapshotCount: 1 });
 });
 
 test('startup installs guards and attests its existing renderer before activation and site navigation', async (t) => {
