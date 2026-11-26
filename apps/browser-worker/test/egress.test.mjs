@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
-import { chmod, lstat, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises'
+import { writeFileSync } from 'node:fs'
+import { chmod, lstat, mkdtemp, readdir, readFile, rename, rm, symlink, writeFile } from 'node:fs/promises'
 import { createServer as createHttpServer, request } from 'node:http'
 import { createConnection, createServer as createTcpServer } from 'node:net'
 import { once } from 'node:events'
@@ -8,6 +9,7 @@ import test from 'node:test'
 import { parseSites, probeEgress, startEgress, startLocalProxy } from '../src/egress/index.mjs'
 import { selectAddress } from '../src/egress/address.mjs'
 import { limits } from '../src/egress/lifecycle.mjs'
+import { bindBrokerSocket } from '../src/egress/unix.mjs'
 
 function listed(url, id = 'fixture') { return { id, label: `Site ${id}`, url } }
 
@@ -157,6 +159,7 @@ test('Unix broker requires 0700, reserves a 0600 socket, and supports transport 
   await rm(socketPath)
   const { broker, adapter } = await setup(t, dir, [], [])
   const stat = await lstat(socketPath)
+  assert.deepEqual(await readdir(dir), ['egress.sock'])
   assert.equal(broker.socketPath, socketPath)
   assert.ok(stat.isSocket())
   assert.equal(stat.mode & 0o7777, 0o600)
@@ -181,15 +184,66 @@ test('an existing local adapter never relays to a replacement socket', async (t)
   // Keep asserting zero response bytes, including any received before a reset.
   const dropped = () => proxyRaw(adapter, probe, { allowReset: true })
   assert.match(await proxyRaw(adapter, probe), /^HTTP\/1\.1 204 /)
-  await chmod(broker.socketPath, 0o660)
-  assert.equal(await dropped(), '')
-  await chmod(broker.socketPath, 0o600)
-  assert.match(await proxyRaw(adapter, probe), /^HTTP\/1\.1 204 /)
   await broker.close()
   const replacement = await startEgress({ runDir: dir, sites: [] })
   t.after(() => replacement.close())
   assert.equal(await probeEgress(replacement.socketPath), true)
   assert.equal(await dropped(), '')
+})
+
+test('a foreign file at the published path survives broker close', async (t) => {
+  const dir = await temporaryDir(t)
+  const { broker, adapter } = await setup(t, dir, [], [])
+  const probe = 'OPTIONS * HTTP/1.1\r\nHost: egress.invalid\r\n\r\n'
+  const moved = join(dir, 'moved.sock')
+  await chmod(broker.socketPath, 0o660)
+  assert.equal(await proxyRaw(adapter, probe, { allowReset: true }), '')
+  await chmod(broker.socketPath, 0o600)
+  assert.match(await proxyRaw(adapter, probe), /^HTTP\/1\.1 204 /)
+  await rename(broker.socketPath, moved)
+  await writeFile(broker.socketPath, 'foreign-file', { flag: 'wx' })
+  assert.equal(await proxyRaw(adapter, probe, { allowReset: true }), '')
+  await broker.close()
+  assert.equal(await readFile(broker.socketPath, 'utf8'), 'foreign-file')
+  assert.ok((await lstat(moved)).isSocket())
+  assert.deepEqual((await readdir(dir)).sort(), ['egress.sock', 'moved.sock'])
+})
+
+test('a foreign listener at the published path survives broker close and sees no adapter traffic', async (t) => {
+  const dir = await temporaryDir(t)
+  const { broker, adapter } = await setup(t, dir, [], [])
+  await rename(broker.socketPath, join(dir, 'moved.sock'))
+  let accepted = 0
+  let received = 0
+  const foreign = createTcpServer((socket) => {
+    accepted++
+    socket.once('data', (chunk) => { received += chunk.length; socket.end('foreign-listener') })
+  })
+  foreign.listen(broker.socketPath)
+  await once(foreign, 'listening')
+  t.after(() => new Promise((resolve) => foreign.close(resolve)))
+  await chmod(broker.socketPath, 0o600)
+  const identity = await lstat(broker.socketPath, { bigint: true })
+  const probe = 'OPTIONS * HTTP/1.1\r\nHost: egress.invalid\r\n\r\n'
+  assert.equal(await proxyRaw(adapter, probe, { allowReset: true }), '')
+  await broker.close()
+  const remaining = await lstat(broker.socketPath, { bigint: true })
+  assert.equal(remaining.ino, identity.ino)
+  assert.equal(remaining.dev, identity.dev)
+  assert.equal(accepted, 0)
+  assert.equal(received, 0)
+  assert.equal(await proxyRaw({ socketPath: broker.socketPath }, 'direct fixture check'), 'foreign-listener')
+})
+
+test('failed publication preserves a file created after the broker preflight', async (t) => {
+  const dir = await temporaryDir(t)
+  const socketPath = join(dir, 'egress.sock')
+  const server = createHttpServer()
+  server.once('listening', () => writeFileSync(socketPath, 'racing-file', { flag: 'wx' }))
+  await assert.rejects(bindBrokerSocket(server, dir, new Set()), { code: 'EEXIST' })
+  assert.equal(server.listening, false)
+  assert.equal(await readFile(socketPath, 'utf8'), 'racing-file')
+  assert.deepEqual(await readdir(dir), ['egress.sock'])
 })
 
 test('ordinary HTTP preserves site and CSRF semantics while stripping hop headers', async (t) => {
