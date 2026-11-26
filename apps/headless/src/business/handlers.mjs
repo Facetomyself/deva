@@ -6,6 +6,7 @@ import { chatRoutes } from '../chat/routes.mjs'
 import { HttpError, json, readJson } from '../http/policy.mjs'
 import { openSettings } from './settings.mjs'
 import { allowedModelOrigins } from './provider-fetch.mjs'
+import { openLibrary } from './library-routes.mjs'
 
 const keyPath = /^\/api\/v1\/provider-keys\/([A-Za-z0-9_.-]{1,128})$/
 const names = new Set(['/api/v1/settings', '/api/v1/provider-keys', '/api/v1/provider-models'])
@@ -38,22 +39,26 @@ async function probe(settings, supplied, opts, signal) {
   return connection.listModels()
 }
 
-export async function openBusiness({ dataDir, vault, version, allowedOrigins = [] }) {
+export async function openBusiness({ dataDir, vault, version, allowedOrigins = [], workspaceRoot, privateRoots }) {
   const opts = { version, allowedOrigins: [...allowedModelOrigins(allowedOrigins)] }
   const settings = await openSettings({ dataDir, vault })
   const lifetime = new AbortController()
   const journal = createEventJournal()
-  const turns = createTextTurns({ dataDir, settings, journal, ...opts })
-  const chats = chatRoutes(turns)
+  let library, turns
+  try {
+    library = await openLibrary({ dataDir, workspaceRoot, privateRoots })
+    turns = createTextTurns({ dataDir, settings, journal, ...opts, resolveRole: library.resolveRole })
+  } catch (err) { journal.close(); await library?.close(); throw err }
+  const chats = chatRoutes(turns, { withRoleForChat: library.withRoleForChat })
   return {
-    capabilities: Object.freeze({ textChat: true }),
+    capabilities: Object.freeze({ textChat: true, library: true }),
     createRealtime: ({ auth, policy }) => createChatWebSocket({ turns, journal, auth, policy }),
     getConfig: () => settings.getPublicConfig(),
     async handle(req, res, { auth, policy }) {
       const path = (req.url ?? '').split('?', 1)[0]
       if (path === '/api/v1/chats' || path.startsWith('/api/v1/chats/')) return chats(req, res, { auth, policy })
       const match = keyPath.exec(path)
-      if (!names.has(path) && !match) return false
+      if (!names.has(path) && !match) return library.handle(req, res, { auth, policy })
       const methods = match ? ['PUT', 'DELETE'] : path === '/api/v1/settings' ? ['GET', 'PATCH'] : path.endsWith('models') ? ['POST'] : ['GET']
       const write = req.method !== 'GET'
       try {
@@ -92,6 +97,9 @@ export async function openBusiness({ dataDir, vault, version, allowedOrigins = [
       }
       return true
     },
-    async close() { lifetime.abort(); try { await turns.close() } finally { journal.close() } }
+    async close() {
+      lifetime.abort()
+      try { await turns.close() } finally { journal.close(); await library.close() }
+    }
   }
 }

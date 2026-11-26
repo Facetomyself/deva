@@ -28,6 +28,7 @@ Options override the environment:
   --port NUMBER           DEVA_PORT (default 8787, or 0 for an ephemeral serve port)
   --public-url ORIGIN     DEVA_PUBLIC_URL (defaults to the HTTP loopback origin; required on non-loopback binds)
   --web-dir PATH          DEVA_WEB_DIR (default apps/desktop/out/workbench, relative to the project)
+  --workspace-root PATH   DEVA_WORKSPACE_ROOT (optional mounted parent for registered projects; default none)
   --help                  Show this help.
 
 DEVA_PROVIDER_ORIGINS is an optional comma-separated list of exact private model origins for serve.
@@ -39,7 +40,7 @@ const runtime = { 'run-dir': str }
 const origin = { host: str, port: str, 'public-url': str }
 const flags = Object.freeze({
   'init-key': { ...paths, ...key, 'if-missing': { type: 'boolean' } },
-  serve: { ...paths, ...key, ...runtime, ...origin, 'web-dir': str },
+  serve: { ...paths, ...key, ...runtime, ...origin, 'web-dir': str, 'workspace-root': str },
   claim: { ...paths, ...runtime, ...origin },
   status: { ...paths, ...runtime }
 })
@@ -68,7 +69,11 @@ function configuration(command, values, env) {
   if (command === 'serve') {
     config.webDir = workbenchPath(values['web-dir'] ?? env.DEVA_WEB_DIR ?? DEFAULT_WEB_DIR, 'Web directory')
     const origins = env.DEVA_PROVIDER_ORIGINS?.trim()
-    if (origins) config.businessOptions = { allowedOrigins: origins.split(',').map(origin => origin.trim()) }
+    const workspaceRoot = values['workspace-root'] ?? env.DEVA_WORKSPACE_ROOT
+    config.businessOptions = {
+      ...(origins ? { allowedOrigins: origins.split(',').map(origin => origin.trim()) } : {}),
+      ...(workspaceRoot ? { workspaceRoot: workbenchPath(workspaceRoot, 'Workspace root') } : {})
+    }
   }
   return config
 }
