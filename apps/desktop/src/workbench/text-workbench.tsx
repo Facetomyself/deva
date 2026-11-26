@@ -335,7 +335,8 @@ function TextComposer({ sid, draft, model, onPick, managedModel, openSettings, w
   const groups = modelGroups(providers)
   const picked = findActive(groups.map((g) => ({ ...g.p, models: g.models })), managedModel ? managedModel.pinned ?? null : model || activeModelId)
   const sendModel = managedModel?.pinned === null ? null : picked ? `${picked.provider.id}:${picked.model.id}` : undefined
-  const canSend = !writeLocked && !managedModel?.disabled && !active && ready && sendModel !== undefined
+  const canSend = !writeLocked && !managedModel?.disabled && !active && ready && sendModel !== undefined &&
+    (sendModel !== null || groups.length > 0)
   const over = inputBytes(text) > MAX_TEXT_INPUT
   const ids = readyAttachmentIds(attachmentDraft)
   const mounted = useRef(false)
