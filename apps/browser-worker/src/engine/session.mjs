@@ -17,6 +17,7 @@ const cloneFrame = (frame) => ({ ...frame, bytes: Buffer.from(frame.bytes) });
 export async function startChromiumSession({ writer, reader, policy, verifySandbox, shutdown, probeOnly = false,
   commandMs, navigationMs = NAVIGATION_MS, signal, abortCode = () => 'BROWSER_ABORTED' }) {
   let contextId, targetId, sessionId, frameId;
+  let startupStage = 'version';
   let opening = false;
   const attached = new Map();
   let fatalCode = null, closing = null, busy = false, stopping = null, notice = null;
@@ -314,18 +315,29 @@ export async function startChromiumSession({ writer, reader, policy, verifySandb
   async function setup() {
     const version = await root('Browser.getVersion');
     if (!/^(?:Chromium|Chrome|HeadlessChrome)\/[\d.]+$/u.test(version.product ?? '')) throw fail('BROWSER_START_FAILED');
+    startupStage = 'context';
     const context = await root('Target.createBrowserContext', { disposeOnDetach: true });
     if (typeof context.browserContextId !== 'string') throw fail('BROWSER_START_FAILED');
     contextId = context.browserContextId;
+    startupStage = 'download-guard';
     await root('Browser.setDownloadBehavior', { behavior: 'deny', browserContextId: contextId, eventsEnabled: true });
+    startupStage = 'root-auto-attach';
     await root('Target.setAutoAttach', { ...AUTO_ATTACH, filter: PAGE_TARGETS });
     opening = true;
+    startupStage = 'create-target';
     const created = await root('Target.createTarget', { url: BOOTSTRAP_URL, browserContextId: contextId });
     if (typeof created.targetId !== 'string') throw fail('BROWSER_START_FAILED');
     targetId = created.targetId;
+    startupStage = 'wait-target';
     sessionId = await awaitState(() => attached.get(targetId));
     attached.clear();
     opening = false;
+    // Chrome can defer renderer-dependent replies while its new target waits for a debugger.
+    // Resume only the fixed internal blank page, before sending Page/Network/Emulation commands.
+    // Its download guard is already active and no site is navigated until all guards and attestation pass.
+    startupStage = 'resume-bootstrap';
+    await page('Runtime.runIfWaitingForDebugger');
+    startupStage = 'page-controls';
     await page('Target.setAutoAttach', { ...AUTO_ATTACH, filter: SUBTARGETS });
     await page('Page.enable');
     await page('Page.setLifecycleEventsEnabled', { enabled: true });
@@ -340,12 +352,16 @@ export async function startChromiumSession({ writer, reader, policy, verifySandb
     await page('Fetch.enable', { handleAuthRequests: true, patterns: [
       { urlPattern: '*', resourceType: 'Document', requestStage: 'Request' },
     ] });
-    await page('Runtime.runIfWaitingForDebugger');
     // On a cold launch Chromium can defer creating a renderer until it paints.
     // The internal blank page paints first; no registered site is opened until attested.
+    startupStage = 'bootstrap-png';
     await screenshot();
+    startupStage = 'sandbox-attest';
     await verifySandbox();
-    if (!probeOnly) await navigate(policy.startUrl);
+    if (!probeOnly) {
+      startupStage = 'entry-navigation';
+      await navigate(policy.startUrl);
+    }
   }
 
   const abort = () => fatal(abortCode());
@@ -358,8 +374,9 @@ export async function startChromiumSession({ writer, reader, policy, verifySandb
   } catch (error) {
     await close();
     const code = signal?.aborted ? abortCode() : error?.code;
-    if (!SHELL_REASONS.has(code) && code !== 'BROWSER_COMMAND_FAILED' && code?.startsWith('BROWSER_')) throw fail(code);
-    throw fail('BROWSER_START_FAILED');
+    const diagnostic = { stage: startupStage, command: error?.diagnostic?.command };
+    if (!SHELL_REASONS.has(code) && code !== 'BROWSER_COMMAND_FAILED' && code?.startsWith('BROWSER_')) throw fail(code, diagnostic);
+    throw fail('BROWSER_START_FAILED', diagnostic);
   } finally { signal?.removeEventListener('abort', abort); }
 
   return Object.freeze({

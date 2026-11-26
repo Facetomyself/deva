@@ -15,9 +15,10 @@ export function connectPipe(writer, reader, { onEvent, onFailure, commandMs = CO
   let size = 0;
   const pending = new Map();
 
-  function stop(code = 'BROWSER_CLOSED') {
+  function stop(code = 'BROWSER_CLOSED', command) {
     if (terminal) return;
-    terminal = fail(code);
+    if (command === undefined && pending.size === 1) command = pending.values().next().value.method;
+    terminal = fail(code, { command });
     for (const { reject, timer } of pending.values()) {
       clearTimeout(timer);
       reject(terminal);
@@ -38,10 +39,10 @@ export function connectPipe(writer, reader, { onEvent, onFailure, commandMs = CO
       if ((message.sessionId ?? null) !== request.sessionId) return stop('BROWSER_PROTOCOL_INVALID');
       pending.delete(message.id);
       clearTimeout(request.timer);
-      if (message.error) return request.reject(fail('BROWSER_COMMAND_FAILED'));
+      if (message.error) return request.reject(fail('BROWSER_COMMAND_FAILED', { command: request.method }));
       if (!message.result || typeof message.result !== 'object' || Array.isArray(message.result)) {
-        request.reject(fail('BROWSER_PROTOCOL_INVALID'));
-        return stop('BROWSER_PROTOCOL_INVALID');
+        request.reject(fail('BROWSER_PROTOCOL_INVALID', { command: request.method }));
+        return stop('BROWSER_PROTOCOL_INVALID', request.method);
       }
       request.resolve(message.result);
     } else if (typeof message.method === 'string' && (message.sessionId === undefined || typeof message.sessionId === 'string')) {
@@ -84,8 +85,8 @@ export function connectPipe(writer, reader, { onEvent, onFailure, commandMs = CO
       const encoded = Buffer.from(`${JSON.stringify({ id, method, params, ...(sessionId ? { sessionId } : {}) })}\0`);
       if (encoded.length > MAX_OUTGOING) return Promise.reject(fail('BROWSER_PROTOCOL_LIMIT'));
       return new Promise((resolve, reject) => {
-        const timer = setTimeout(() => stop('BROWSER_TIMEOUT'), commandMs);
-        pending.set(id, { resolve, reject, sessionId, timer });
+        const timer = setTimeout(() => stop('BROWSER_TIMEOUT', method), commandMs);
+        pending.set(id, { resolve, reject, sessionId, timer, method });
         try { writer.write(encoded, (error) => { if (error) stop('BROWSER_DISCONNECTED'); }); }
         catch { stop('BROWSER_DISCONNECTED'); }
       });

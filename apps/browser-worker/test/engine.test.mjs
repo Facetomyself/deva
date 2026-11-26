@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { PassThrough } from 'node:stream';
 import test from 'node:test';
-import { createChromiumEngine, probeChromium } from '../src/engine/chromium.mjs';
+import { createChromiumEngine, EngineError, probeChromium } from '../src/engine/chromium.mjs';
 import { configPolicy, publicPageInfo, VIEWPORT } from '../src/engine/policy.mjs';
 import { startChromiumSession } from '../src/engine/session.mjs';
 
@@ -20,7 +20,8 @@ png.writeUInt32BE(VIEWPORT.height, 20);
 Buffer.from('0000000049454e44ae426082', 'hex').copy(png, 33);
 const FRAME = png.toString('base64');
 
-function protocolFixture({ probeOnly, verifySandbox = async () => {}, navigationMs = 400, commandMs = 350, signal } = {}) {
+function protocolFixture({ probeOnly, verifySandbox = async () => {}, navigationMs = 400, commandMs = 350, signal,
+  pauseRenderer = false, initiallyHeld = [] } = {}) {
   const writer = new PassThrough();
   const reader = new PassThrough();
   const commands = [];
@@ -30,8 +31,8 @@ function protocolFixture({ probeOnly, verifySandbox = async () => {}, navigation
   const target = 'single-target';
   const info = { url: 'about:blank', title: '', targetId: target, browserContextId: context, type: 'page' };
   const entries = [{ id: 0, url: 'about:blank' }];
-  let index = 0, loader = 0, closed = 0, buffer = '';
-  let hold = new Set();
+  let index = 0, loader = 0, closed = 0, buffer = '', resumed = !pauseRenderer;
+  const hold = new Set(initiallyHeld);
   const held = new Map();
   const emit = (method, params, sessionId = session) => send({ method, params, ...(sessionId ? { sessionId } : {}) });
   function send(message, split = false) {
@@ -52,13 +53,17 @@ function protocolFixture({ probeOnly, verifySandbox = async () => {}, navigation
   function onCommand(request) {
     commands.push(request);
     const { method, params } = request;
-    if (hold.has(method)) { held.set(method, request); return; }
+    if (hold.has(method) || (!resumed && /^(?:Page|Network|Emulation|Fetch)\./u.test(method))) {
+      held.set(method, request);
+      return;
+    }
     switch (method) {
       case 'Browser.getVersion': return respond(request, { product: 'Chrome/140.0.0.0' });
       case 'Target.createBrowserContext': return respond(request, { browserContextId: context });
       case 'Target.createTarget':
-        emit('Target.attachedToTarget', { sessionId: session, targetInfo: { ...info } }, null);
+        emit('Target.attachedToTarget', { sessionId: session, targetInfo: { ...info }, waitingForDebugger: !resumed }, null);
         return respond(request, { targetId: target });
+      case 'Runtime.runIfWaitingForDebugger': resumed = true; return respond(request);
       case 'Target.getTargetInfo': return respond(request, { targetInfo: { ...info } });
       case 'Page.getFrameTree': return respond(request, { frameTree: { frame: { url: info.url, id: main } } });
       case 'Page.navigate': {
@@ -93,6 +98,34 @@ function protocolFixture({ probeOnly, verifySandbox = async () => {}, navigation
     get closed() { return closed; },
   };
 }
+
+test('startup resumes a paused blank renderer before renderer controls and still secures it before the site', async (t) => {
+  let attested = false;
+  const fixture = protocolFixture({ pauseRenderer: true, verifySandbox: async () => {
+    assert.equal(fixture.commands.at(-1).method, 'Page.captureScreenshot');
+    assert.ok(!fixture.commands.some(({ method }) => method === 'Page.navigate'));
+    attested = true;
+  } });
+  const engine = await fixture.engine;
+  t.after(() => engine.close());
+  assert.equal(attested, true);
+  const order = fixture.commands.map(({ method }) => method);
+  assert.ok(order.indexOf('Runtime.runIfWaitingForDebugger') < order.indexOf('Page.enable'));
+  assert.ok(order.indexOf('Browser.setDownloadBehavior') < order.indexOf('Runtime.runIfWaitingForDebugger'));
+  assert.ok(order.indexOf('Fetch.enable') < order.indexOf('Page.navigate'));
+});
+
+test('startup timeout reports only a predefined phase and CDP command', async () => {
+  const fixture = protocolFixture({ probeOnly: true, commandMs: 50, initiallyHeld: ['Page.captureScreenshot'] });
+  await assert.rejects(fixture.engine, (error) => {
+    assert.equal(error.code, 'BROWSER_TIMEOUT');
+    assert.equal(error.message, 'BROWSER_TIMEOUT');
+    assert.deepEqual(error.diagnostic, { stage: 'bootstrap-png', command: 'Page.captureScreenshot' });
+    return true;
+  });
+  assert.equal(fixture.closed, 1);
+  assert.equal(new EngineError('BROWSER_START_FAILED', { stage: '/private/path', command: START }).diagnostic, undefined);
+});
 
 test('startup applies fixed pipe methods and keeps one isolated target through handoff and history', async (t) => {
   const fixture = protocolFixture();

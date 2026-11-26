@@ -6,7 +6,7 @@ import { createServer, request } from 'node:http';
 import { isAbsolute, join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { inflateSync } from 'node:zlib';
-import { createChromiumEngine, probeChromium } from '../src/engine/chromium.mjs';
+import { createChromiumEngine, EngineError, probeChromium } from '../src/engine/chromium.mjs';
 
 // Run as a normal Linux user: node apps/browser-worker/test-real/engine-handoff.mjs [/absolute/chrome]
 // A missing or unsandboxed browser is a failing CI gate, not an optional test skip.
@@ -15,6 +15,7 @@ const receiptColor = [34, 145, 83];
 const input = '人工接管·状态保留';
 const ENTRY_QUERY = 'token=fixture-local-query';
 const ENTRY_HASH = 'fixture-local-fragment';
+let verificationPhase = 'preflight';
 
 async function executable() {
   const chosen = process.argv[2] || process.env.CHROMIUM_PATH || process.env.CHROME_PATH;
@@ -194,16 +195,20 @@ async function run() {
     proxy = makeProxy(origin, state);
     const proxyUrl = await listenLoopback(proxy);
     const options = { executablePath, proxyUrl };
+    verificationPhase = 'probe';
     assert.deepEqual(await probeChromium(options), { available: true });
     assert.equal(state.proxyRequests, 0, 'readiness probe must stay on about:blank');
     await verifyExited();
+    verificationPhase = 'open';
     engine = await createChromiumEngine({ ...options, startUrl: `${origin}/form?${ENTRY_QUERY}#${ENTRY_HASH}` });
     owned = await ownedBrowser();
+    verificationPhase = 'first-frame';
     await eventually(() => engine.getPageInfo(), (info) => info.title === 'Fixture Form');
     assert.deepEqual(await engine.getPageInfo(), { origin, title: 'Fixture Form' });
     const first = await engine.captureFrame();
     assert.deepEqual(topLeftRgb(first), color);
     assert.ok(engine.getLatestFrame().bytes.equals(first.bytes));
+    verificationPhase = 'handoff';
     engine.setInputPrivacy(true);
     assert.equal(engine.getLatestFrame(), null);
     await assert.rejects(engine.captureFrame(), { code: 'BROWSER_PRIVACY_ACTIVE' });
@@ -222,14 +227,17 @@ async function run() {
       { origin, title: 'Fixture Complete' });
     assert.equal(state.submitCount, 1, 'Chinese form field should survive the handoff and be submitted once');
     assert.ok(state.proxyRequests >= 3, 'fixture documents must travel through the loopback proxy');
+    verificationPhase = 'history';
     await engine.back();
     await eventually(() => engine.getPageInfo(), (info) => info.title === 'Fixture Form');
     await engine.forward();
     await eventually(() => engine.getPageInfo(), (info) => info.title === 'Fixture Complete');
+    verificationPhase = 'close';
     await engine.close();
     await verifyExited(owned);
     engine = null;
 
+    verificationPhase = 'abort';
     let stalledOwned;
     const abort = new AbortController();
     state.onStall = () => {
@@ -249,6 +257,10 @@ async function run() {
 }
 
 run().catch((error) => {
-  console.error(`FAIL ${error.code ?? error.name}: ${error.message}`);
+  const diagnostic = error instanceof EngineError ? error.diagnostic : undefined;
+  const code = /^BROWSER_[A-Z_]+$/u.test(error?.code) ? error.code : 'FIXTURE_FAILURE';
+  const labels = [`phase=${verificationPhase}`, diagnostic?.stage && `stage=${diagnostic.stage}`,
+    diagnostic?.command && `command=${diagnostic.command}`].filter(Boolean);
+  console.error(`FAIL ${code} [${labels.join(' ')}]`);
   process.exitCode = 1;
 });

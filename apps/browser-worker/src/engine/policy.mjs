@@ -1,14 +1,32 @@
 import { isAbsolute } from 'node:path';
 
+const DIAGNOSTIC_STAGES = new Set([
+  'version', 'context', 'download-guard', 'root-auto-attach', 'create-target', 'wait-target', 'resume-bootstrap',
+  'page-controls', 'bootstrap-png', 'sandbox-attest', 'entry-navigation',
+]);
+const DIAGNOSTIC_COMMANDS = new Set([
+  'Browser.getVersion', 'Browser.setDownloadBehavior', 'Browser.close', 'Target.createBrowserContext',
+  'Target.createTarget', 'Target.setAutoAttach', 'Target.getTargetInfo', 'Target.closeTarget',
+  'Runtime.runIfWaitingForDebugger', 'Page.enable', 'Page.setLifecycleEventsEnabled', 'Page.setInterceptFileChooserDialog',
+  'Network.setCacheDisabled', 'Network.setBypassServiceWorker', 'Emulation.setDeviceMetricsOverride', 'Page.getFrameTree',
+  'Fetch.enable', 'Fetch.continueRequest', 'Fetch.continueResponse', 'Fetch.failRequest', 'Fetch.continueWithAuth',
+  'Page.captureScreenshot', 'Page.navigate', 'Page.getNavigationHistory', 'Page.navigateToHistoryEntry', 'Page.stopLoading',
+  'Page.handleJavaScriptDialog', 'Input.insertText', 'Input.dispatchKeyEvent', 'Input.dispatchMouseEvent',
+]);
+
 export class EngineError extends Error {
-  constructor(code) {
+  constructor(code, { stage, command } = {}) {
     super(code);
     this.name = 'EngineError';
     this.code = code;
+    const safe = {};
+    if (DIAGNOSTIC_STAGES.has(stage)) safe.stage = stage;
+    if (DIAGNOSTIC_COMMANDS.has(command)) safe.command = command;
+    if (Object.keys(safe).length) this.diagnostic = Object.freeze(safe);
   }
 }
 
-export const fail = (code) => new EngineError(code);
+export const fail = (code, diagnostic) => new EngineError(code, diagnostic);
 export const VIEWPORT = Object.freeze({ width: 1024, height: 768 });
 export const FRAME_LIMIT = 4 * 1024 * 1024;
 export const BOOTSTRAP_URL = 'about:blank';
