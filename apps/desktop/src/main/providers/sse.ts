@@ -1,5 +1,3 @@
-import { isEn } from '../locale'
-
 /**
  * 流空闲判定阈值：连续这么久收不到任何字节（含 SSE 心跳/注释帧），
  * 即判定连接已"僵死"（半开 TCP：socket 未报错但也不再吐数据）。
@@ -10,24 +8,24 @@ export const STREAM_IDLE_MS = 60_000
 
 /** 空闲超时专用错误：名字不是 'AbortError'，故被适配器归一化为 retryable 网络错误。 */
 export class StreamIdleError extends Error {
-  constructor(ms: number) {
+  constructor(ms: number, en: boolean) {
     const s = Math.round(ms / 1000)
-    super(isEn() ? `No data for over ${s}s; treating the connection as dropped` : `连接空闲超过 ${s}s，判定为中断`)
+    super(en ? `No data for over ${s}s; treating the connection as dropped` : `连接空闲超过 ${s}s，判定为中断`)
     this.name = 'StreamIdleError'
   }
 }
 
 /**
  * 极简 SSE 解析：把 fetch 的响应体流切成一个个 {event, data} 事件。
- * 响应来自统一出站 httpFetch（../http.ts，Chromium 网络栈），按 Web Streams 读取，无需任何依赖，
- * 契合「零环境配置」铁律。Anthropic 与 OpenAI 两套流都走它。
+ * 按 Web Streams 读取由宿主提供的响应，三个协议共用。
  *
  * idleMs>0 时启用空闲看门狗：任一 read() 超过 idleMs 未返回即抛 StreamIdleError，
  * 把"僵死的半开连接"变成一个可被上层识别、可自动重连的真实信号。
  */
 export async function* iterateSSE(
   res: Response,
-  idleMs = 0
+  idleMs: number,
+  isEn: () => boolean
 ): AsyncGenerator<{ event?: string; data: string }> {
   if (!res.body) return
   const reader = res.body.getReader()
@@ -36,7 +34,7 @@ export async function* iterateSSE(
 
   try {
     for (;;) {
-      const { done, value } = idleMs > 0 ? await readWithIdle(reader, idleMs) : await reader.read()
+      const { done, value } = idleMs > 0 ? await readWithIdle(reader, idleMs, isEn) : await reader.read()
       if (done) break
       // 统一换行，避免 \r\n 导致分帧漏判
       buffer += decoder.decode(value, { stream: true }).replace(/\r\n/g, '\n')
@@ -66,11 +64,12 @@ export async function* iterateSSE(
 /** reader.read() 与空闲计时器竞速：超时抛 StreamIdleError；正常返回则清除计时器。 */
 async function readWithIdle(
   reader: ReadableStreamDefaultReader<Uint8Array>,
-  idleMs: number
+  idleMs: number,
+  isEn: () => boolean
 ): Promise<ReadableStreamReadResult<Uint8Array>> {
   let timer: ReturnType<typeof setTimeout> | undefined
   const idle = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => reject(new StreamIdleError(idleMs)), idleMs)
+    timer = setTimeout(() => reject(new StreamIdleError(idleMs, isEn())), idleMs)
   })
   try {
     return await Promise.race([reader.read(), idle])

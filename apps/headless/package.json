@@ -7,6 +7,8 @@
   "license": "MIT",
   "engines": { "node": ">=22" },
   "scripts": {
-    "test": "node --test --test-concurrency=1 test/*.test.mjs"
-  }
+    "build": "node scripts/build-provider.mjs",
+    "test": "node scripts/build-provider.mjs && node --test --test-concurrency=1 test/*.test.mjs"
+  },
+  "devDependencies": { "esbuild": "0.21.5" }
 }

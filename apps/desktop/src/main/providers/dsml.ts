@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import type { StopReason } from '../../shared/chat-protocol'
-import { settleBrokenCalls, type StreamEvent } from './types'
+import { settleBrokenCalls } from './protocol'
+import type { StreamEvent } from './types'
 
 /**
  * DeepSeek 工具调用标记（DSML）漏进正文的兜底（issue #75）。

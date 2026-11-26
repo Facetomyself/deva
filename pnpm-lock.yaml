@@ -132,7 +132,11 @@ importers:
         specifier: ^5.4.11
         version: 5.4.21(@types/node@22.20.1)
 
-  apps/headless: {}
+  apps/headless:
+    devDependencies:
+      esbuild:
+        specifier: 0.21.5
+        version: 0.21.5
 
   apps/relay:
     devDependencies:

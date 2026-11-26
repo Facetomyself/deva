@@ -1,5 +1,4 @@
-import { httpFetch } from '../http'
-import { isEn } from '../locale'
+import type { ProviderTransport } from './runtime'
 
 /**
  * 等待响应的时长上限：请求发出后这么久还没收到响应头，即判定为中断（可重试，由主循环自动重连）。
@@ -16,10 +15,10 @@ const ERROR_BODY_TIMEOUT_MS = 30_000
 
 /** 等待响应超时：名字不是 'AbortError'，适配器按可重试的网络错误处理（同 StreamIdleError）。 */
 class ResponseTimeoutError extends Error {
-  constructor(ms: number) {
+  constructor(ms: number, en: boolean) {
     const min = Math.round(ms / 60_000)
     super(
-      isEn()
+      en
         ? `No response from the server for over ${min} min; treating the connection as dropped`
         : `等待服务器响应超过 ${min} 分钟，判定为中断`
     )
@@ -28,12 +27,17 @@ class ResponseTimeoutError extends Error {
 }
 
 /**
- * 发起模型请求（三个适配器共用）：在 httpFetch 之上加等待响应的时长上限。
+ * 发起模型请求（三个适配器共用）：在宿主 transport 之上加等待响应的时长上限。
  * 用户中止照常抛 AbortError；等待响应超时抛 ResponseTimeoutError。
  * 非 2xx：错误正文也在这里限时读完，返回只带这段正文的新 Response——服务端回了错误状态却迟迟不把正文
  * 发完时，适配器读正文那一步同样会一直等。
  */
-export async function fetchModel(url: string, init: RequestInit): Promise<Response> {
+export async function fetchModel(
+  httpFetch: ProviderTransport['httpFetch'],
+  isEn: ProviderTransport['isEn'],
+  url: string,
+  init: RequestInit
+): Promise<Response> {
   const user = init.signal ?? undefined
   const limit = new AbortController()
   // AbortSignal.any 不在用户信号上加事件监听，每步调用一次也不会越积越多。
@@ -62,7 +66,7 @@ export async function fetchModel(url: string, init: RequestInit): Promise<Respon
       headers: res.headers
     })
   } catch (e) {
-    if (timedOut && !user?.aborted) throw new ResponseTimeoutError(RESPONSE_TIMEOUT_MS)
+    if (timedOut && !user?.aborted) throw new ResponseTimeoutError(RESPONSE_TIMEOUT_MS, isEn())
     throw e
   } finally {
     clearTimeout(clock)
