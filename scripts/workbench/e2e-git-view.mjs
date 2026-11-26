@@ -41,6 +41,12 @@ function observeWire(openBusiness, signal) {
             }
             pending.push(observation)
             res.once('finish', () => { observation.status = res.statusCode })
+          } else if (req.method === 'POST' && url === path && /^\/api\/v1\/workspaces\/w_[a-f0-9]{32}\/list$/u.test(path)) {
+            // Selecting an ordinary workspace legitimately reads one directory by POST to keep
+            // its path out of URLs. Still require a real verified read; never exempt file writes,
+            // chat turns, provider probes or any Git operation from their respective counters.
+            if (!context.policy.cookie(req) || !req.headers['x-deva-csrf'] || req.headers.origin !== context.policy.origin) ++otherWrites
+            res.once('finish', () => { if (res.statusCode !== 200) ++otherWrites })
           } else if ((req.method !== 'GET' && req.method !== 'HEAD') || path === '/api/v1/provider-models') {
             ++otherWrites
           }
