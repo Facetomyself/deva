@@ -112,6 +112,26 @@ await test('workspace projection is catalog-only, stores desktop path, and track
   assert.doesNotMatch(await readFile(rolePath(dataDir, role.id), 'utf8'), /^workspace(?:Id)?:/mu)
 })
 
+await test('role lookup for a model turn never enumerates or resolves workspace grants', async t => {
+  const base = await sandbox(t), dataDir = join(base, 'data'), root = join(base,'registered')
+  const project = join(root, 'Review'); await mkdir(project, { recursive: true })
+  const real = openWorkspaceCatalog({ root, privateRoots: [dataDir] }); t.after(() => real.close())
+  const calls = []
+  const workspaceCatalog = { list() { calls.push('list'); return real.list() }, resolveRoot(id) { calls.push('root'); return real.resolveRoot(id) } }
+  const api = await openPersonas({ dataDir, workspaceCatalog })
+  const [{id: workspaceId}] = real.list()
+  const role = await api.upsert({ name:'Copy editor', workspaceId, prompt:'Tighten prose.', model:'fixture:editor', enabled:true })
+  calls.length = 0
+  const turn = await api.getForChat(role.id)
+  assert.deepEqual(turn, {id:role.id, name:role.name, prompt:role.prompt, model:'fixture:editor', enabled:true})
+  assert.deepEqual(calls, [])
+  assert.deepEqual(await api.getForChat(role.id, true), {...turn,workspaceId}); assert.ok(calls.length > 0)
+  // A legacy path by itself is not a durable role grant, even when its spelling matches a currently mounted project.
+  const old = await api.upsert({name:'Legacy copy',enabled:true})
+  await writeFile(rolePath(dataDir, old.id), serializePersonaMarkdown({name:old.name,workspace:project,prompt:'Legacy text.'}))
+  calls.length=0; assert.equal(Object.hasOwn(await api.getForChat(old.id, true),'workspaceId'),false); assert.deepEqual(calls,[])
+})
+
 await test('two personas instances and settings share an inode queue and reject stale edits', async t => {
   const dataDir = await sandbox(t)
   await writeJson(configPath(dataDir), { personas: { seeded: { general: true }, seededPrompt: { general: 'baseline' },

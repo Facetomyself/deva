@@ -385,6 +385,18 @@ export async function openPersonas(options) {
     await index.verifyUnchanged()
     await verifyFile(index.directory, nameFor(binding.id), binding.info, MAX_PERSONA_FILE_BYTES)
   }
+  async function projectOne(id, project) {
+    requireId(id)
+    return access(async index => {
+      if (!index.ids.includes(id)) return null
+      const binding = await readRole(index.directory, id)
+      if (!binding) fail('CONFLICT')
+      const result = await project(binding, index.config)
+      await index.verifyUnchanged()
+      await verifyFile(index.directory, nameFor(id), binding.info, MAX_PERSONA_FILE_BYTES)
+      return result
+    })
+  }
   return Object.freeze({
     list: () => access(index => publicRoster(workspaceCatalog, index)),
     async getAvatarImage(id) {
@@ -405,16 +417,17 @@ export async function openPersonas(options) {
         return { ...result, revision: roleRevision(binding, index.config) }
       }))
     },
-    async get(id) {
-      requireId(id)
-      return access(async index => {
-        if (!index.ids.includes(id)) return null
-        const binding = await readRole(index.directory, id)
-        if (!binding) fail('CONFLICT')
-        const result = await publicRole(workspaceCatalog, binding, index.config)
-        await index.verifyUnchanged()
-        await verifyFile(index.directory, nameFor(id), binding.info, MAX_PERSONA_FILE_BYTES)
-        return result
+    get: id => projectOne(id, (binding, config) => publicRole(workspaceCatalog, binding, config)),
+    // Runtime model requests only need identity and presentation. Never resolve a directory
+    // (or its contents) when reading a role for a turn. Only creation may project a saved,
+    // ID-backed default; a legacy free-form path alone must not become a durable new grant.
+    getForChat(id, inheritWorkspace = false) {
+      return projectOne(id, async (binding, config) => {
+        const { name, model, prompt, workspaceId } = binding.parsed
+        const enabled = config.enabled[id] === true
+        const approved = enabled && inheritWorkspace && matches(catalogId, workspaceId)
+          ? await workspaceForProjection(workspaceCatalog, binding.parsed, scopedCatalog(workspaceCatalog)) : null
+        return { id, name, model, prompt, enabled, ...(approved ? {workspaceId: approved.id} : {}) }
       })
     },
     async upsert(input) {
