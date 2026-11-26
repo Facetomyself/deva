@@ -8,6 +8,7 @@ import { ModelsProvider, useModels } from '../renderer/src/store/models'
 import { ThemeProvider } from '../renderer/src/theme/ThemeContext'
 import { SettingsFrame } from '../renderer/src/redesign/SettingsFrame'
 import { copy } from './first-use-copy'
+import { ServerPlatformLabel } from './server-platform'
 import type { Bootstrap, LibraryQueue, Transport } from './transport'
 
 const TextWorkbench = lazy(() => import('./text-workbench'))
@@ -39,7 +40,7 @@ function WorkbenchSettingsDialog({ chat, close }: { chat: NonNullable<DesktopSet
     <fieldset className="wb-settings" disabled={chat.locked}>
       <ReadyModelSettings />
     </fieldset>
-    <p className="wb-version">Deva {chat.bootstrap.version}</p>
+    <p className="wb-version">Deva {chat.bootstrap.version} · <ServerPlatformLabel platform={chat.bootstrap.platform} /></p>
   </SettingsFrame>
 }
 

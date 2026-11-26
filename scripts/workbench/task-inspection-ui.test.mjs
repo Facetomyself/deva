@@ -113,10 +113,16 @@ test('the real Workbench mounts only the task main alongside the rail and restor
   const f = fixture({ list: () => pending.promise })
   let rail
   const sid = 'retained-chat'
-  const draft = new Map([[sid, 'retained draft']])
+  const draftModule = await load('workbench/quote-draft.ts', {
+    '../renderer/src/redesign/ConvMessage': { withQuote: (quote, body) => quote ? `${quote}\n\n${body}` : body },
+    './chat-transport': { inputBytes: (value) => Buffer.byteLength(value), MAX_TEXT_INPUT: 12*1024 }
+  })
+  const draft = draftModule.createQuoteDrafts()
+  draft.setBody(sid, 'retained draft')
   const selected = { id: sid, title: 'Retained chat', compatibility: 'text', updatedAt: now }
   const selectCalls = []
   const wk = { selected: sid, sessions: [selected], select: (id) => selectCalls.push(id), drafts: draft,
+    isSelected: id => id === sid, selectionStamp: id => id === sid ? 1 : undefined,
     projection: { status: 'ready', snapshot: { cursor: { generation: 'test' }, state: { writable: true, compatibility: 'text' } } } }
   const window = { innerWidth: 1200, innerHeight: 900 }
   // Mount the real React composition with only the non-task host-dependent hooks mocked.
@@ -137,7 +143,14 @@ test('the real Workbench mounts only the task main alongside the rail and restor
     '../renderer/src/redesign/IconRail': { IconRail: (props) => { rail = props; return React.createElement(IconRail, props) } },
     '../renderer/src/redesign/Rail': { ThreadRow: ({ active, session }) => React.createElement('span', { 'data-active-chat': active && session.id }) },
     '../renderer/src/redesign/ComposerControls': { ComposerWorkspaceButton: noComponent, ComposerSendButton: noComponent,
-      ComposerDraftInput: () => React.createElement('div', { 'data-chat-draft': draft.get(sid) }) },
+      ComposerDraftInput: () => React.createElement('div', { 'data-chat-draft': draft.read(sid).body }) },
+    '../renderer/src/redesign/ComposerQuoteBar': { ComposerQuoteBar: noComponent },
+    '../renderer/src/features/chat/CodeClipboard': await load('renderer/src/features/chat/CodeClipboard.tsx'),
+    './client-clipboard': await load('workbench/client-clipboard.ts'),
+    './client-paste-feedback': { useClientPasteNotice: () => ({}), ClientPasteFeedback: noComponent },
+    './client-shell-ui': { useClientShell: () => ({}), ClientFullscreenButton: noComponent },
+    './conversation-selection-ui': { useConversationSelection: () => ({}), ConversationSelectionStatus: noComponent },
+    './quote-draft': draftModule,
     '../renderer/src/redesign/composer-editor': { useComposerEditor: () => ({}) },
     '../renderer/src/redesign/ModelMenu': { modelGroups: () => [], ModelSelectButton: noComponent },
     '../renderer/src/redesign/resizable': resizing,
@@ -193,7 +206,7 @@ test('the real Workbench mounts only the task main alongside the rail and restor
   assert.match(restored, /data-chat-draft="retained draft"/)
   assert.doesNotMatch(restored, /workbench-tasks-panel/)
   assert.deepEqual(selectCalls, [])
-  assert.deepEqual(draft, new Map([[sid, 'retained draft']]))
+  assert.deepEqual(draft.read(sid), { body: 'retained draft', quote: '' })
   assert.equal(f.calls[0].signal.aborted, true)
   pending.resolve(list())
   await Promise.resolve()
