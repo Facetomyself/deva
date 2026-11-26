@@ -303,11 +303,11 @@ async function newChat(browser, screen) {
   }, 'NEW_CHAT_NOT_PERSISTED')
   // A persisted session can arrive at the server before React has selected the new chat.
   await until(() => browser.execute(`
-    const [create, count] = arguments;
-    return document.querySelector(create)?.disabled === false &&
+    const [create, count, sid] = arguments;
+    return document.querySelector(create)?.disabled === false && sessionStorage.getItem('deva-workbench.chat') === sid &&
       document.querySelectorAll('.wb-chat .cf-thread').length === count &&
       !!document.querySelector('.wb-chat .cf-thread.is-active');
-  `, hook('new-chat'), previous.length + 1), 'NEW_CHAT_NOT_SELECTED')
+  `, hook('new-chat'), previous.length + 1, sid), 'NEW_CHAT_NOT_SELECTED')
   return sid
 }
 

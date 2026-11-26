@@ -30,3 +30,11 @@ CHROMIUM_PATH=/absolute/path/to/chromium node apps/browser-worker/test-real/engi
 ```
 
 第二条是单独的真实浏览器门禁，必须有可工作的沙箱。从私有管道打开自建回环表单，核对像素、中文输入、同页会话状态与最终进程清理；失败退出是失败，协议夹具并不能替代它。不以能够对外发 HTTP 请求作为沙箱可用的证据。
+
+本地还可用页面清单诊断，验证空白启动只有一个页面、零 worker：
+
+```sh
+node apps/browser-worker/test-real/blank-targets.mjs --compare /absolute/path/to/chromium
+```
+
+诊断使用新建的空白私有 profile 和固定的空代理，输出仅含目标类型、URL scheme 和计数。`--compare` 可省略；基线观察只用于对照。诊断与真实 Chromium 门禁及工作台所有者租约验证分开，后两项仍需各自通过。
