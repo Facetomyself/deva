@@ -1,4 +1,4 @@
-import { useLayoutEffect, useState, type KeyboardEvent, type MouseEvent, type RefObject } from 'react'
+import { useEffect, useLayoutEffect, useState, type KeyboardEvent, type MouseEvent, type RefObject } from 'react'
 import { Copy, TextQuote } from 'lucide-react'
 import { useI18n } from '../renderer/src/i18n/i18n'
 import { ContextMenu, type CtxEntry } from '../renderer/src/redesign/ContextMenu'
@@ -39,10 +39,18 @@ export function useConversationSelection(root: RefObject<HTMLDivElement>, active
     return () => feedback.invalidate()
   }, [active, stamp, feedback])
 
+  useEffect(() => {
+    const page = root.current?.ownerDocument?.defaultView
+    if (!status || !page) return
+    const timer = page.setTimeout(() => setStatus(undefined), status === 'copied' ? 1800 : 6500)
+    return () => page.clearTimeout(timer)
+  }, [status, stamp, root])
+
   function open(event: MouseEvent<HTMLDivElement> | KeyboardEvent<HTMLDivElement>, x?: number, y?: number): void {
     if (!current() || !root.current || event.defaultPrevented) return
     const capture = captureConversationSelection(root.current, event.target as Node, root.current.ownerDocument.getSelection())
     if (!capture) return
+    feedback.invalidate(); setStatus(undefined) // A new selection supersedes an older receipt.
     event.preventDefault()
     event.stopPropagation()
     if (!x && !y) {

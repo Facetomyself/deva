@@ -8,6 +8,16 @@ export async function captureClientInteraction({browser,origin}, phase) {
   if (process.env.DEVA_QA_CLIENT_CAPTURE !== '1') return
   const check = (ok, reason) => { if (!ok) throw new InteractionCheckError(`Client visual check: ${reason}`) }
   check(['selection-menu','quoted-draft'].includes(phase) && /^http:\/\/127\.0\.0\.1:[0-9]+$/.test(origin),'fixed fixture and phase required')
+  // The shared Desktop menu fades in for 140 ms. Measure and capture its final rendering,
+  // never a translucent frame that visually mixes menu text with buttons underneath it.
+  const settled = await browser.executeAsync(`
+    const [phase, done] = arguments;
+    const el=document.querySelector(phase==='selection-menu'?'[data-testid="workbench-selection-menu"]':'[data-testid="workbench-quote-draft"]');
+    if(!el) { done(false); return; }
+    Promise.allSettled([document.fonts.ready, ...el.getAnimations().filter(a=>a.effect?.getTiming().iterations!==Infinity).map(a=>a.finished)])
+      .then(()=>requestAnimationFrame(()=>requestAnimationFrame(()=>done(el.isConnected && Number(getComputedStyle(el).opacity)>=0.99))));
+  `, phase)
+  check(settled, 'final rendered stage before capture')
   const shape = await browser.execute(`
     const [origin,phase]=arguments;
     if(location.origin!==origin || location.pathname!=='/' || location.search || location.hash || document.querySelector('input[type="password"],dialog[open]'))return null;

@@ -21,6 +21,6 @@ export function useClientPasteNotice() {
 }
 export function ClientPasteFeedback({ state }: { state?: State }): React.JSX.Element | null {
   const { locale } = useI18n()
-  return state ? <p data-testid="workbench-paste-status" data-status={state} className="wb-chat__model"
+  return state ? <p data-testid="workbench-paste-status" data-status={state} className={state==='pasted'?'wb-client-paste__announcer':'wb-chat__model'}
     role={state==='pasted'?'status':'alert'}>{labels[locale][state]}</p> : null
 }

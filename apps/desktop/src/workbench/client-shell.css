@@ -12,6 +12,10 @@
   pointer-events: none;
 }
 
+.wb-chat .cf-ctx__item:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+@media (prefers-reduced-motion: reduce) { .wb-chat .cf-ctx { animation: none; } }
+
+.wb-client-paste__announcer,
 .wb-client-fullscreen__status {
   position: absolute;
   width: 1px;

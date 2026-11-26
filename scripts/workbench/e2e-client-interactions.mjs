@@ -199,6 +199,8 @@ async function addQuote(ctx, source, keyboard = false) {
   } else await ctx.ui.click(`${menu} ${hook('selection-quote')}`, 'real Quote action in the shared menu')
   await ctx.ui.gone(menu, 'shared menu closed after Quote')
   await assertQuote(ctx, source)
+  await ctx.ui.matches('return !document.querySelector(arguments[0])?.dataset.status;',
+    'a new Quote does not leave a stale clipboard confirmation on screen', hook('selection-status'))
   await phaseGuard(ctx)
 }
 
