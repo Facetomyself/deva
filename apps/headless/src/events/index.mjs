@@ -1,4 +1,7 @@
+import { projectChatEvent } from './chat-event.mjs'
 import { createEventJournal } from './journal.mjs'
+
+const desktopListEvents = new Set(['turn_start', 'done', 'member_report'])
 
 export { chatScope, createEventJournal, SESSIONS_SCOPE } from './journal.mjs'
 
@@ -32,7 +35,14 @@ export function installDesktopEventBridge(source, limits) {
   try {
     register(source.onChatEvent, (payload) => {
       if (!installed) return
-      try { journal.publishChat(payload) } catch { /* protect the producer without logging payloads */ }
+      try {
+        const event = projectChatEvent(payload)
+        if (!event) return
+        journal.publishChat(event)
+        // Preserve the desktop adapter's legacy list hints. The headless journal
+        // itself advances the list only when a business producer publishes it.
+        if (desktopListEvents.has(event.event.type)) journal.publishSessionsChanged()
+      } catch { /* protect the producer without logging payloads */ }
     })
     register(source.onSessionsChanged, () => {
       if (!installed) return

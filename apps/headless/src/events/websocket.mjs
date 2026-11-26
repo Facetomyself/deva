@@ -4,10 +4,12 @@ import { WebSocketServer } from 'ws'
 import { isSessionId, projectChatEvent } from './chat-event.mjs'
 import { chatScope } from './journal.mjs'
 import { HttpError } from '../http/policy.mjs'
+import { attachSessionListStream, MAX_SESSION_LIST_EVENT_BYTES, projectSessionListEvent, SESSION_LIST_PATH } from './session-list-stream.mjs'
 
 const PREFIX = '/api/v1/chats/'
 const SUFFIX = '/stream'
 const MAX_PEERS = 16
+const MAX_LIST_PEERS = 8 // List-only tabs cannot monopolize the existing shared WS budget.
 const MAX_CURSOR_CHARS = 512
 const MAX_INBOUND_BYTES = 1024
 const MAX_EVENT_BYTES = 128 * 1024
@@ -120,7 +122,13 @@ function guardControlOnly(socket, onData) {
   return () => socket.off('data', scan)
 }
 
-function createPeer(ws, { socket, sid, scope, auth, cookie, subscription, remove }) {
+function projectChatFrame(frame, sid, scope) {
+  if (frame.type !== 'chat' || frame.sessionId !== sid || frame.cursor?.scope !== scope) return null
+  const event = projectChatEvent(frame)
+  return event && { t: 'event', cursor: frame.cursor, ...event }
+}
+
+function createPeer(ws, { socket, auth, identity, subscription, project, maxEventBytes, remove }) {
   let active = true
   let outstandingWrite, closeTimer, expectedPong
   let controlPending = false
@@ -128,7 +136,7 @@ function createPeer(ws, { socket, sid, scope, auth, cookie, subscription, remove
   function release() {
     if (!active) return
     active = false
-    cookie = undefined
+    identity = undefined
     stopIngressGuard()
     subscription.close()
     outstandingWrite?.settle(false)
@@ -146,8 +154,10 @@ function createPeer(ws, { socket, sid, scope, auth, cookie, subscription, remove
   function authorized() {
     if (!active) return false
     if (ws.readyState !== ws.OPEN) { disconnect(); return false }
-    try { auth.authenticate(cookie) }
-    catch { disconnect(1008, 'auth'); return false }
+    if (!auth.isLoginActive(identity)) {
+      if (active) disconnect(1008, 'auth') // isLoginActive can revoke synchronously on expiration.
+      return false
+    }
     return true
   }
 
@@ -183,14 +193,10 @@ function createPeer(ws, { socket, sid, scope, auth, cookie, subscription, remove
   }
 
   function writeEvent(frame) {
-    if (frame.type !== 'chat' || frame.sessionId !== sid || frame.cursor?.scope !== scope) {
-      disconnect(1012, 'snapshot_required')
-      return false
-    }
-    const event = projectChatEvent(frame)
+    const event = project(frame)
     if (!event) { disconnect(1012, 'snapshot_required'); return false }
-    if (event.event.text?.length > MAX_EVENT_BYTES) { disconnect(1009, 'frame_too_large'); return false }
-    return writeData(JSON.stringify({ t: 'event', cursor: frame.cursor, ...event }), MAX_EVENT_BYTES)
+    if (event.event?.text?.length > maxEventBytes) { disconnect(1009, 'frame_too_large'); return false }
+    return writeData(JSON.stringify(event), maxEventBytes)
   }
 
   const dataReceived = () => { if (active) disconnect(1008, 'read_only') }
@@ -230,11 +236,14 @@ function createPeer(ws, { socket, sid, scope, auth, cookie, subscription, remove
       expectedPong = randomBytes(8)
       writeControl('ping', expectedPong)
     },
+    revoke(loginSessionId) {
+      if (identity?.loginSessionId === loginSessionId) disconnect(1008, 'auth')
+    },
     shutdown() { disconnect(1001, 'shutdown') }
   }
 }
 
-/** Bind only the owner workbench's chat stream; the caller owns the HTTP upgrade listener. */
+/** Bind the owner workbench's read-only chat streams using one upgrade transport and peer budget. */
 export function createChatWebSocket({ turns, journal, auth, policy }) {
   const wss = new WebSocketServer({
     noServer: true, perMessageDeflate: false, maxPayload: MAX_INBOUND_BYTES,
@@ -242,27 +251,32 @@ export function createChatWebSocket({ turns, journal, auth, policy }) {
   })
   wss.on('wsClientError', (_error, socket) => endUpgrade(socket, 400))
   const peers = new Set()
+  const stopRevocation = auth.onSessionRevoked(loginSessionId => { for (const peer of peers) peer.revoke(loginSessionId) })
   const heartbeat = setInterval(() => { for (const peer of peers) peer.heartbeat() }, HEARTBEAT_MS).unref()
+  let listPeers = 0
   let closing
 
   function upgrade(req, socket, head) {
     const target = req.url ?? ''
     const split = target.indexOf('?')
     const path = split < 0 ? target : target.slice(0, split)
-    if (!path.startsWith(PREFIX) || !path.endsWith(SUFFIX)) return false
+    const list = path === SESSION_LIST_PATH
+    if (!list && (!path.startsWith(PREFIX) || !path.endsWith(SUFFIX))) return false
     if (closing) { endUpgrade(socket, 503); return true }
     try {
       policy.check(req, true)
       if (req.headersDistinct.host?.length !== 1 || req.headersDistinct.origin?.length !== 1) throw new Error('origin')
     } catch { endUpgrade(socket, 403); return true }
-    const cookie = policy.cookie(req)
-    try { auth.authenticate(cookie) } catch { endUpgrade(socket, 401); return true }
+    let identity
+    try { identity = auth.identify(policy.cookie(req)) } catch { endUpgrade(socket, 401); return true }
     if (req.method !== 'GET') { endUpgrade(socket, 405); return true }
-    const sid = path.slice(PREFIX.length, -SUFFIX.length)
-    if (!isSessionId(sid) || head.length > 4096) { endUpgrade(socket, 400); return true }
-    if (wss.clients.size >= MAX_PEERS) { endUpgrade(socket, 503); return true }
+    const sid = list ? null : path.slice(PREFIX.length, -SUFFIX.length)
+    if ((!list && !isSessionId(sid)) || head.length > 4096) { endUpgrade(socket, 400); return true }
+    if (wss.clients.size >= MAX_PEERS || (list && listPeers >= MAX_LIST_PEERS)) {
+      endUpgrade(socket, 503); return true
+    }
 
-    const scope = chatScope(sid)
+    const scope = list ? null : chatScope(sid)
     let subscription, peer, initial
     const callbacks = {
       onEvent: frame => peer?.event(frame) ?? false,
@@ -270,15 +284,19 @@ export function createChatWebSocket({ turns, journal, auth, policy }) {
     }
     try {
       const cursor = readCursor(split < 0 ? undefined : target.slice(split + 1))
-      if (cursor) {
-        checkSnapshot(turns.snapshot(sid), sid)
-        subscription = journal.subscribe(scope, cursor, callbacks)
-      }
-      if (!subscription || subscription.status === 'fresh_snapshot') {
-        const attached = turns.attach(sid, callbacks)
-        subscription = attached.subscription
-        checkSnapshot(attached.snapshot, sid)
-        if (subscription.status === 'subscribed') initial = encodeSnapshot(attached.snapshot)
+      if (list) {
+        ({ subscription, initial } = attachSessionListStream(journal, cursor, callbacks))
+      } else {
+        if (cursor) {
+          checkSnapshot(turns.snapshot(sid), sid)
+          subscription = journal.subscribe(scope, cursor, callbacks)
+        }
+        if (!subscription || subscription.status === 'fresh_snapshot') {
+          const attached = turns.attach(sid, callbacks)
+          subscription = attached.subscription
+          checkSnapshot(attached.snapshot, sid)
+          if (subscription.status === 'subscribed') initial = encodeSnapshot(attached.snapshot)
+        }
       }
       if (subscription.status !== 'subscribed') throw new HttpError(503, 'stream_unavailable')
     } catch (error) {
@@ -289,15 +307,20 @@ export function createChatWebSocket({ turns, journal, auth, policy }) {
     }
 
     // Snapshot construction can consume time near the authentication deadline.
-    try { auth.authenticate(cookie) }
-    catch { subscription.close(); endUpgrade(socket, 401); return true }
+    if (!auth.isLoginActive(identity)) { subscription.close(); endUpgrade(socket, 401); return true }
 
     try {
       // handleUpgrade is synchronous with no verifyClient callback. The journal defers delivery
       // until the next Node turn, so the snapshot is queued before any event can be delivered.
       wss.handleUpgrade(req, socket, head, ws => {
-        peer = createPeer(ws, { socket, sid, scope, auth, cookie, subscription, remove: () => peers.delete(peer) })
+        const project = list ? projectSessionListEvent : frame => projectChatFrame(frame, sid, scope)
+        peer = createPeer(ws, {
+          socket, auth, identity, subscription, project,
+          maxEventBytes: list ? MAX_SESSION_LIST_EVENT_BYTES : MAX_EVENT_BYTES,
+          remove() { peers.delete(peer); if (list) listPeers-- }
+        })
         peers.add(peer)
+        if (list) listPeers++
         peer.start(initial)
         initial = undefined
       })
@@ -309,6 +332,7 @@ export function createChatWebSocket({ turns, journal, auth, policy }) {
   function close() {
     if (closing) return closing
     clearInterval(heartbeat)
+    stopRevocation()
     closing = new Promise((resolve, reject) => wss.close(error => error ? reject(error) : resolve()))
     for (const peer of peers) peer.shutdown()
     return closing
