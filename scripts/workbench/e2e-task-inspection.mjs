@@ -340,6 +340,13 @@ async function runBrowser(fixture, resources, signal, setStage) {
         return Array.isArray(sessions) && sessions.length === 0;
       }).then(finish, () => finish(false));
   `), 'Task inspection created a chat session or the owner chat readback failed')
+  const beforeReturn = wire.mark()
+  await login.click('.cf-iconrail button[aria-label="Chats"], .cf-iconrail button[aria-label="消息"]', 'return to the original conversation via the desktop icon rail')
+  await login.hidden(panel, 'Chat navigation closes the task tab')
+  await login.element(`${chat} .cf-rail__top`, 'original conversation sidebar is restored')
+  check(await login.browser.execute('return document.querySelector(arguments[0])?.getAttribute("aria-current") === "false" && !document.querySelector(arguments[1]);', hook('tasks-toggle'), panel),
+    'Leaving Tasks kept its tab active or its UI mounted')
+  wire.quiet(beforeReturn)
   resources.verifyDisk = () => fixture.assertPaused(paused.from, paused.to, paused.state)
   await resources.verifyDisk()
   wire.complete()
