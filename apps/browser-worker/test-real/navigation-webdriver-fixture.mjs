@@ -123,7 +123,44 @@ async function verifyW3cSandbox(owned, signal) {
 }
 
 export function fixedWebdriverComparison({ owned, binary, local, trace, signal, direct, observe }) {
-  let port, id;
+  let port, id, pinnedWindow, bootUrl, firstPassed = false, cdpAttempted = false;
+  async function sameWindow() {
+    const { status, value } = await webdriverRequest(port, 'GET', `/session/${id}/window`);
+    if (status !== 200 || typeof value !== 'string' || !/^[a-z\d_\-]{1,128}$/iu.test(value) ||
+        (pinnedWindow && pinnedWindow !== value)) throw fail('BROWSER_TARGET_LOST');
+    pinnedWindow = value;
+  }
+  async function logs(path, keep) {
+    const result = await webdriverRequest(port, 'POST', `${path}/se/log`, { type: 'performance' }).catch(() => null);
+    if (keep && Array.isArray(result?.value)) for (const item of result.value.slice(0, 512)) {
+      let entry;
+      try { entry = JSON.parse(item.message).message; } catch { continue; }
+      if (entry && typeof entry.method === 'string') observe(entry.method, entry.params ?? {}, item.timestamp);
+    }
+  }
+  async function navigateFixed(viaCdp) {
+    const path = `/session/${id}`;
+    await logs(path, false);
+    trace.begin();
+    trace.bump('navigateSent');
+    let result;
+    try {
+      result = viaCdp ? await webdriverRequest(port, 'POST', `${path}/goog/cdp/execute`, {
+        cmd: 'Page.navigate', params: { url: local.url },
+      }, 17_000) : await webdriverRequest(port, 'POST', `${path}/url`, { url: local.url }, 17_000);
+      trace.bump('navigateAck');
+      if (result.status !== 200) trace.failure(/\bnet::ERR_[A-Z_]+\b/u.exec(result.value?.message ?? '')?.[0], undefined, false);
+      if (viaCdp && result.value?.errorText) trace.failure(result.value.errorText, undefined, false);
+      if (viaCdp && result.value?.isDownload) trace.bump('download');
+      if (result.status === 200 && !result.value?.errorText && !result.value?.isDownload) {
+        const title = await webdriverRequest(port, 'GET', `${path}/title`);
+        if (title.status !== 200 || title.value !== 'Chromium pipe QA') throw fail('BROWSER_NAVIGATION_FAILED');
+      }
+    } finally { await logs(path, true); }
+    if (result.status !== 200 || result.value?.errorText || result.value?.isDownload || trace.counters.documentReceived === 0 ||
+        (direct ? trace.counters.proxyAccepted !== 0 : trace.counters.proxyAccepted === 0)) throw fail('BROWSER_NAVIGATION_FAILED');
+    await sameWindow();
+  }
   return {
     async pin() {
       port = await endpoint(owned.child, signal);
@@ -141,31 +178,20 @@ export function fixedWebdriverComparison({ owned, binary, local, trace, signal, 
       } } });
       if (status !== 200 || !/^[a-f\d]{32}$/iu.test(value?.sessionId ?? '')) throw fail('BROWSER_QA_DRIVER_SESSION');
       id = value.sessionId;
+      await sameWindow();
+      const initial = await webdriverRequest(port, 'GET', `/session/${id}/url`);
+      if (initial.status !== 200 || !['about:blank', 'data:,'].includes(initial.value)) throw fail('BROWSER_QA_FIXED_FIXTURE');
+      bootUrl = initial.value;
     },
     async attest() { await verifyW3cSandbox(owned, signal); },
-    async navigate() {
-      const path = `/session/${id}`;
-      // Discard only the blank startup trace before attempting the fixed synthetic URL.
-      await webdriverRequest(port, 'POST', `${path}/se/log`, { type: 'performance' });
-      trace.begin();
-      trace.bump('navigateSent');
-      let result;
-      try {
-        result = await webdriverRequest(port, 'POST', `${path}/url`, { url: local.url }, 17_000);
-        trace.bump('navigateAck');
-        if (result.status !== 200) trace.failure(/\bnet::ERR_[A-Z_]+\b/u.exec(result.value?.message ?? '')?.[0], undefined, false);
-      } finally {
-        const logs = await webdriverRequest(port, 'POST', `${path}/se/log`, { type: 'performance' }).catch(() => null);
-        if (Array.isArray(logs?.value)) for (const item of logs.value.slice(0, 512)) {
-          let entry;
-          try { entry = JSON.parse(item.message).message; } catch { continue; }
-          if (entry && typeof entry.method === 'string') observe(entry.method, entry.params ?? {}, item.timestamp);
-        }
-      }
-      if (result.status !== 200 || trace.counters.documentReceived === 0 ||
-          (direct ? trace.counters.proxyAccepted !== 0 : trace.counters.proxyAccepted === 0)) throw fail('BROWSER_NAVIGATION_FAILED');
-      const title = await webdriverRequest(port, 'GET', `${path}/title`);
-      if (title.status !== 200 || title.value !== 'Chromium pipe QA') throw fail('BROWSER_NAVIGATION_FAILED');
+    async navigate() { await navigateFixed(false); firstPassed = true; },
+    async compareCdpNavigation() {
+      if (direct || !firstPassed || cdpAttempted) throw fail('BROWSER_QA_FIXED_FIXTURE');
+      cdpAttempted = true;
+      const blank = await webdriverRequest(port, 'POST', `/session/${id}/url`, { url: bootUrl });
+      if (blank.status !== 200) throw fail('BROWSER_NAVIGATION_FAILED');
+      await sameWindow();
+      await navigateFixed(true);
     },
     async close() { if (id) await webdriverRequest(port, 'DELETE', `/session/${id}`).catch(() => {}); },
   };

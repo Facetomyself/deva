@@ -13,12 +13,9 @@ import { procIdentity, verifyRendererSandbox } from '../src/engine/sandbox.mjs';
 import { fixedWebdriverComparison, launchDriver, webdriverExecutable } from './navigation-webdriver-fixture.mjs';
 
 const NAVIGATION_MS = 15_000;
-const VIRTUAL_HOST = 'deva-engine-fixture.test';
 const LANES = [
-  { name: 'webdriver-numeric-direct', webdriver: true, direct: true },
-  { name: 'webdriver-numeric-proxy', webdriver: true },
-  { name: 'cdp-virtual-bare', virtual: true },
-  { name: 'cdp-virtual-guarded', virtual: true, guards: true },
+  { name: 'webdriver-proxy-w3c', webdriver: true, paired: true },
+  { name: 'native-task-startup-kept', task: true, keepComponents: true },
 ];
 const SITE_POLICY = "default-src 'none'; sandbox; connect-src 'none'; frame-src 'none'; form-action 'none'; base-uri 'none'";
 const SITE_PATH = '/qa-document';
@@ -30,7 +27,7 @@ const TARGETS = ['page', 'iframe', 'worker', 'shared_worker', 'service_worker'].
 const COUNTERS = ['navigateSent', 'navigateAck', 'frameStartedNavigating', 'frameStartedLoading', 'frameCommit', 'frameLoad',
   'networkRequest', 'networkResponse', 'networkFailed', 'fetchRequest', 'fetchRequestAck', 'fetchResponse', 'fetchResponseAck',
   'fetchBlocked', 'proxyReceived', 'proxyAccepted', 'proxyResponse', 'proxyRejected', 'proxyConnect', 'documentReceived',
-  'documentResponse', 'targetCreated', 'targetRetired', 'requestExpected', 'requestUpgraded', 'requestOther',
+  'documentResponse', 'targetCreated', 'componentSeen', 'componentRetired', 'requestExpected', 'requestUpgraded', 'requestOther',
   'blockedReason', 'localNetworkAccess', 'localNetworkPolicy', 'httpsUpgradeConnect', 'interstitial', 'errorPageCommit', 'download'];
 const MILESTONES = { frameStartedNavigating: 'firstFrameMs', networkRequest: 'firstNetworkMs', fetchRequest: 'firstFetchMs',
   proxyAccepted: 'firstProxyMs', documentReceived: 'firstDocumentMs', navigateAck: 'navigateAckMs' };
@@ -51,6 +48,13 @@ function evidence() {
   return {
     counters, milliseconds, networkFailure: 'none', blockedKind: 'none',
     begin() { started = performance.now(); startWall = Date.now(); },
+    reset() {
+      started = undefined; finished = undefined; startWall = undefined;
+      this.networkFailure = 'none'; this.blockedKind = 'none';
+      for (const key of COUNTERS) counters[key] = 0;
+      for (const key of Object.values(MILESTONES)) milliseconds[key] = -1;
+    },
+    bootstrap(key) { if (finished === undefined) counters[key] = Math.min(256, counters[key] + 1); },
     finish() { finished ??= performance.now(); },
     elapsed: () => started === undefined ? -1 : Math.min(60_000, Math.floor((finished ?? performance.now()) - started)),
     failure(errorText, eventWall, count = true) {
@@ -96,7 +100,7 @@ function stopServer(server) {
   return new Promise((resolve) => { server.close(resolve); server.closeAllConnections(); });
 }
 
-async function fixture(trace, lane) {
+async function fixture(trace) {
   const site = createServer((req, res) => {
     if (req.method !== 'GET') return res.writeHead(405).end();
     if (req.url === HEALTH_PATH) return res.writeHead(204).end();
@@ -110,9 +114,8 @@ async function fixture(trace, lane) {
   let proxy;
   try {
     const origin = await listen(site);
-    const publicOrigin = lane.virtual ? `http://${VIRTUAL_HOST}` : origin;
-    const url = `${publicOrigin}${SITE_PATH}`;
-    const health = `${publicOrigin}${HEALTH_PATH}`;
+    const url = `${origin}${SITE_PATH}`;
+    const health = `${origin}${HEALTH_PATH}`;
     const expected = new URL(url);
     proxy = createServer((req, res) => {
       trace.bump('proxyReceived');
@@ -191,7 +194,7 @@ async function childLauncher(executablePath, proxyUrl, driverPath = null) {
       '--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1', '--disable-quic',
       '--force-webrtc-ip-handling-policy=disable_non_proxied_udp', '--disable-blink-features=FileSystemAccess,FileSystemAccessLocal',
       '--no-first-run', '--no-default-browser-check', '--disable-background-networking', '--disable-component-update',
-      '--disable-extensions', '--disable-component-extensions-with-background-pages', '--disable-default-apps', '--disable-sync',
+      '--disable-extensions', '--disable-sync',
       '--disable-breakpad', '--disable-crash-reporter', '--disable-crashpad-for-testing', '--password-store=basic', BOOTSTRAP_URL],
     { env, cwd: profile, detached: true, stdio: ['ignore', 'ignore', 'ignore', 'pipe', 'pipe'] });
     child.once('exit', () => { exited = true; });
@@ -283,6 +286,7 @@ function controller({ browser, local, lane, trace, signal }) {
   let bootId, bootContext, context, target, candidate, main, control, guard, fault;
   let pageCreating = false, navigated = false;
   const retired = new Map();
+  const preserved = new Set();
   const inspect = observer(trace, local.url, (frame) => frame === main);
   const pipe = connectPipe(browser.child.stdio[3], browser.child.stdio[4], { onEvent, onFailure: setFault });
   const root = (name, args) => pipe.send(name, args);
@@ -290,23 +294,34 @@ function controller({ browser, local, lane, trace, signal }) {
   signal.addEventListener('abort', () => pipe.stop('BROWSER_TIMEOUT'), { once: true });
   function setFault(code) { fault ??= code; }
   function check() { if (fault) throw fail(fault); if (signal.aborted) throw fail('BROWSER_TIMEOUT'); }
+  function defaultComponent(info) {
+    return !!bootContext && context !== bootContext && info?.browserContextId === bootContext &&
+      info.type === 'service_worker' && !info.openerId && !info.attached && typeof info.targetId === 'string' &&
+      info.targetId !== bootId && info.targetId !== target && info.targetId !== candidate &&
+      /^chrome-extension:\/\/[a-p]{32}\/[!-~]*$/u.test(info.url ?? '');
+  }
   function targetCreated(info) {
     trace.bump('targetCreated');
     const candidateBlank = info?.type === 'page' && !info.openerId && (!info.url || info.url === BOOTSTRAP_URL);
-    if (info?.targetId === bootId && candidateBlank && !navigated) return;
-    if (info?.targetId === target && candidateBlank && !navigated) return;
+    if (info?.targetId === bootId && candidateBlank && !navigated && info.browserContextId !== context &&
+        (!bootContext || !info.browserContextId || info.browserContextId === bootContext)) {
+      bootContext ||= info.browserContextId;
+      return;
+    }
+    if (info?.targetId === target && candidateBlank && !navigated && info.browserContextId === context) return;
     if (pageCreating && !candidate && candidateBlank && info.browserContextId === context && typeof info.targetId === 'string') {
       candidate = info.targetId;
       return;
     }
-    // The synthetic page never uses workers. This narrowly covers a Chrome-owned
-    // startup component in the separately verified default context, and only to retire it.
-    if (!navigated && bootContext && info?.browserContextId === bootContext && info.type === 'service_worker' && !info.openerId &&
-        typeof info.targetId === 'string' && /^chrome-extension:\/\/[a-p]{32}\/[!-~]*$/u.test(info.url ?? '') &&
-        !retired.has(info.targetId) && retired.size < 8) {
-      retired.set(info.targetId, root('Target.closeTarget', { targetId: info.targetId }).then(({ success }) => {
+    // Only a pre-navigation Chrome-owned component in the independently verified
+    // default context can be observed here. Never attach to it or send it input.
+    if (!navigated && defaultComponent(info) && !preserved.has(info.targetId) && !retired.has(info.targetId) &&
+        preserved.size + retired.size < 8) {
+      trace.bootstrap('componentSeen');
+      if (lane.keepComponents) preserved.add(info.targetId);
+      else retired.set(info.targetId, root('Target.closeTarget', { targetId: info.targetId }).then(({ success }) => {
         if (success !== true) setFault('BROWSER_TARGET_LOST');
-        else trace.bump('targetRetired');
+        else trace.bootstrap('componentRetired');
       }, () => setFault('BROWSER_TARGET_LOST')));
       return;
     }
@@ -416,7 +431,9 @@ function controller({ browser, local, lane, trace, signal }) {
         if (!Array.isArray(targetInfos) || !targetInfos.some((item) => item.targetId === target && item.type === 'page' &&
             item.url === BOOTSTRAP_URL && !item.openerId && (!context || item.browserContextId === context))) break;
         const waiting = targetInfos.filter((item) => item.targetId !== target &&
-          (lane.retire || item.targetId !== bootId || item.type !== 'page' || item.url !== BOOTSTRAP_URL || item.openerId));
+          !(lane.keepComponents && preserved.has(item.targetId) && defaultComponent(item)) &&
+          (lane.retire || item.targetId !== bootId || item.type !== 'page' || item.url !== BOOTSTRAP_URL || item.openerId ||
+            (bootContext && item.browserContextId && item.browserContextId !== bootContext)));
         if (!waiting.length) { clean = true; break; }
         if (waiting.some((item) => !retired.has(item.targetId) && (!lane.retire || item.targetId !== bootId))) break;
         if (attempt < 11) await sleep(45, undefined, { signal });
@@ -455,10 +472,16 @@ function controller({ browser, local, lane, trace, signal }) {
 
 async function runLane(executablePath, driverPath, lane) {
   const trace = evidence();
-  const signal = AbortSignal.timeout(35_000);
-  let phase = 'fixture', code = 'none', local, browser, run, cleaned = true;
+  const signal = AbortSignal.timeout(lane.paired ? 60_000 : 35_000);
+  const reports = [];
+  let name = lane.name, phase = 'fixture', code = 'none', local, browser, run, cleaned = true;
+  function collect() {
+    trace.finish();
+    const counts = Object.entries({ ...trace.counters, ...trace.milliseconds }).map(([key, value]) => `${key}:${value}`).join(',');
+    reports.push({ name, phase, code, counts, elapsed: trace.elapsed(), networkFailure: trace.networkFailure, blockedKind: trace.blockedKind });
+  }
   try {
-    local = await fixture(trace, lane);
+    local = await fixture(trace);
     phase = 'launch';
     if (lane.webdriver && !driverPath) throw fail('BROWSER_QA_DRIVER_REQUIRED');
     browser = await childLauncher(executablePath, local.proxyUrl, lane.webdriver ? driverPath : null);
@@ -466,19 +489,30 @@ async function runLane(executablePath, driverPath, lane) {
       direct: lane.direct, observe: observer(trace, local.url) }) : controller({ browser, local, lane, trace, signal });
     const phases = lane.webdriver ? ['pin', 'attest', 'navigate'] : ['pin', 'guard', 'attest', 'activate', 'navigate'];
     for (const key of phases) { phase = key; await run[key](); }
+    if (lane.paired) {
+      phase = 'complete';
+      collect();
+      trace.reset();
+      name = 'webdriver-proxy-fixed-cdp';
+      phase = 'compare-cdp';
+      await run.compareCdpNavigation();
+    }
     phase = 'complete';
   } catch (error) { code = /^BROWSER_[A-Z_]+$/u.test(error?.code) ? error.code : 'BROWSER_QA_FAILURE'; }
   finally {
-    trace.finish();
+    collect();
     try { await run?.close(); } catch { cleaned = false; }
     try { await browser?.close(); } catch { cleaned = false; }
     try { await local?.close(); } catch { cleaned = false; }
   }
-  const okay = code === 'none' && cleaned;
-  const counts = Object.entries({ ...trace.counters, ...trace.milliseconds }).map(([key, value]) => `${key}:${value}`).join(',');
-  console.log(`QA lane=${lane.name} verdict=${okay ? 'pass' : 'fail'} phase=${phase} code=${code} cleanup=${Number(cleaned)} ` +
-    `navigationMs=${trace.elapsed()} networkFailure=${trace.networkFailure} blockedKind=${trace.blockedKind} counts=${counts}`);
-  return okay;
+  let passes = 0;
+  for (const report of reports) {
+    const okay = report.code === 'none' && cleaned;
+    if (okay) passes++;
+    console.log(`QA lane=${report.name} verdict=${okay ? 'pass' : 'fail'} phase=${report.phase} code=${report.code} cleanup=${Number(cleaned)} ` +
+      `navigationMs=${report.elapsed} networkFailure=${report.networkFailure} blockedKind=${report.blockedKind} counts=${report.counts}`);
+  }
+  return { passes, ran: reports.length };
 }
 
 async function run() {
@@ -486,10 +520,18 @@ async function run() {
   if (process.platform !== 'linux' || !process.getuid?.() || !process.geteuid?.()) throw fail('BROWSER_SANDBOX_REQUIRED');
   const binary = await browserExecutable();
   const driver = await webdriverExecutable().catch(() => null);
-  let passed = 0;
-  for (const lane of LANES) if (await runLane(binary, driver, lane)) passed++;
-  console.log(`QA summary pass=${passed} fail=${LANES.length - passed}`);
-  if (passed !== LANES.length) process.exitCode = 1;
+  // ChromeDriver performance logs do not expose an asynchronous Fetch pause/ack
+  // channel. The pair compares navigation methods only; it is not a Fetch parity test.
+  console.log('QA parity=fetch-not-attempted reason=no-driver-fetch-event-channel');
+  let passed = 0, attempted = 0;
+  const expected = 3;
+  for (const lane of LANES) {
+    const result = await runLane(binary, driver, lane);
+    passed += result.passes;
+    attempted += result.ran;
+  }
+  console.log(`QA summary pass=${passed} fail=${attempted - passed} blocked=${expected - attempted}`);
+  if (passed !== expected) process.exitCode = 1;
 }
 
 run().catch((error) => {
