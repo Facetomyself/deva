@@ -43,6 +43,12 @@ jobs:
       - id: host_tests
         run: pnpm headless:test
 
+      - name: Verify the actual native PTY and its private Unix protocol
+        id: terminal_native
+        if: ${{ !cancelled() && steps.host_tests.outcome == 'success' }}
+        timeout-minutes: 4
+        run: node --test --test-concurrency=1 apps/terminal-worker/test/*.test.mjs
+
       - name: Verify settings and chat in real sandboxed Chrome
         timeout-minutes: 4
         run: node scripts/workbench/e2e-browser.mjs
@@ -117,6 +123,23 @@ jobs:
           path: |
             test-results/client-interactions/selection-menu.png
             test-results/client-interactions/quoted-draft.png
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Verify a workspace file in the native PTY viewer through sandboxed Chrome
+        id: terminal_ui
+        if: ${{ !cancelled() && steps.host_tests.outcome == 'success' && steps.terminal_native.outcome == 'success' }}
+        timeout-minutes: 5
+        env:
+          DEVA_QA_TERMINAL_CAPTURE: '1'
+        run: node scripts/workbench/e2e-terminal-viewer.mjs
+
+      - name: Publish the verified synthetic PTY screen
+        if: ${{ !cancelled() && steps.terminal_ui.outcome == 'success' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: workbench-native-pty-viewer
+          path: test-results/terminal-viewer/pty-screen.png
           if-no-files-found: error
           retention-days: 14
 
@@ -195,6 +218,30 @@ jobs:
       - name: Use the production CLI through a single loopback publication
         timeout-minutes: 5
         run: node scripts/workbench/container-client-interactions.mjs
+
+  packaged-terminal:
+    name: Native amd64 workbench and isolated PTY worker in Compose
+    if: ${{ github.event_name == 'pull_request' && github.head_ref == 'feat/web-workbench-terminal-viewer' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 16
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          package-manager-cache: false
+      - name: Build both production images on native amd64
+        timeout-minutes: 9
+        run: |
+          set -eu
+          test "$(uname -m)" = x86_64
+          docker build --platform linux/amd64 --target runtime -t deva-workbench:terminal-verify .
+          docker build --platform linux/amd64 --target terminal-viewer -t deva-terminal-viewer:verify .
+      - name: Select the installed sandboxed Chrome client
+        run: bash scripts/workbench/ci-select-chromium.sh
+      - name: Verify both live PTYs, kernel descriptors, owner UI and scoped teardown
+        timeout-minutes: 6
+        run: node scripts/workbench/container-terminal-viewer.mjs
 
   sandbox:
     name: Private human browser worker
