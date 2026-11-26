@@ -3,8 +3,9 @@ import { constants } from 'node:fs';
 import { access, chmod, mkdir, mkdtemp, readdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
-import { BOOTSTRAP_URL, configPolicy, EngineError, fail, VIEWPORT } from './policy.mjs';
+import { configPolicy, EngineError, fail } from './policy.mjs';
 import { classifyStartupStderr } from './launch-diagnostics.mjs';
+import { browserFlags } from './launch-flags.mjs';
 import { procIdentity, verifyRendererSandbox } from './sandbox.mjs';
 import { startChromiumSession } from './session.mjs';
 
@@ -14,21 +15,6 @@ const PROFILE_ROOT = '/tmp';
 const PROFILE_PREFIX = 'deva-browser-';
 const STARTUP_MS = 25_000;
 const HANDSHAKE_MS = 12_000;
-
-function browserFlags(profile, proxyUrl) {
-  return [
-    '--headless', '--remote-debugging-pipe',
-    `--user-data-dir=${profile}`, `--window-size=${VIEWPORT.width},${VIEWPORT.height}`,
-    `--proxy-server=${proxyUrl}`, '--proxy-bypass-list=<-loopback>',
-    `--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE ${new URL(proxyUrl).hostname}`, '--disable-quic',
-    '--force-webrtc-ip-handling-policy=disable_non_proxied_udp',
-    '--disable-blink-features=FileSystemAccess,FileSystemAccessLocal',
-    '--no-first-run', '--no-default-browser-check', '--disable-background-networking',
-    '--disable-component-update', '--disable-extensions', '--disable-sync',
-    '--disable-breakpad', '--disable-crash-reporter', '--disable-crashpad-for-testing',
-    '--password-store=basic', BOOTSTRAP_URL,
-  ];
-}
 
 async function safeRemove(profile) {
   if (dirname(profile) !== PROFILE_ROOT || !/^deva-browser-[a-z0-9]{6}$/iu.test(basename(profile))) {

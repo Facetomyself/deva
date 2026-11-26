@@ -193,15 +193,21 @@ test('startup attaches only to the single openerless initial blank and rejects f
     assert.equal(unexpected.closed, 1);
     assert.ok(!unexpected.commands.some(({ method }) => method === 'Page.navigate'));
   }
-  const discovered = protocolFixture({ unexpectedDiscovered: { targetId: 'browser-worker', type: 'worker' } });
+  const discovered = protocolFixture({ unexpectedDiscovered: {
+    targetId: 'browser-worker', type: 'service_worker', url: 'chrome-extension://fixture-unknown/background.js',
+    browserContextId: 'default-private-profile',
+  } });
   await assert.rejects(discovered.engine, (error) => {
     assert.equal(error.code, 'BROWSER_TARGET_LOST');
     assert.equal(error.diagnostic.stage, 'watch-targets');
-    assert.equal(error.diagnostic.target.type, 'worker');
+    assert.equal(error.diagnostic.target.type, 'service_worker');
+    assert.equal(error.diagnostic.target.context, 'same');
     assert.equal(error.diagnostic.target.sameTarget, false);
+    assert.equal(error.diagnostic.target.postNavigation, false);
     return true;
   });
   assert.equal(discovered.closed, 1);
+  assert.ok(!discovered.commands.some(({ method }) => method === 'Page.navigate'));
 });
 
 test('root reports may omit context or briefly omit URL only for the pinned blank', async (t) => {
@@ -258,14 +264,23 @@ test('startup installs guards and attests its existing renderer before activatio
   assert.deepEqual(order.filter((method) => required.includes(method)), required);
 });
 
-test('a newly discovered tab or subtarget invalidates the only engine page', async () => {
-  for (const type of ['page', 'iframe', 'worker']) {
+test('a newly discovered page or worker invalidates the only engine page even in the pinned context', async () => {
+  for (const [type, url] of [
+    ['page', 'about:blank'], ['iframe', 'about:blank'], ['worker', 'about:blank'],
+    ['shared_worker', 'about:blank'], ['service_worker', 'chrome-extension://fixture-unknown/background.js'],
+  ]) {
     const fixture = protocolFixture();
     const engine = await fixture.engine;
     await engine.captureFrame();
-    fixture.emit('Target.targetCreated', { targetInfo: { type, url: 'about:blank', targetId: 'foreign' } }, null);
+    fixture.emit('Target.targetCreated', { targetInfo: { type, url, targetId: 'foreign',
+      browserContextId: 'default-private-profile' } }, null);
     assert.equal(engine.getLatestFrame(), null);
-    await assert.rejects(engine.getPageInfo(), { code: 'BROWSER_TARGET_LOST' });
+    await assert.rejects(engine.getPageInfo(), (error) => {
+      assert.equal(error.code, 'BROWSER_TARGET_LOST');
+      assert.equal(error.diagnostic.target.type, type);
+      assert.equal(error.diagnostic.target.context, 'same');
+      return true;
+    });
     await engine.close();
     assert.equal(fixture.closed, 1);
     assert.equal(fixture.commands.filter(({ method }) => method === 'Target.attachToTarget').length, 1);
