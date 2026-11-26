@@ -1,4 +1,4 @@
-import { ChevronDown, Square } from 'lucide-react'
+import { ChevronDown, FolderPlus, Square } from 'lucide-react'
 import type { ComposerEditor } from './composer-editor'
 import { useI18n } from '../i18n/i18n'
 
@@ -16,6 +16,14 @@ export function ComposerDraftInput({ editor, height, placeholder, onFocus, onBlu
       onFocus={onFocus} onBlur={onBlur} />
     {editor.empty && <div className="cf-draft__ph">{placeholder}</div>}
   </div>
+}
+
+export function ComposerWorkspaceButton({ label, title, onClick, testId }: {
+  label: string; title?: string; onClick?: () => void; testId?: string
+}): React.JSX.Element {
+  return <button className="cf-wschip" type="button" title={title ?? label} disabled={!onClick} onClick={onClick} data-testid={testId}>
+    <FolderPlus size={15} aria-hidden="true" />{label}
+  </button>
 }
 
 export function ComposerSendButton({ stop, disabled, title, onClick }: {

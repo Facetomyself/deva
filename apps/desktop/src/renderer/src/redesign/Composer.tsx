@@ -12,7 +12,6 @@ import {
 } from 'react'
 import {
   Clock,
-  FolderPlus,
   Paperclip,
   Plus,
   Puzzle,
@@ -53,7 +52,7 @@ import { samePath, DEFAULT_PERSONA_ID, fill, AvatarStack, Avatar } from './shell
 import { GitWidget, WorkspaceMenu } from './GitWidget'
 import { leadingQuote, withQuote, quotePlain } from './ConvMessage'
 import { ModelPanel } from './ModelPanel'
-import { ComposerDraftInput, ComposerJump, ComposerSendButton } from './ComposerControls'
+import { ComposerDraftInput, ComposerJump, ComposerSendButton, ComposerWorkspaceButton } from './ComposerControls'
 
 /**
  * 一次挑选返回的附件（与 preload PickedAttachment 结构一致）；拖入 / 粘贴的文件夹也放这里，kind 为 folder。
@@ -934,15 +933,7 @@ export const Composer = memo(function Composer({
                 </button>
               </span>
             ) : (
-              <button
-                type="button"
-                className="cf-wschip"
-                title={t('cf.mountHint')}
-                onClick={pickWorkspace}
-              >
-                <FolderPlus size={15} />
-                {t('cf.mountWorkspace')}
-              </button>
+              <ComposerWorkspaceButton label={t('cf.mountWorkspace')} title={t('cf.mountHint')} onClick={pickWorkspace} />
             )}
             <ModelPanel />
             {/* 回合进行中只有一枚键：输入框有文字＝「发送」（插入当前轮），空＝「停止」（只放图标，与发送同宽不跳动）。

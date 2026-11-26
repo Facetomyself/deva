@@ -14,7 +14,7 @@ export interface Bootstrap {
   config: RecordValue
   csrf: string
   expiresAt: number
-  capabilities?: { textChat?: true; library?: true }
+  capabilities?: { textChat?: true; library?: true; workspaceFiles?: true }
 }
 
 export type SessionScreen = { mode: 'authenticated'; bootstrap: Bootstrap } | { mode: 'claim' | 'login' }
@@ -90,6 +90,7 @@ export function createTransport(send: Fetch = fetch) {
     if (record(result.capabilities)) {
       if (result.capabilities.textChat === true) capabilities.textChat = true
       if (result.capabilities.library === true) capabilities.library = true
+      if (result.capabilities.workspaceFiles === true) capabilities.workspaceFiles = true
     }
     return { protocol, version, platform, config, csrf, expiresAt, ...(Object.keys(capabilities).length ? { capabilities } : {}) }
   }
