@@ -1,0 +1,67 @@
+# Optional. The default app does not run Chromium or grant a model browser access.
+# Use a dedicated operator-owned site list file. The two peers share sockets, NOT app data, model keys or a network.
+x-browser-peer: &browser-peer
+  user: '1000:1000'
+  platform: linux/amd64
+  init: true
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: ['no-new-privileges:true']
+  restart: unless-stopped
+
+services:
+  workbench:
+    environment:
+      DEVA_BROWSER_CONTROL_DIR: /run/deva-browser-control
+    volumes:
+      - browser-control:/run/deva-browser-control:ro
+  browser-egress:
+    <<: *browser-peer
+    image: ${DEVA_BROWSER_BROKER_IMAGE:-deva-browser-broker:dev}
+    build: {context: ., dockerfile: apps/browser-worker/Dockerfile, target: broker}
+    network_mode: bridge
+    pids_limit: 64
+    mem_limit: 160m
+    command: [egress]
+    environment:
+      DEVA_BROWSER_PRIVATE_ORIGINS: ${DEVA_BROWSER_PRIVATE_ORIGINS:-}
+    volumes:
+      - browser-egress:/run/deva-browser-egress
+      - type: bind
+        source: ${DEVA_BROWSER_SITES:?Supply the absolute path of the approved browser sites JSON}
+        target: /etc/deva-browser/sites.json
+        read_only: true
+        bind: {create_host_path: false}
+    healthcheck:
+      test: [CMD, node, /opt/browser-worker/src/cli.mjs, check-egress]
+      interval: 30s
+      timeout: 4s
+      retries: 2
+  browser-worker:
+    <<: *browser-peer
+    image: ${DEVA_BROWSER_IMAGE:-deva-browser-worker:dev}
+    build: {context: ., dockerfile: apps/browser-worker/Dockerfile, target: browser}
+    network_mode: none
+    shm_size: 256m
+    mem_limit: 1536m
+    cpus: 2
+    pids_limit: 256
+    tmpfs: ['/tmp:rw,nosuid,nodev,noexec,mode=1777,size=192m']
+    command: [worker]
+    volumes:
+      - browser-control:/run/deva-browser-control
+      - browser-egress:/run/deva-browser-egress:ro
+      - type: bind
+        source: ${DEVA_BROWSER_SITES:?Supply the absolute path of the approved browser sites JSON}
+        target: /etc/deva-browser/sites.json
+        read_only: true
+        bind: {create_host_path: false}
+    # The worker reports sandbox failure honestly; general chat has no dependency upon its readiness.
+    healthcheck:
+      test: [CMD, node, /opt/browser-worker/src/cli.mjs, check-worker]
+      timeout: 35s
+      interval: 60s
+      retries: 2
+volumes:
+  browser-control: {}
+  browser-egress: {}

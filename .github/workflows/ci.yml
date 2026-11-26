@@ -42,6 +42,14 @@ jobs:
 
       - run: pnpm headless:test
 
+      - name: Verify restricted worker, egress and owner leases
+        timeout-minutes: 3
+        run: node --test --test-concurrency=1 apps/browser-worker/test/*.test.mjs test/browser-handoff.test.mjs
+
+      - name: Exercise a real sandboxed browser worker, handoff and shutdown
+        timeout-minutes: 4
+        run: node apps/browser-worker/test-real/engine-handoff.mjs
+
       - name: Verify settings and chat in real sandboxed Chrome
         timeout-minutes: 4
         run: node scripts/workbench/e2e-browser.mjs

@@ -190,6 +190,39 @@ test('session tokens and CSRF are distinct; recovery, cap, expiry, and revocatio
   assert.throws(() => service.describe(last.session), isAuthError);
 });
 
+test('internal view identities track the exact verified login through eviction, logout and expiry', async t => {
+  const { dataDir } = await fixture(t);
+  const advance = fakeTime(t);
+  const auth = await createAuthService({ dataDir });
+  const password = randomToken();
+  const { credential } = await auth.issueClaim();
+  const first = await auth.claim(credential, password);
+  const owner = auth.identify(first.session, first.csrf);
+  assert.equal(owner.role, 'owner');
+  assert.equal(auth.isLoginActive(owner), true);
+  assert.notEqual(owner.loginSessionId, first.session);
+  assert.ok(!JSON.stringify(auth.describe(first.session)).includes(owner.loginSessionId));
+  assert.ok(!JSON.stringify(owner).includes(first.csrf));
+  assert.throws(() => auth.identify(first.session, undefined), isAuthError);
+  const revoked = [];
+  const off = auth.onSessionRevoked(id => revoked.push(id));
+  auth.onSessionRevoked(() => { throw Error('consumer error'); });
+  const logins = [];
+  for (let i = 0; i < 5; i++) logins.push(await auth.login(password));
+  assert.deepEqual(revoked, [owner.loginSessionId]);
+  assert.equal(auth.isLoginActive(owner), false);
+  const a = auth.identify(logins[0].session);
+  const b = auth.identify(logins[1].session);
+  assert.equal(a.ownerId, b.ownerId); assert.notEqual(a.loginSessionId, b.loginSessionId);
+  assert.equal(auth.isLoginActive({ ...a, role: 'viewer' }), false);
+  auth.logout(logins[0].session); assert.equal(auth.isLoginActive(a), false);
+  assert.equal(auth.isLoginActive(b), true);
+  advance(12 * 60 * 60_000);
+  assert.equal(auth.isLoginActive(b), false);
+  assert.deepEqual(revoked, [owner.loginSessionId, a.loginSessionId, b.loginSessionId]);
+  off(); auth.logout(logins[2].session); assert.equal(revoked.length, 3);
+});
+
 test('fresh state, damaged state, and permission errors are distinguished without resetting storage', async (t) => {
   const { dataDir, authDir, ownerFile } = await fixture(t);
   const newDir = join(dataDir, 'new-instance', 'nested');
