@@ -8,19 +8,21 @@ const ts = require('typescript')
 const React = require('react')
 const { renderToStaticMarkup } = require('react-dom/server')
 const src = new URL('../../apps/desktop/src/', import.meta.url)
-async function load(path, imports = {}) {
+async function load(path, imports = {}, globals = {}) {
   const js = ts.transpileModule(await readFile(new URL(path, src), 'utf8'), {
     compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX }
   }).outputText
   const mod = { exports: {} }
-  new Function('require', 'module', 'exports', js)((name) => Object.hasOwn(imports, name) ? imports[name] : require(name), mod, mod.exports)
+  new Function('require', 'module', 'exports', ...Object.keys(globals), js)(
+    (name) => Object.hasOwn(imports, name) ? imports[name] : require(name), mod, mod.exports, ...Object.values(globals))
   return mod.exports
 }
 const base = await load('workbench/transport.ts')
 const transport = await load('workbench/task-inspection-transport.ts')
-const { createTaskInspection } = await load('workbench/task-inspection-controller.ts', {
+const taskController = await load('workbench/task-inspection-controller.ts', {
   './transport': base, './task-inspection-transport': transport
 })
+const { createTaskInspection } = taskController
 const time = await load('workbench/task-inspection-time.ts')
 const copy = await load('workbench/task-inspection-copy.ts')
 const messages = (await load('renderer/src/i18n/messages.ts')).messages
@@ -31,10 +33,16 @@ const parts = await load('renderer/src/redesign/TaskInspectionParts.tsx', { '../
 const desktopSchedule = await load('renderer/src/features/chat/schedule.ts')
 const editor = await load('renderer/src/features/chat/ScheduleEditor.tsx', { '../../i18n/i18n': i18n,
   '../../components/Select': await load('renderer/src/components/Select.tsx', { react: reactSSR }), './schedule': desktopSchedule })
-const { TaskInspectionPanel } = await load('workbench/task-inspection-ui.tsx', {
+const taskUI = await load('workbench/task-inspection-ui.tsx', {
   react: reactSSR, '../renderer/src/features/chat/ScheduleEditor': editor, '../renderer/src/i18n/i18n': i18n,
   '../renderer/src/redesign/TaskInspectionParts': parts, './task-inspection-copy': copy, './task-inspection-time': time,
   './task-inspection.css': {}
+})
+const { TaskInspectionPanel } = taskUI
+const noop = () => {}
+const noComponent = () => null
+const { IconRail } = await load('renderer/src/redesign/IconRail.tsx', {
+  '../i18n/i18n': i18n, './ProfilePanel': { ProfilePanel: noComponent }, './shell-common': { Avatar: noComponent }
 })
 const { createTransport, HttpFailure } = base
 const { createTaskInspectionTransport } = transport
@@ -72,6 +80,123 @@ function fixture(overrides = {}, beforePause = async () => {}) {
 }
 
 const input = { schedule: recurring, locale: 'en', allowPast: false }
+
+const bootWithTasks = { ...boot, capabilities: { taskInspection: true } }
+const taskButton = (html) => html.match(/<button[^>]+aria-label="Tasks"[^>]*>/)?.[0]
+
+test('the actual AlarmClock rail button keeps Desktop behavior and exposes accessible Web state', () => {
+  const render = (overrides = {}) => renderToStaticMarkup(React.createElement(IconRail, {
+    tab: 'chats', onTab: noop, listCollapsed: false, chatAlert: false, onOpenSettings: noop, ...overrides
+  }))
+  const desktop = taskButton(render({ tab: 'tasks' }))
+  assert.match(desktop, /aria-current="true"/)
+  assert.doesNotMatch(desktop, /disabled|workbench-tasks-toggle|aria-expanded|aria-controls/)
+  const unavailable = 'Available on Desktop'
+  const unsupported = taskButton(render({ unavailable }))
+  assert.match(unsupported, /disabled=""/)
+  assert.match(unsupported, /title="Available on Desktop"/)
+  assert.doesNotMatch(unsupported, /workbench-tasks-toggle|aria-expanded/)
+  const support = { panelId: 'saved-tasks', disabled: false, buttonRef: React.createRef() }
+  const closed = taskButton(render({ unavailable, taskInspection: support }))
+  assert.match(closed, /type="button"/)
+  assert.match(closed, /data-testid="workbench-tasks-toggle"/)
+  assert.match(closed, /aria-current="false" aria-expanded="false"/)
+  assert.doesNotMatch(closed, /disabled|aria-controls/)
+  const open = taskButton(render({ tab: 'tasks', unavailable, taskInspection: support }))
+  assert.match(open, /class="cf-navbtn is-active"/)
+  assert.match(open, /aria-current="true" aria-expanded="true" aria-controls="saved-tasks"/)
+  assert.match(taskButton(render({ unavailable, taskInspection: { ...support, disabled: true } })), /disabled=""/)
+})
+
+test('the real Workbench mounts only the task main alongside the rail and restores the selected chat', async () => {
+  const pending = deferred()
+  const f = fixture({ list: () => pending.promise })
+  let rail
+  const sid = 'retained-chat'
+  const draft = new Map([[sid, 'retained draft']])
+  const selected = { id: sid, title: 'Retained chat', compatibility: 'text', updatedAt: now }
+  const selectCalls = []
+  const wk = { selected: sid, sessions: [selected], select: (id) => selectCalls.push(id), drafts: draft,
+    projection: { status: 'ready', snapshot: { cursor: { generation: 'test' }, state: { writable: true, compatibility: 'text' } } } }
+  const window = { innerWidth: 1200, innerHeight: 900 }
+  // Mount the real React composition with only the non-task host-dependent hooks mocked.
+  const chatSurface = await load('renderer/src/redesign/ChatSurface.tsx', { './redesign.css': {} })
+  const resizing = await load('renderer/src/redesign/resizable.tsx', {}, { window })
+  const chatCopy = await load('workbench/chat-copy.ts')
+  const inertModules = Object.fromEntries([
+    './browser-manual', './browser-panel', './browser-transport', './deliveries-transport',
+    './git-view-controller', './git-view-transport', './library-memory', './library-transport', './library-workspace',
+    './session-preference-ui', './session-workspace-transport', './workspace-dialog', './workspace-files', './workspace-transport',
+    '../renderer/src/redesign/ConvMessage', './text-workbench.css'
+  ].map(name => [name, {}]))
+  const { default: TextWorkbench } = await load('workbench/text-workbench.tsx', {
+    ...inertModules, react: { ...reactSSR, useSyncExternalStore: (_subscribe, read) => read() },
+    '../renderer/src/i18n/i18n': i18n,
+    '../renderer/src/store/models': { findActive: noop, useModels: () => ({ ready: false, providers: [] }) },
+    '../renderer/src/redesign/ChatSurface': chatSurface, '../renderer/src/redesign/shell-common': { Avatar: noComponent },
+    '../renderer/src/redesign/IconRail': { IconRail: (props) => { rail = props; return React.createElement(IconRail, props) } },
+    '../renderer/src/redesign/Rail': { ThreadRow: ({ active, session }) => React.createElement('span', { 'data-active-chat': active && session.id }) },
+    '../renderer/src/redesign/ComposerControls': { ComposerWorkspaceButton: noComponent, ComposerSendButton: noComponent,
+      ComposerDraftInput: () => React.createElement('div', { 'data-chat-draft': draft.get(sid) }) },
+    '../renderer/src/redesign/composer-editor': { useComposerEditor: () => ({}) },
+    '../renderer/src/redesign/ModelMenu': { modelGroups: () => [], ModelSelectButton: noComponent },
+    '../renderer/src/redesign/resizable': resizing,
+    './attachment-ui': { useAttachmentDrafts: noop }, './attachment-drafts': { readyAttachmentIds: () => [] },
+    './chat-copy': chatCopy, './chat-transport': { createChatTransport: noop, inputBytes: (value) => value.length },
+    './deliveries-controller': { eligibleDeliveryReplies: () => new Map() },
+    './deliveries-ui': { useDeliveries: () => ({ view: { groups: [] } }) },
+    './session-preferences': { projectSession: (row) => row },
+    './session-workspace-ui': { useSessionWorkspace: () => ({ view: {} }), AttachedWorkspaceLabel: noComponent },
+    './task-inspection-controller': { ...taskController, createTaskInspection: () => f.api },
+    './task-inspection-transport': transport, './task-inspection-ui': taskUI, './use-text-workbench': { useTextWorkbench: () => wk }
+  }, { window })
+  const render = (bootstrap = bootWithTasks, locked = false) => renderToStaticMarkup(React.createElement(TextWorkbench, {
+    bootstrap, locked, transport: {}, beforeWrite: noop, onExpired: noop, renderSettings: noComponent,
+    notice: React.createElement('p', { id: 'auth-notice' }, 'Auth notice')
+  }))
+  const invalidCapability = render({ ...boot, capabilities: { taskInspection: 'true' } })
+  assert.match(taskButton(invalidCapability), /disabled=""/)
+  assert.doesNotMatch(invalidCapability, /workbench-tasks-toggle/)
+  assert.match(taskButton(render(bootWithTasks, true)), /disabled=""/)
+  const original = render()
+  assert.match(original, /<aside class="cf-rail"/)
+  assert.match(original, /class="cf-conv__head"/)
+  assert.match(original, /data-active-chat="retained-chat"/)
+  assert.match(original, /data-chat-draft="retained draft"/)
+  assert.doesNotMatch(original, /workbench-tasks-panel/)
+  assert.equal(rail.listCollapsed, false)
+  assert.deepEqual(f.calls, [])
+  rail.onTab('tasks')
+  let opened = render()
+  assert.equal(rail.tab, 'tasks')
+  assert.match(opened, /class="cf-body wb-chat__body--tasks"/)
+  assert.match(opened, /<nav class="cf-iconrail">.*data-testid="workbench-tasks-toggle".*<\/nav><main class="wb-tasks__main">/)
+  assert.equal(opened.match(/data-testid="workbench-tasks-toggle"/g).length, 1)
+  assert.match(opened, /class="wb-tasks__main"><p id="auth-notice">Auth notice<\/p>/)
+  const panelId = taskButton(opened).match(/aria-controls="([^"]+)"/)[1]
+  assert.ok(opened.includes(`<section id="${panelId}" class="wb-tasks" data-testid="workbench-tasks-panel"`))
+  assert.doesNotMatch(opened, /<aside|cf-resizer--x|cf-conv__head|wb-chat__title|wb-chat__scope|data-chat-draft/)
+  assert.deepEqual(f.calls.map(({ method }) => method), ['list'])
+  window.innerWidth = 570
+  opened = render()
+  assert.match(opened, /<main class="wb-tasks__main">/)
+  assert.doesNotMatch(opened, /<aside|cf-conv__head/)
+  window.innerWidth = 1200
+  rail.onTab('chats')
+  const restored = render()
+  assert.equal(rail.tab, 'chats')
+  assert.equal(rail.listCollapsed, false)
+  assert.match(restored, /<aside class="cf-rail"/)
+  assert.match(restored, /data-active-chat="retained-chat"/)
+  assert.match(restored, /data-chat-draft="retained draft"/)
+  assert.doesNotMatch(restored, /workbench-tasks-panel/)
+  assert.deepEqual(selectCalls, [])
+  assert.deepEqual(draft, new Map([[sid, 'retained draft']]))
+  assert.equal(f.calls[0].signal.aborted, true)
+  pending.resolve(list())
+  await Promise.resolve()
+  assert.deepEqual(f.api.snapshot(), { open: false })
+})
 
 test('exact capability and wire receipts; paths, methods, bodies and CSRF are scoped', async () => {
   const signal = new AbortController().signal

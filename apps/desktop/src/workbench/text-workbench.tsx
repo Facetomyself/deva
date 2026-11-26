@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from 'react'
-import { Archive, ArrowLeft, CalendarClock, Globe, Plus, Search } from 'lucide-react'
+import { Archive, ArrowLeft, Globe, Plus, Search } from 'lucide-react'
 import { useI18n } from '../renderer/src/i18n/i18n'
 import { findActive, useModels } from '../renderer/src/store/models'
 import { ChatSurface, ConversationHeader, ConversationScroller, ConversationSurface } from '../renderer/src/redesign/ChatSurface'
 import { Avatar } from '../renderer/src/redesign/shell-common'
-import { IconRail, ThreadRow } from '../renderer/src/redesign/Rail'
+import { IconRail, type RailTab } from '../renderer/src/redesign/IconRail'
+import { ThreadRow } from '../renderer/src/redesign/Rail'
 import { TextConversationMessage } from '../renderer/src/redesign/ConvMessage'
 import { ComposerDraftInput, ComposerJump, ComposerSendButton, ComposerWorkspaceButton } from '../renderer/src/redesign/ComposerControls'
 import { useComposerEditor } from '../renderer/src/redesign/composer-editor'
@@ -197,104 +198,114 @@ export default function TextWorkbench({ transport, bootstrap, beforeWrite, onExp
       window.removeEventListener('drop', preventFileDrop)
     }
   }, [])
-  const start = (): void => { tasks?.close(); setQuery(''); setArchivedView(false); void wk.create() }
+  const start = (): void => { setQuery(''); setArchivedView(false); void wk.create() }
   const openSettings = (): void => { tasks?.close(); setSettingsOpen(true) }
+  const selectRailTab = (tab: RailTab): void => {
+    if (tab === 'chats') {
+      if (tasksVisible) tasks?.close()
+      else setCompact((value) => !value)
+    } else if (tab === 'tasks' && tasks && !locked) {
+      if (tasksVisible) closeTasks()
+      else void tasks.open()
+    }
+  }
   const surface = <ChatSurface className={`wb-chat${preferences ? ' wb-chat--session-prefs' : ''}`} data-testid="workbench-chat">
-    <div className="cf-body" style={{ '--cf-side': `${compact ? 0 : sidebar}px` } as React.CSSProperties}>
-      {!compact && <ResizeHandle axis="x" value={sidebar} title={t('cf.resizeSidebar')}
-        style={{ left: `calc(${ICONRAIL_W}px + ${sidebar}px)` }} onChange={setSidebarWidth}
-        onCommit={() => setSidebarWidth((w) => clampSidebar(w, window.innerWidth))} onReset={() => setSidebarWidth(SIDEBAR_DEFAULT)} />}
-      <IconRail tab="chats" onTab={() => setCompact((value) => !value)} listCollapsed={compact}
+    <div className={`cf-body${tasksVisible ? ' wb-chat__body--tasks' : ''}`} style={{ '--cf-side': `${compact ? 0 : sidebar}px` } as React.CSSProperties}>
+      <IconRail tab={tasksVisible ? 'tasks' : 'chats'} onTab={selectRailTab} listCollapsed={compact}
         onOpenSettings={openSettings} chatAlert={false} unavailable={c.unavailable}
+        taskInspection={tasks ? { panelId: tasksPanelId, disabled: locked, buttonRef: tasksButton } : undefined}
         library={library ? { openProfile: () => { tasks?.close(); setPanel('profile') }, openRoster: () => { tasks?.close(); setPanel('roster') } } : undefined} />
-      <aside className={`cf-rail${compact ? ' is-collapsed' : ''}`} aria-hidden={compact || undefined}>
-        {!compact && <>
-          <div className="cf-rail__top">
-            {preferences && archivedView ? <>
-              <button className="cf-rail__back" type="button" data-testid="workbench-active-chats" title={t('cf.backToChats')}
-                aria-label={t('cf.backToChats')} onClick={() => setArchivedView(false)}><ArrowLeft size={16} /></button>
-              <span className="cf-rail__title">{t('cf.archivedChats')}</span>
-              <span className="cf-rail__count">{archivedCount}</span>
-            </> : <>
-              <div className="cf-search">
-                <Search className="cf-search__icon" size={14} />
-                <input className="cf-search__input" aria-label={t('cf.searchChats')} placeholder={t('cf.searchChats')}
-                  value={query} onChange={(event) => setQuery(event.target.value)} />
-              </div>
-              {preferences && <button className="cf-rail__back wb-session-prefs__archive-link" type="button" data-testid="workbench-archived-chats"
-                title={t('cf.archivedChats')} aria-label={t('cf.archivedChats')} onClick={() => setArchivedView(true)}>
-                <Archive size={16} />{archivedCount > 0 && <span className="cf-rail__count">{archivedCount}</span>}
-              </button>}
-              <button className="cf-rail__addbtn" type="button" data-testid="workbench-new-chat" title={t('cf.newChat')}
-                aria-label={t('cf.newChat')} disabled={wk.createPending || locked} onClick={start}><Plus size={16} /></button>
-            </>}
-          </div>
-          <div className="cf-list" data-session-view={preferences ? archivedView ? 'archived' : 'active' : undefined}>
-            {wk.listIssue && <p className="cf-empty" role="alert">{c[wk.listIssue]}{' '}
-              {wk.listIssue === 'listFailure' && <button className="cf-empty__action" type="button" onClick={() => void wk.refreshList()}>{c.reloadList}</button>}
-            </p>}
-            {visibleRows.length ? visibleRows.map((s) => <ThreadRow key={s.id} session={s} active={s.id === wk.selected}
-              appearance={appearance(s.personaId)} memberFaces={[]} membersWorking={[]} browserPages={0} tasks={[]}
-              subtitle={s.compatibility === 'legacy_text' ? c.readOnly : s.compatibility === 'unsupported' ? c.unavailable : (s.personaId ? appearance(s.personaId).name : s.model ?? t('cf.assistant'))}
-              state={s.id === wk.selected && state?.active ? { streaming: true, unread: false, attention: false } : undefined}
-              onClick={() => { tasks?.close(); wk.select(s.id); if (viewport.w < 780) setCompact(true) }} />)
-              : !wk.listLoading && !wk.listIssue && <div className="cf-empty">{query && !archivedView ? t('cf.searchNoResults') : t('chat.noSessions')}</div>}
-          </div>
-        </>}
-      </aside>
-      <ConversationSurface data-testid={dropFiles ? 'workbench-attachment-drop' : undefined} onDrop={dropFiles}
-        onDragOver={dropFiles ? (event) => {
-          if (!event.dataTransfer.types.includes('Files') || !event.currentTarget.contains(event.target as Node)) return
-          event.preventDefault()
-          event.dataTransfer.dropEffect = !locked && wk.projection?.status === 'ready' && state?.writable && !state.active && !wk.pending ? 'copy' : 'none'
-        } : undefined}>
-        <ConversationHeader>
-          <span className="cf-idbtn__name wb-chat__title">{(preferences ? projectedEntry?.title ?? state?.title : state?.title || selectedEntry?.title)
-            || (sid ? t('chat.untitled') : t('cf.tabChats'))}</span>
-          {personaId && <span className="wb-chat__persona" data-testid="workbench-chat-persona"><Avatar persona={appearance(personaId)} size={22} plain />{appearance(personaId).name}</span>}
-          <AttachedWorkspaceLabel view={bound} locale={locale} open={controlledOpen} />
-          {preferences && selectedEntry && <SessionHeaderActions archived={!!projectedEntry?.archived} disabled={preferenceControlsDisabled}
-            blocked={preferenceBlockReason}
-            rename={renameSession} archive={archiveSession} />}
-          {openFiles && !(wk.selected && (state?.writable || state?.active)) &&
-            <ComposerWorkspaceButton label={workspaceLabel} onClick={openFiles} testId={WORKSPACE_OPEN} />}
-          {tasks && <button ref={tasksButton} className="cf-wschip wb-tasks__toggle" type="button" data-testid="workbench-tasks-toggle"
-            aria-label={t('cf.tabTasks')} aria-expanded={tasksVisible} aria-controls={tasksVisible ? tasksPanelId : undefined} disabled={locked}
-            onClick={() => { if (tasksVisible) closeTasks(); else void tasks.open() }}><CalendarClock size={15} />{t('cf.tabTasks')}</button>}
-          {!tasksVisible && browser && sid && <button className="cf-wschip wb-browser__launch" type="button" data-testid="workbench-browser-open"
-            aria-haspopup="dialog" aria-label={t('browser.title')} disabled={locked} onClick={() => {
-              setBrowserOpen({ sid, transport: browser, panel: createManualBrowserPanel(browser, sid, onExpired) })
-            }}><Globe size={15} /><span>{t('browser.title')}</span></button>}
-          <span className="cf-conv__tag wb-chat__scope" title={scope}>{scope}</span>
-        </ConversationHeader>
+      {tasks && tasksVisible ? <main className="wb-tasks__main">
         {notice}
-        {tasks && tasksVisible ? <TaskInspectionPanel api={tasks} view={taskView} id={tasksPanelId} close={closeTasks} /> : <>
-        {binding && <SessionWorkspaceControls controller={binding} view={bound} locale={locale} writable={workspaceWritable} openNotes={notes} />}
-        {preferenceEntry && renameSid !== sid && <SessionPreferenceStatus entry={preferenceEntry} reload={reloadPreferences} locked={locked} />}
-        {sid ? <TextThread key={sid} sid={sid} wk={wk} c={c} locked={locked}
-          preferred={modelChoice[sid] ?? state?.model ?? selectedEntry?.model ?? (personaId ? null : recent)}
-          onPick={(id) => { setModelChoice((choices) => ({ ...choices, [sid]: id })); setRecent(id) }}
-          managedModel={preferences ? {
-            pinned: preferenceEntry?.pending?.model !== undefined ? preferenceEntry.pending.model : confirmedModel,
-            disabled: preferenceControlsDisabled || selectedEntry?.model !== confirmedModel,
-            choose: (model) => {
-              if (!preferenceControlsDisabled && model !== preferenceEntry?.confirmed?.preferences.model) void preferences.write(sid, { model })
-            }
-          } : undefined}
-          openSettings={openSettings} openFiles={openFiles} workspaceLabel={workspaceLabel}
-           deliveryApi={deliveryApi} locale={locale} beforeWrite={beforeWrite} onExpired={onExpired}
-           openInWorkspace={files ? openInWorkspace : undefined} />
-          : <div className="wb-chat__empty cf-empty">
-            {wk.listLoading ? <span role="status">{c.loading}</span> : <>
-              <span>{wk.listIssue ? c[wk.listIssue] : c.empty}</span>
-              {wk.listIssue === 'listFailure'
-                ? <button className="btn btn--ghost" type="button" onClick={() => void wk.refreshList()}>{c.reloadList}</button>
-                : <button className="btn btn--primary" type="button" data-testid={compact ? 'workbench-new-chat' : undefined}
-                  disabled={wk.createPending || locked} onClick={start}>{t('cf.newChat')}</button>}
-            </>}
-          </div>}
-        </>}
-      </ConversationSurface>
+        <TaskInspectionPanel api={tasks} view={taskView} id={tasksPanelId} close={closeTasks} />
+      </main> : <>
+        {!compact && <ResizeHandle axis="x" value={sidebar} title={t('cf.resizeSidebar')}
+          style={{ left: `calc(${ICONRAIL_W}px + ${sidebar}px)` }} onChange={setSidebarWidth}
+          onCommit={() => setSidebarWidth((w) => clampSidebar(w, window.innerWidth))} onReset={() => setSidebarWidth(SIDEBAR_DEFAULT)} />}
+        <aside className={`cf-rail${compact ? ' is-collapsed' : ''}`} aria-hidden={compact || undefined}>
+          {!compact && <>
+            <div className="cf-rail__top">
+              {preferences && archivedView ? <>
+                <button className="cf-rail__back" type="button" data-testid="workbench-active-chats" title={t('cf.backToChats')}
+                  aria-label={t('cf.backToChats')} onClick={() => setArchivedView(false)}><ArrowLeft size={16} /></button>
+                <span className="cf-rail__title">{t('cf.archivedChats')}</span>
+                <span className="cf-rail__count">{archivedCount}</span>
+              </> : <>
+                <div className="cf-search">
+                  <Search className="cf-search__icon" size={14} />
+                  <input className="cf-search__input" aria-label={t('cf.searchChats')} placeholder={t('cf.searchChats')}
+                    value={query} onChange={(event) => setQuery(event.target.value)} />
+                </div>
+                {preferences && <button className="cf-rail__back wb-session-prefs__archive-link" type="button" data-testid="workbench-archived-chats"
+                  title={t('cf.archivedChats')} aria-label={t('cf.archivedChats')} onClick={() => setArchivedView(true)}>
+                  <Archive size={16} />{archivedCount > 0 && <span className="cf-rail__count">{archivedCount}</span>}
+                </button>}
+                <button className="cf-rail__addbtn" type="button" data-testid="workbench-new-chat" title={t('cf.newChat')}
+                  aria-label={t('cf.newChat')} disabled={wk.createPending || locked} onClick={start}><Plus size={16} /></button>
+              </>}
+            </div>
+            <div className="cf-list" data-session-view={preferences ? archivedView ? 'archived' : 'active' : undefined}>
+              {wk.listIssue && <p className="cf-empty" role="alert">{c[wk.listIssue]}{' '}
+                {wk.listIssue === 'listFailure' && <button className="cf-empty__action" type="button" onClick={() => void wk.refreshList()}>{c.reloadList}</button>}
+              </p>}
+              {visibleRows.length ? visibleRows.map((s) => <ThreadRow key={s.id} session={s} active={s.id === wk.selected}
+                appearance={appearance(s.personaId)} memberFaces={[]} membersWorking={[]} browserPages={0} tasks={[]}
+                subtitle={s.compatibility === 'legacy_text' ? c.readOnly : s.compatibility === 'unsupported' ? c.unavailable : (s.personaId ? appearance(s.personaId).name : s.model ?? t('cf.assistant'))}
+                state={s.id === wk.selected && state?.active ? { streaming: true, unread: false, attention: false } : undefined}
+                onClick={() => { wk.select(s.id); if (viewport.w < 780) setCompact(true) }} />)
+                : !wk.listLoading && !wk.listIssue && <div className="cf-empty">{query && !archivedView ? t('cf.searchNoResults') : t('chat.noSessions')}</div>}
+            </div>
+          </>}
+        </aside>
+        <ConversationSurface data-testid={dropFiles ? 'workbench-attachment-drop' : undefined} onDrop={dropFiles}
+          onDragOver={dropFiles ? (event) => {
+            if (!event.dataTransfer.types.includes('Files') || !event.currentTarget.contains(event.target as Node)) return
+            event.preventDefault()
+            event.dataTransfer.dropEffect = !locked && wk.projection?.status === 'ready' && state?.writable && !state.active && !wk.pending ? 'copy' : 'none'
+          } : undefined}>
+          <ConversationHeader>
+            <span className="cf-idbtn__name wb-chat__title">{(preferences ? projectedEntry?.title ?? state?.title : state?.title || selectedEntry?.title)
+              || (sid ? t('chat.untitled') : t('cf.tabChats'))}</span>
+            {personaId && <span className="wb-chat__persona" data-testid="workbench-chat-persona"><Avatar persona={appearance(personaId)} size={22} plain />{appearance(personaId).name}</span>}
+            <AttachedWorkspaceLabel view={bound} locale={locale} open={controlledOpen} />
+            {preferences && selectedEntry && <SessionHeaderActions archived={!!projectedEntry?.archived} disabled={preferenceControlsDisabled}
+              blocked={preferenceBlockReason}
+              rename={renameSession} archive={archiveSession} />}
+            {openFiles && !(wk.selected && (state?.writable || state?.active)) &&
+              <ComposerWorkspaceButton label={workspaceLabel} onClick={openFiles} testId={WORKSPACE_OPEN} />}
+            {browser && sid && <button className="cf-wschip wb-browser__launch" type="button" data-testid="workbench-browser-open"
+              aria-haspopup="dialog" aria-label={t('browser.title')} disabled={locked} onClick={() => {
+                setBrowserOpen({ sid, transport: browser, panel: createManualBrowserPanel(browser, sid, onExpired) })
+              }}><Globe size={15} /><span>{t('browser.title')}</span></button>}
+            <span className="cf-conv__tag wb-chat__scope" title={scope}>{scope}</span>
+          </ConversationHeader>
+          {notice}
+          {binding && <SessionWorkspaceControls controller={binding} view={bound} locale={locale} writable={workspaceWritable} openNotes={notes} />}
+          {preferenceEntry && renameSid !== sid && <SessionPreferenceStatus entry={preferenceEntry} reload={reloadPreferences} locked={locked} />}
+          {sid ? <TextThread key={sid} sid={sid} wk={wk} c={c} locked={locked}
+            preferred={modelChoice[sid] ?? state?.model ?? selectedEntry?.model ?? (personaId ? null : recent)}
+            onPick={(id) => { setModelChoice((choices) => ({ ...choices, [sid]: id })); setRecent(id) }}
+            managedModel={preferences ? {
+              pinned: preferenceEntry?.pending?.model !== undefined ? preferenceEntry.pending.model : confirmedModel,
+              disabled: preferenceControlsDisabled || selectedEntry?.model !== confirmedModel,
+              choose: (model) => {
+                if (!preferenceControlsDisabled && model !== preferenceEntry?.confirmed?.preferences.model) void preferences.write(sid, { model })
+              }
+            } : undefined}
+            openSettings={openSettings} openFiles={openFiles} workspaceLabel={workspaceLabel}
+             deliveryApi={deliveryApi} locale={locale} beforeWrite={beforeWrite} onExpired={onExpired}
+             openInWorkspace={files ? openInWorkspace : undefined} />
+            : <div className="wb-chat__empty cf-empty">
+              {wk.listLoading ? <span role="status">{c.loading}</span> : <>
+                <span>{wk.listIssue ? c[wk.listIssue] : c.empty}</span>
+                {wk.listIssue === 'listFailure'
+                  ? <button className="btn btn--ghost" type="button" onClick={() => void wk.refreshList()}>{c.reloadList}</button>
+                  : <button className="btn btn--primary" type="button" data-testid={compact ? 'workbench-new-chat' : undefined}
+                    disabled={wk.createPending || locked} onClick={start}>{t('cf.newChat')}</button>}
+              </>}
+            </div>}
+        </ConversationSurface>
+      </>}
     </div>
     {settingsOpen && renderSettings(() => setSettingsOpen(false))}
     {browserOpen && browserVisible && <ManualBrowserDialog api={browserOpen.panel} dismiss={() => setBrowserOpen(undefined)} />}

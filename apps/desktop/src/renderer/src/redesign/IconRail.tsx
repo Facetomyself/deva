@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, type Ref } from 'react'
 import { AlarmClock, Cog, MessageCircle, Smartphone, Users } from 'lucide-react'
 import { useI18n } from '../i18n/i18n'
 import { ProfilePanel } from './ProfilePanel'
@@ -21,7 +21,8 @@ export function IconRail({
   onOpenSettings,
   chatAlert,
   unavailable,
-  library
+  library,
+  taskInspection
 }: {
   tab: RailTab
   /** 点亮着的「对话」图标也回调（由调用方切换会话列表的收起 / 展开）。 */
@@ -37,6 +38,8 @@ export function IconRail({
   /** Explanation for features that this host does not expose. Omitted on desktop. */
   unavailable?: string
   library?: { openProfile: () => void; openRoster: () => void }
+  /** Web host may expose saved tasks even while the other native tabs remain unavailable. */
+  taskInspection?: { panelId: string; disabled: boolean; buttonRef: Ref<HTMLButtonElement> }
 }): React.JSX.Element {
   const { t } = useI18n()
   const [profileOpen, setProfileOpen] = useState(false)
@@ -85,11 +88,16 @@ export function IconRail({
         <Users size={20} />
       </button>
       <button
+        type="button"
+        ref={taskInspection?.buttonRef}
         className={`cf-navbtn${tab === 'tasks' ? ' is-active' : ''}`}
-        title={unavailable ?? t('cf.tabTasks')}
-        disabled={!!unavailable}
+        title={taskInspection ? t('cf.tabTasks') : unavailable ?? t('cf.tabTasks')}
+        disabled={taskInspection ? taskInspection.disabled : !!unavailable}
+        data-testid={taskInspection ? 'workbench-tasks-toggle' : undefined}
         aria-label={t('cf.tabTasks')}
         aria-current={tab === 'tasks'}
+        aria-expanded={taskInspection ? tab === 'tasks' : undefined}
+        aria-controls={tab === 'tasks' ? taskInspection?.panelId : undefined}
         onClick={() => onTab('tasks')}
       >
         <AlarmClock size={20} />

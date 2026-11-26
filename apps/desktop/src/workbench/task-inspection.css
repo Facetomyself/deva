@@ -1,3 +1,14 @@
+.cf-body.wb-chat__body--tasks {
+  grid-template-columns: var(--cf-rail-w, 56px) minmax(0, 1fr);
+}
+.wb-tasks__main {
+  grid-column: 2 / -1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
+}
 .wb-tasks {
   flex: 1;
   min-height: 0;
@@ -7,8 +18,6 @@
   container-type: inline-size;
   user-select: text;
 }
-.wb-tasks__toggle { flex: none; }
-.wb-tasks__toggle[aria-expanded='true'] { background: var(--bg-hover); color: var(--fg); }
 .wb-tasks__head {
   display: flex;
   align-items: center;
@@ -58,7 +67,7 @@
 .wb-tasks__fields .sched__row { flex-wrap: wrap; }
 .wb-tasks__allow { display: flex; align-items: center; gap: var(--space-2); margin-bottom: var(--space-3); }
 .wb-tasks__receipt { margin-top: var(--space-3); white-space: pre-wrap; overflow-wrap: anywhere; }
-.wb-tasks :is(button, input):focus-visible, .wb-tasks__toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.wb-tasks :is(button, input):focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 @container (max-width: 610px) {
   .wb-tasks__body { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, auto) minmax(0, 1fr); }
   .wb-tasks__list { max-height: min(30vh, 14rem); border-inline-end: 0; border-bottom: 1px solid var(--border); }
