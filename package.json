@@ -10,6 +10,8 @@
   "scripts": {
     "dev": "pnpm --filter @deva/desktop dev",
     "build": "pnpm --filter @deva/desktop build",
+    "workbench:build": "pnpm --filter @deva/desktop build:workbench && node scripts/workbench/check-bundle.mjs",
+    "workbench:check": "node scripts/workbench/check-parity.mjs && node --test scripts/workbench/*.test.mjs",
     "start": "pnpm --filter @deva/desktop start",
     "typecheck": "pnpm --filter @deva/desktop typecheck",
     "package:win": "pnpm --filter @deva/desktop build:win",
