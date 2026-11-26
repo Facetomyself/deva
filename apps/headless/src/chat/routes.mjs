@@ -1,8 +1,9 @@
 import { HttpError, json, readJson } from '../http/policy.mjs'
+import { sessionPreferenceRoute } from './session-routes.mjs'
 import { isChatRoleId } from './text-turns.mjs'
 
 const collection = '/api/v1/chats'
-const resource = /^\/api\/v1\/chats\/([A-Za-z0-9_-]{1,128})(?:\/(turns|stop))?$/
+const resource = /^\/api\/v1\/chats\/([A-Za-z0-9_-]{1,128})(?:\/(turns|stop|preferences))?$/
 const roleServiceError = () => new HttpError(503, 'chat_role_unavailable')
 const roleUnavailable = () => new HttpError(409, 'role_unavailable')
 
@@ -40,6 +41,10 @@ export function chatRoutes(turns, { withRoleForChat } = {}) {
     const path = (req.url ?? '').split('?', 1)[0]
     const match = resource.exec(path)
     if (path !== collection && !match) return false
+    if (match?.[2] === 'preferences') {
+      await sessionPreferenceRoute(req, res, { auth, policy }, turns, path, match[1])
+      return true
+    }
     const write = req.method === 'POST'
     const methods = match ? [match[2] ? 'POST' : 'GET'] : ['GET', 'POST']
     try {

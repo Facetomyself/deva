@@ -19,6 +19,8 @@ export function chatCopy(locale: Locale) {
     selectModel: 'Select an enabled model. Configure providers, keys and models in Model settings.',
     turnFailure: 'Could not confirm the message. The draft was kept; sending the same draft retries the same request.',
     busy: 'A reply is already in progress in this conversation.', modelFailure: 'Check the selected model and provider in Model settings.',
+    preferencesChanged: 'This conversation’s model changed. Your draft is still here. Check the refreshed selection before sending again.',
+    effortUnavailable: 'Workbench does not support the saved thinking level. Your draft is still here.',
     listFailure: 'Could not load conversations.', createFailure: 'Could not confirm a new conversation. Try New conversation again.',
     stopFailure: 'Could not confirm the stop request.', reloadList: 'Retry',
     limits: '{turns} turns per conversation · 12 KiB input · 65,536 UTF-16 code units of output', input: 'Message the assistant…', inputLimit: 'Messages can contain up to 12 KiB of UTF-8 text.', previous: 'Show earlier messages'
@@ -39,6 +41,8 @@ export function chatCopy(locale: Locale) {
     selectModel: '请选择已启用的模型。可在模型设置中配置服务商、密钥和模型。',
     turnFailure: '消息发送结果尚未确认。已保留草稿，再次提交原草稿会使用同一个请求。',
     busy: '这段对话已有一条回复正在进行。', modelFailure: '请在模型设置中检查所选模型和服务商。',
+    preferencesChanged: '对话模型已变更。草稿已保留，请核对同步后的模型再发送。',
+    effortUnavailable: '已保存的思考档位在工作台中尚未开放。草稿已保留。',
     listFailure: '加载对话列表失败。', createFailure: '新建对话的结果尚未确认，可再次点击新建对话。',
     stopFailure: '停止请求的结果尚未确认。', reloadList: '重试',
     limits: '每段对话 {turns} 轮 · 输入 12 KiB · 输出 65,536 个 UTF-16 码元', input: '跟助手说点什么…', inputLimit: '单条消息最多 12 KiB UTF-8 文本。', previous: '显示更早的消息'

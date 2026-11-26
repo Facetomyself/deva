@@ -52,10 +52,10 @@ function closeHandle(control) {
   return () => { control.close?.() }
 }
 
-function startSubscription({ bus, stream, after, onEvent, onClose, release, deliveryTimeoutMs }) {
+function startSubscription({ bus, stream, after, onEvent, onClose, release, deliveryTimeoutMs, latestEvent }) {
   let delivered = after; let scheduled; let pending; let closed = false
   const control = { close: () => finish() }
-  const terminal = () => stream.retired ?? (delivered < stream.floor ? 'history_lost' : null)
+  const terminal = () => stream.retired ?? (!latestEvent && delivered < stream.floor ? 'history_lost' : null)
 
   function finish(reason) {
     if (closed) return
@@ -99,11 +99,11 @@ function startSubscription({ bus, stream, after, onEvent, onClose, release, deli
       const reason = terminal()
       if (reason) return finish(reason)
       if (pending || delivered === stream.seq) return
-      const next = stream.entries.get(delivered + 1)
-      if (!next) return finish('history_lost')
-      delivered = next.seq
+      const next = latestEvent ? null : stream.entries.get(delivered + 1)
+      if (!latestEvent && !next) return finish('history_lost')
+      delivered = latestEvent ? stream.seq : next.seq
       try {
-        const result = onEvent(JSON.parse(next.json))
+        const result = onEvent(latestEvent ? latestEvent() : JSON.parse(next.json))
         if (result === false) return finish('backpressure')
         if (typeof result?.then === 'function') {
           if (closed) void Promise.resolve(result).catch(ignore)
@@ -243,14 +243,31 @@ export function createEventJournal({
     if (reason) return { status: 'fresh_snapshot', reason }
     if (subscribers === maxSubscribers) return { status: 'busy' }
     useStream(scope)
+    return openSubscription(stream, cursor.seq, { onEvent, onClose })
+  }
+
+  function openSubscription(stream, after, { onEvent, onClose }, latestEvent) {
     subscribers++
     return {
       status: 'subscribed',
       close: startSubscription({
-        bus, stream, after: cursor.seq, onEvent, onClose, deliveryTimeoutMs,
+        bus, stream, after, onEvent, onClose, deliveryTimeoutMs, latestEvent,
         release: () => { subscribers-- }
       })
     }
+  }
+
+  // A list reader needs the latest invalidation, not replay. Capture the initial
+  // watermark and attach within one synchronous turn, independent of retained history.
+  function watchSessions({ onEvent, onClose } = {}) {
+    const cursor = cursorAt(sessions)
+    if (closed) return { cursor, subscription: { status: 'closed' } }
+    if (subscribers === maxSubscribers) return { cursor, subscription: { status: 'busy' } }
+    if (typeof onEvent !== 'function' || (onClose !== undefined && typeof onClose !== 'function')) {
+      throw new TypeError('Expected event delivery callbacks')
+    }
+    const latestEvent = () => ({ cursor: cursorAt(sessions), type: 'sessions_changed' })
+    return { cursor, subscription: openSubscription(sessions, cursor.seq, { onEvent, onClose }, latestEvent) }
   }
 
   return Object.freeze({
@@ -259,16 +276,12 @@ export function createEventJournal({
       if (closed) return { status: 'closed' }
       const event = projectChatEvent(payload)
       if (!event) return { status: 'ignored' }
-      const result = publish(chatScope(event.sessionId), event)
-      // These desktop events also update the list (for example, a first turn creates a session).
-      if (event.event.type === 'turn_start' || event.event.type === 'done' || event.event.type === 'member_report') {
-        publish(SESSIONS_SCOPE, { type: 'sessions_changed' })
-      }
-      return result
+      return publish(chatScope(event.sessionId), event)
     },
     publishSessionsChanged() {
       return closed ? { status: 'closed' } : publish(SESSIONS_SCOPE, { type: 'sessions_changed' })
     },
+    watchSessions,
     snapshot,
     subscribe,
     snapshotAndSubscribe(scope, readState, callbacks) {

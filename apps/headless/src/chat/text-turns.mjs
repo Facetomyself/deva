@@ -1,10 +1,14 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { setImmediate as nextTick } from 'node:timers/promises'
-import { consumeModelStep, createChatStore, deriveTitle, isValidSessionId, modelMessages } from '../../dist/chat-core.mjs'
+import { consumeModelStep, createChatStore, isValidSessionId, modelMessages } from '../../dist/chat-core.mjs'
 import { connectProvider } from '../business/model-connection.mjs'
-import { providerId as checkedProviderId } from '../business/settings-schema.mjs'
 import { chatScope } from '../events/index.mjs'
 import { HttpError } from '../http/policy.mjs'
+import { confirmPreferenceStorage, preflightPreferenceStorage } from './session-preferences-storage.mjs'
+import {
+  PREFERENCES_META, checkPreferenceRevision, firstTitle, listPreferenceFields, managedModel, preferenceChanges,
+  preferenceView, readPreferencePatch, resolveTurnModel, splitModel, unsupportedEffort, validPreferenceFields, validatePreferenceModel
+} from './session-preferences.mjs'
 import { ATTACHMENT_META, attachmentIds, createTurnAttachments } from './turn-attachments.mjs'
 
 const META = '_devaHeadlessTextTurns'
@@ -26,7 +30,10 @@ const terminalReasons = new Map([
   ['failed', new Set(['model_failed', 'unexpected_tool', 'timeout'])],
   ['interrupted', new Set(['interrupted'])]
 ])
-const nativeTextFields = new Set(['id', 'title', 'createdAt', 'updatedAt', 'focusRoot', 'personaId', 'model', 'messages', 'notices', META])
+const nativeTextFields = new Set([
+  'id', 'title', 'createdAt', 'updatedAt', 'focusRoot', 'personaId', 'model', 'messages', 'notices',
+  'archived', 'effort', META, PREFERENCES_META
+])
 const complexFields = [
   'compacted', 'members', 'parentId', 'proposals', 'asks', 'summaries', 'delivered', 'background',
   'durations', 'plans', 'autotasks', 'todos', 'todoCancelled', 'todoCancelNote', 'checkpoints', 'lastKnown',
@@ -98,19 +105,6 @@ function createInput(input) {
   return sessionId
 }
 
-function splitModel(ref) {
-  if (typeof ref !== 'string' || ref.length > 609) throw new HttpError(400, 'invalid_model_ref')
-  const colon = ref.indexOf(':')
-  if (colon < 1) throw new HttpError(400, 'invalid_model_ref')
-  const providerId = ref.slice(0, colon)
-  const modelId = ref.slice(colon + 1)
-  try { checkedProviderId(providerId) } catch { throw new HttpError(400, 'invalid_model_ref') }
-  if (!modelId || modelId.length > 512 || modelId !== modelId.trim() || /[\x00-\x1f\x7f]/.test(modelId)) {
-    throw new HttpError(400, 'invalid_model_ref')
-  }
-  return { providerId, modelId }
-}
-
 function sendInput(input, supportsAttachments) {
   const keys = ['sid', 'clientRequestId', 'text', 'model']
   if (supportsAttachments && input && Object.hasOwn(input, 'attachments')) keys.push('attachments')
@@ -122,9 +116,10 @@ function sendInput(input, supportsAttachments) {
   if (typeof text !== 'string' || text.length > MAX_TEXT_BYTES || (!attachments?.length && !text.trim()) || Buffer.byteLength(text) > MAX_TEXT_BYTES) {
     throw new HttpError(400, 'invalid_text')
   }
-  const ref = splitModel(model)
+  if (model !== null) splitModel(model)
+  // Preserve existing receipts byte-for-byte. A null model records the intention to follow current defaults.
   const fingerprint = createHash('sha256').update(JSON.stringify(attachments?.length ? [model, text, attachments] : [model, text])).digest('hex')
-  return { sid, clientRequestId, text, model, ...ref, fingerprint, attachments }
+  return { sid, clientRequestId, text, model, fingerprint, attachments }
 }
 
 function plainText(content) {
@@ -231,6 +226,7 @@ export function createTextTurns({ dataDir, settings, journal, version, allowedOr
     if (s[ATTACHMENT_META] !== undefined) {
       return attachments && !incomplete.has(s) && s.focusRoot == null &&
         (s.personaId === undefined || isChatRoleId(s.personaId)) && validLedger(s[META], s.messages.length) && validNotices(s) &&
+        validPreferenceFields(s) &&
         Object.keys(s).every(key => s[key] === undefined || key === ATTACHMENT_META || nativeTextFields.has(key)) &&
         attachedIndex(s) ? 'text' : 'unsupported'
     }
@@ -242,7 +238,7 @@ export function createTextTurns({ dataDir, settings, journal, version, allowedOr
     }) || s.messages.some(m => plainText(m.content) === null)
     const legacyNotices = !owns && s.notices !== undefined && (!Array.isArray(s.notices) || s.notices.length > 0)
     const kind = complex || legacyNotices || (owns && (
-      !validLedger(s[META], s.messages.length) || !validNotices(s) || s.focusRoot != null ||
+      !validLedger(s[META], s.messages.length) || !validNotices(s) || !validPreferenceFields(s) || s.focusRoot != null ||
       (s.personaId !== undefined && !isChatRoleId(s.personaId)) ||
       Object.keys(s).some(key => s[key] !== undefined && !nativeTextFields.has(key))
     )) ? 'unsupported' : owns ? 'text' : 'legacy_text'
@@ -262,7 +258,8 @@ export function createTextTurns({ dataDir, settings, journal, version, allowedOr
     return {
       id: s.id, title: s.title, createdAt: s.createdAt, updatedAt: s.updatedAt,
       ...(isChatRoleId(s.personaId) ? { personaId: s.personaId } : {}),
-      model: kind === 'text' && typeof s.model === 'string' ? s.model : null,
+      model: kind === 'text' && typeof s.model === 'string' && s.model ? s.model : null,
+      ...listPreferenceFields(s),
       compatibility: kind, writable: writeBlockReason === null, writeBlockReason,
       turnLimit: kind === 'text' ? MAX_REQUESTS : null
     }
@@ -290,7 +287,7 @@ export function createTextTurns({ dataDir, settings, journal, version, allowedOr
       hidden.add(id)
       throw storageError()
     }
-    try { journal.publishSessionsChanged() } catch { /* invalidate on the next client snapshot */ }
+    publishSessionsChanged()
     return summary(s)
   }
 
@@ -301,6 +298,63 @@ export function createTextTurns({ dataDir, settings, journal, version, allowedOr
       try { return summary(getSession(meta.id)) }
       catch { return summary(meta, 'unsupported') }
     })
+  }
+
+  function preferencesSession(sid) {
+    if (closing) throw closedError()
+    if (!validSid(sid)) throw new HttpError(400, 'invalid_session_id')
+    if (unconfirmed.has(sid) || hidden.has(sid)) throw storageError()
+    const exists = preflightPreferenceStorage(dataDir, sid)
+    const s = lookupSession(sid)
+    if (!exists && !s) throw new HttpError(404, 'session_not_found')
+    if (!exists || !s) throw storageError()
+    const kind = compatibility(s)
+    if (kind === 'legacy_text') throw new HttpError(409, 'read_only_session')
+    if (kind !== 'text') throw new HttpError(409, 'unsupported_history')
+    const index = attachedIndex(s)
+    if (index && (mediaUnconfirmed.has(s) || !attachments.available(index))) throw new HttpError(409, 'unsupported_history')
+    return s
+  }
+
+  function getPreferences(sid) {
+    const s = preferencesSession(sid)
+    confirmPreferenceStorage(dataDir, s)
+    return preferenceView(s, s[META].requests.length)
+  }
+
+  function firstUser(s) {
+    const at = s.messages.findIndex(m => m.role === 'user')
+    if (at < 0) return null
+    const message = s.messages[at]
+    const row = attachedIndex(s)?.byMessage.get(at)
+    return row ? attachments.snapshot(message, row) : { content: plainText(message.content) }
+  }
+
+  async function patchPreferences(sid, input, verifyOwner) {
+    const { revision, set, model } = readPreferencePatch(input)
+    function checkedCurrent() {
+      if (active.has(sid)) throw new HttpError(409, 'turn_in_progress')
+      const s = preferencesSession(sid)
+      checkPreferenceRevision(revision, preferenceView(s, s[META].requests.length).revision)
+      return s
+    }
+    checkedCurrent()
+    if (set.effort != null && set.effort !== 'default') throw unsupportedEffort()
+    // The settings lookup can outlive the login. Recheck even when validation itself fails.
+    try { if (model) await validatePreferenceModel(settings, model) }
+    finally { verifyOwner?.() }
+    // A competing editor or turn can also have committed while the lookup awaited. Nothing awaits from here.
+    const s = checkedCurrent()
+    confirmPreferenceStorage(dataDir, s, true)
+    const previous = preferenceView(s, s[META].requests.length).preferences
+    const wasManaged = managedModel(s)
+    const patch = preferenceChanges(s, set, () => firstUser(s))
+    commit(s, patch, null, () => confirmPreferenceStorage(dataDir, s))
+    const after = preferenceView(s, s[META].requests.length)
+    if (wasManaged !== managedModel(s) || Object.keys(previous).some(key => previous[key] !== after.preferences[key])) {
+      publishSessionsChanged()
+    }
+    return after
   }
 
   function readState(s) {
@@ -359,6 +413,10 @@ export function createTextTurns({ dataDir, settings, journal, version, allowedOr
     return committed
   }
 
+  function publishSessionsChanged() {
+    try { journal.publishSessionsChanged() } catch { /* invalidate on the next client snapshot */ }
+  }
+
   function publish(slot, event) {
     try { journal.publishChat({ sessionId: slot.session.id, turnId: slot.record.turnId, event }) }
     catch { /* a journal fault does not change the outcome of the confirmed store write */ }
@@ -371,12 +429,18 @@ export function createTextTurns({ dataDir, settings, journal, version, allowedOr
 
   // On a strict-save failure the main JSON might already be published, with only its index repair failing.
   // Restore the last confirmed in-memory view, block further mutation here, and let the next process read disk.
-  function commit(s, patch, terminal = null) {
-    const before = Object.fromEntries(Object.keys(patch).map(key => [key, s[key]]))
-    Object.assign(s, patch)
-    try { store.saveStrict(s.id) }
+  function commit(s, patch, terminal = null, verify) {
+    const before = new Map(Object.keys(patch).map(key => [key, Object.getOwnPropertyDescriptor(s, key)]))
+    for (const [key, value] of Object.entries(patch)) {
+      if (value === undefined) delete s[key]
+      else s[key] = value
+    }
+    try { store.saveStrict(s.id); verify?.() }
     catch {
-      Object.assign(s, before)
+      for (const [key, descriptor] of before) {
+        if (descriptor) Object.defineProperty(s, key, descriptor)
+        else delete s[key]
+      }
       unconfirmed.set(s.id, terminal)
       throw storageError()
     }
@@ -404,6 +468,9 @@ export function createTextTurns({ dataDir, settings, journal, version, allowedOr
       throw new HttpError(409, 'unsupported_history')
     }
     const role = s.personaId === undefined ? undefined : await roleForTurn(s.personaId)
+    if (s.effort !== undefined && s.effort !== 'default') throw unsupportedEffort()
+    const model = await resolveTurnModel(settings, s, role, input.model)
+    const { providerId, modelId } = splitModel(model)
     let client, adapter
     // Capture the adapter from the same trusted provider snapshot that binds credentials, model and URL.
     const binding = withMedia ? { async getProvider(id) {
@@ -413,7 +480,7 @@ export function createTextTurns({ dataDir, settings, journal, version, allowedOr
       return { ...provider, adapter }
     } } : settings
     try {
-      client = await connectProvider(binding, input.providerId, { version, allowedOrigins, signal: controller.signal, modelId: input.modelId })
+      client = await connectProvider(binding, providerId, { version, allowedOrigins, signal: controller.signal, modelId })
     } catch (err) {
       if (closing) throw closedError()
       const knownStatus = err instanceof HttpError ? publicModelErrors.get(err.code) : undefined
@@ -422,6 +489,7 @@ export function createTextTurns({ dataDir, settings, journal, version, allowedOr
     if (closing) throw closedError()
     const record = {
       clientRequestId: input.clientRequestId, fingerprint: input.fingerprint,
+      ...(input.model === null || managedModel(s) ? { model } : {}),
       turnId: randomUUID(), startedAt: Date.now(), status: 'running', reason: null
     }
     const requests = [...s[META].requests]
@@ -443,12 +511,19 @@ export function createTextTurns({ dataDir, settings, journal, version, allowedOr
     prepared?.persist?.() // Publish immutable media before the confirmed JSON and before streamChat.
     // Native text part avoids interpreting a literal desktop compaction/auto marker as metadata.
     const messages = prepared?.messages ?? [...s.messages, { role: 'user', content: [{ type: 'text', text: input.text }] }]
+    const itemNames = prepared?.patch[ATTACHMENT_META]?.rows.at(-1)?.items.map(item => item.name)
+    const title = s.title || firstTitle(input.text, itemNames)
+    const modelPatch = managedModel(s) ? {} : input.model === null
+      ? preferenceChanges(s, { model: null }, () => null) : { model }
+    const modelChanged = Object.hasOwn(modelPatch, 'model') && (modelPatch.model || null) !== (s.model || null)
+    const listChanged = title !== s.title || modelChanged || record.startedAt !== s.updatedAt || requests.length === MAX_REQUESTS
     commit(s, {
-      messages, notices, model: input.model, title: s.title || deriveTitle(prepared?.question ?? input.text), updatedAt: record.startedAt,
+      ...modelPatch, messages, notices, title, updatedAt: record.startedAt,
       [META]: { version: 1, messageCount: messages.length, requests }, ...prepared?.patch
     })
     slot.record = record
     publish(slot, { type: 'turn_start' })
+    if (listChanged) publishSessionsChanged()
     // The session now owns durable bytes. Retire spent draft reservations after commit,
     // never before: a failed save must keep the user's files available for a retry.
     if (input.attachments?.length && typeof uploads?.remove === 'function') {
@@ -510,10 +585,13 @@ export function createTextTurns({ dataDir, settings, journal, version, allowedOr
     try {
       const index = attachedIndex(s)
       if (index && (mediaUnconfirmed.has(s) || !attachments.available(index))) throw storageError()
+      const updatedAt = Date.now()
+      const listChanged = updatedAt !== s.updatedAt
       commit(s, {
-        messages, notices, updatedAt: Date.now(),
+        messages, notices, updatedAt,
         [META]: { version: 1, messageCount: messages.length, requests: [...s[META].requests.slice(0, -1), ended] }
       }, { ...record, status: 'failed', reason: 'storage_unconfirmed' })
+      if (listChanged) publishSessionsChanged()
     } catch {
       status = 'failed'
       stopReason = 'error'
@@ -579,5 +657,8 @@ export function createTextTurns({ dataDir, settings, journal, version, allowedOr
     const s = lookupSession(sid)
     return !!s && compatibility(s) === 'text'
   }
-  return Object.freeze({ create, list, attach, snapshot, send, stop, close, attachmentScope, describeCommittedAttachment, readCommittedAttachment, hasBrowserSession })
+  return Object.freeze({
+    create, list, attach, snapshot, send, stop, close, getPreferences, patchPreferences,
+    attachmentScope, describeCommittedAttachment, readCommittedAttachment, hasBrowserSession
+  })
 }

@@ -4,7 +4,7 @@
  * 每行只写模型名（悬停提示写完整 ID）。服务商名是灰色小字、滚动时吸顶；组间不画线、不放色点。
  * 列表自己滚动；打开时把当前模型滚到可见范围中间。
  */
-import { useLayoutEffect, useRef } from 'react'
+import { useLayoutEffect, useRef, type ReactNode } from 'react'
 import { Check, ChevronDown } from 'lucide-react'
 import './model-panel.css'
 import type { ModelDef, Provider } from '../mock/models'
@@ -19,8 +19,12 @@ export function ModelMenu({
   groups,
   activePid,
   activeMid,
-  onPick
+  onPick,
+  leading,
+  menuId
 }: {
+  leading?: ReactNode
+  menuId?: string
   groups: ModelGroup[]
   activePid: string | null
   activeMid: string | null
@@ -39,7 +43,8 @@ export function ModelMenu({
   }, [])
 
   return (
-    <div className="model-pick__menu cf-mp__menu" role="menu" aria-label={t('chat.selectModel')}>
+    <div id={menuId} className="model-pick__menu cf-mp__menu" role="menu" aria-label={t('chat.selectModel')}>
+      {leading}
       {groups.length === 0 ? (
         <div className="model-pick__empty">{t('chat.noModel')}</div>
       ) : (
@@ -78,18 +83,21 @@ export function modelGroups(providers: Provider[]): ModelGroup[] {
     .map((p) => ({ p, models: p.models.filter((m) => m.enabled) })).filter((g) => g.models.length > 0)
 }
 
-export function ModelSelectButton({ open, active, groups, onToggle, onPick }: {
+export function ModelSelectButton({ open, active, groups, onToggle, onPick, label, leading, disabled, menuId }: {
+  label?: string; leading?: ReactNode; disabled?: boolean; menuId?: string
   open: boolean; active: { provider: Provider; model: ModelDef } | null; groups: ModelGroup[]
   onToggle: () => void; onPick: (pid: string, mid: string) => void
 }): React.JSX.Element {
   const { t } = useI18n()
-  const name = active?.model.name ?? t('chat.selectModel')
+  const name = label ?? active?.model.name ?? t('chat.selectModel')
   return <>
     <button className={`chip cf-mp__model${open ? ' is-open' : ''}`} type="button"
-      title={open ? undefined : name} aria-label={name} aria-haspopup="menu" aria-expanded={open} onClick={onToggle}>
+      title={open ? undefined : name} aria-label={name} aria-haspopup="menu" aria-expanded={open} aria-controls={open ? menuId : undefined}
+      disabled={disabled} onClick={onToggle}>
       <span className="chip__label">{name}</span>
       <ChevronDown size={13} className="chip__caret" />
     </button>
-    {open && <ModelMenu groups={groups} activePid={active?.provider.id ?? null} activeMid={active?.model.id ?? null} onPick={onPick} />}
+    {open && <ModelMenu groups={groups} activePid={active?.provider.id ?? null} activeMid={active?.model.id ?? null}
+      onPick={onPick} leading={leading} menuId={menuId} />}
   </>
 }
