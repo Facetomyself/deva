@@ -4,9 +4,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import {
   AlertTriangle,
-  CalendarClock,
   ChevronRight,
-  Clock,
   MessageCircle,
   Pause,
   Pencil,
@@ -43,18 +41,9 @@ import { DragBar, DEFAULT_PERSONA_ID, useRelativeTime, fill, Avatar } from './sh
 import { ContextMenu } from './ContextMenu'
 import { memberPersona } from './MemberBar'
 import { AddMenu, GroupFace } from './Rail'
+import { RunStatusIcon, TASK_GROUP_KEY, TASK_GROUP_ORDER, TaskDetailHeading, TaskRailRow, TaskRunHistory, compareTaskRows, runStatusKey } from './TaskInspectionParts'
 
 /* ============================ 定时任务标签页 ============================ */
-
-/** 分组展示顺序：进行中 → 已暂停 → 出错 → 已完成。 */
-const TASK_GROUP_ORDER: TaskStatus[] = ['active', 'paused', 'error', 'completed']
-
-const TASK_GROUP_KEY: Record<TaskStatus, string> = {
-  active: 'tasks.groupActive',
-  paused: 'tasks.groupPaused',
-  error: 'tasks.groupError',
-  completed: 'tasks.groupCompleted'
-}
 
 /** 绝对本地时间（简短）：用于「下次触发 / 上次运行」展示，跟随界面语言。 */
 function fmtAbs(ts: number, locale: 'zh-CN' | 'en'): string {
@@ -136,13 +125,7 @@ export function TasksPane({
       error: []
     }
     for (const task of tasks) g[task.status].push(task)
-    const byNext = (a: TaskRecord, b: TaskRecord): number => {
-      const an = a.nextRunAt ?? Number.POSITIVE_INFINITY
-      const bn = b.nextRunAt ?? Number.POSITIVE_INFINITY
-      if (an !== bn) return an - bn
-      return b.createdAt - a.createdAt
-    }
-    ;(Object.keys(g) as TaskStatus[]).forEach((k) => g[k].sort(byNext))
+    ;(Object.keys(g) as TaskStatus[]).forEach((k) => g[k].sort(compareTaskRows))
     return g
   }, [tasks])
 
@@ -390,7 +373,7 @@ function TasksRail({
                 <span className="cf-tasks__count">{shown.out[k].length}</span>
               </div>
               {shown.out[k].map((task) => (
-                <TaskRailRow
+                <NativeTaskRailRow
                   key={task.id}
                   task={task}
                   active={viewTaskId === task.id}
@@ -425,105 +408,13 @@ function TasksRail({
   )
 }
 
-/** 左列表单个任务行（对齐 .cf-prow）：类型图标（按状态着色）| 标题 / 人读日程。 */
-function TaskRailRow({
-  task,
-  active,
-  onClick,
-  onContext
-}: {
-  task: TaskRecord
-  active: boolean
-  onClick: () => void
-  /** 右键唤起删除菜单（阻默认系统菜单，定位到光标）。 */
-  onContext: (e: React.MouseEvent) => void
+/** Native schedule descriptions are read through IPC, outside the shared row. */
+function NativeTaskRailRow({ task, active, onClick, onContext }: {
+  task: TaskRecord; active: boolean; onClick: () => void; onContext: (e: React.MouseEvent) => void
 }): React.JSX.Element {
-  const { t } = useI18n()
   const desc = useSchedulePreview(task.schedule)
-  return (
-    <button
-      className={`cf-trow${active ? ' is-active' : ''}`}
-      onClick={onClick}
-      onContextMenu={onContext}
-    >
-      <span className={`cf-trow__icon is-${task.status}`} title={t('tasks.cardTitle')}>
-        <CalendarClock size={16} />
-      </span>
-      <div className="cf-trow__main">
-        <div className="cf-trow__title">{task.title || t('chat.untitled')}</div>
-        <div className="cf-trow__sched">
-          <Clock size={11} />
-          <span className="cf-trow__schedtext">
-            {desc || task.schedule.cron || task.schedule.at || ''}
-          </span>
-        </div>
-      </div>
-    </button>
-  )
-}
-
-/** 任务详情运行历史默认展示的条数（最近 N 次），超出折叠在「展开全部」后。 */
-const HISTORY_PREVIEW = 5
-
-type TaskRunStatus = TaskRecord['runs'][number]['status']
-
-/**
- * 运行状态图标的圆内符号（圆框共用）：对勾 / 叉 / i（中止）/ 双箭头（追赶跳过）。
- * 中止与对话里「已停止本轮回复」的提示同一个图标（lucide Info）、同为黄色，两处说的是同一件事。
- */
-const RUN_ICON_MARK: Record<TaskRunStatus, React.ReactNode> = {
-  ok: <path d="m9 12 2 2 4-4" />,
-  error: (
-    <>
-      <path d="m15 9-6 6" />
-      <path d="m9 9 6 6" />
-    </>
-  ),
-  aborted: (
-    <>
-      <path d="M12 16v-4" />
-      <path d="M12 8h.01" />
-    </>
-  ),
-  skipped: (
-    <>
-      <path d="m8 9 3 3-3 3" />
-      <path d="m13 9 3 3-3 3" />
-    </>
-  )
-}
-
-/**
- * 运行状态图标（任务详情「上次」与运行历史共用，对比稿 design/run-status-icons.html 方案 A）：同宽线框圆形，
- * 文字徽标长短不一会把后面的摘要挤得对不齐。悬停显示状态文字，失败时连同原因。
- */
-function RunStatusIcon({
-  status,
-  label,
-  detail
-}: {
-  status: TaskRunStatus
-  label: string
-  detail?: string
-}): React.JSX.Element {
-  const title = detail ? `${label}：${detail}` : label
-  return (
-    <span className={`cf-runicon is-${status}`} role="img" aria-label={title} title={title}>
-      <svg
-        viewBox="0 0 24 24"
-        width={14}
-        height={14}
-        fill="none"
-        stroke="currentColor"
-        strokeWidth={2}
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      >
-        <circle cx="12" cy="12" r="10" />
-        {RUN_ICON_MARK[status]}
-      </svg>
-    </span>
-  )
+  return <TaskRailRow task={task} active={active} scheduleText={desc || task.schedule.cron || task.schedule.at || ''}
+    onClick={onClick} onContext={onContext} />
 }
 
 /**
@@ -559,34 +450,13 @@ function TaskDetail({
   const desc = useSchedulePreview(task.schedule)
 
   const lastRun = task.runs.length > 0 ? task.runs[task.runs.length - 1] : undefined
-  const runKey = (s: TaskRunStatus): string =>
-    s === 'ok'
-      ? 'tasks.runOk'
-      : s === 'skipped'
-        ? 'tasks.runSkipped'
-        : s === 'aborted'
-          ? 'tasks.runAborted'
-          : 'tasks.runError'
-  // 运行历史按时间降序（最近在上）。
-  const history = useMemo(() => [...task.runs].reverse(), [task.runs])
-  // 默认只列最近 HISTORY_PREVIEW 次，超出时给「展开全部」开关（组件按 task.id 取 key，切任务即复位收起）。
-  const [historyAll, setHistoryAll] = useState(false)
-  const shownHistory = historyAll ? history : history.slice(0, HISTORY_PREVIEW)
 
   return (
     <main className="cf-conv">
       <DragBar />
       <div className="cf-profile">
         <div className="cf-profile__inner cf-tdetail">
-          <div className={`cf-tdetail__icon is-${task.status}`}>
-            <CalendarClock size={30} />
-          </div>
-          <div className="cf-profile__name">{task.title || t('chat.untitled')}</div>
-          <div className="cf-tdetail__tags">
-            <span className={`cf-tdetail__status is-${task.status}`}>
-              {t(TASK_GROUP_KEY[task.status])}
-            </span>
-          </div>
+          <TaskDetailHeading task={task} />
 
           <div className="cf-profile__meta">
             <div className="cf-profile__row">
@@ -613,7 +483,7 @@ function TaskDetail({
                     {rel(lastRun.firedAt)}
                     <RunStatusIcon
                       status={lastRun.status}
-                      label={t(runKey(lastRun.status))}
+                      label={t(runStatusKey[lastRun.status])}
                       detail={lastRun.error}
                     />
                   </>
@@ -664,46 +534,14 @@ function TaskDetail({
             </button>
           </div>
 
-          <div className="cf-tdetail__section">
-            {/* 标题右侧：一个任务只有一个对话，每次运行在里面追加一轮，所以只放一个入口，不逐行放。 */}
-            <div className="cf-tdetail__sechead">
-              <div className="cf-profile__convs-label">{t('tasks.runHistory')}</div>
-              {onOpenChat && (
-                <button type="button" className="cf-tdetail__chatlink" onClick={onOpenChat}>
-                  <MessageCircle size={13} />
-                  {t('tasks.viewChat')}
-                  <ChevronRight size={13} />
-                </button>
-              )}
-            </div>
-            {history.length === 0 ? (
-              <div className="cf-empty">{t('tasks.historyEmpty')}</div>
-            ) : (
-              <div className="cf-truns">
-                {shownHistory.map((run, i) => (
-                  <div key={i} className="cf-trun">
-                    <span className="cf-trun__time">{fmtAbs(run.firedAt, locale)}</span>
-                    <RunStatusIcon status={run.status} label={t(runKey(run.status))} detail={run.error} />
-                    {(run.summary || run.error) && (
-                      <span className="cf-trun__msg">{run.summary || run.error}</span>
-                    )}
-                  </div>
-                ))}
-              </div>
-            )}
-            {history.length > HISTORY_PREVIEW && (
-              <button
-                type="button"
-                className="cf-trun__more"
-                onClick={() => setHistoryAll((v) => !v)}
-                aria-expanded={historyAll}
-              >
-                {historyAll
-                  ? t('tasks.historyCollapse')
-                  : t('tasks.historyShowAll').replace('{n}', String(history.length))}
-              </button>
-            )}
-          </div>
+          {/* One task conversation contains every run. Keep its link in the history header. */}
+          <TaskRunHistory runs={task.runs} formatTime={(ts) => fmtAbs(ts, locale)} headerAction={onOpenChat && (
+            <button type="button" className="cf-tdetail__chatlink" onClick={onOpenChat}>
+              <MessageCircle size={13} />
+              {t('tasks.viewChat')}
+              <ChevronRight size={13} />
+            </button>
+          )} />
         </div>
       </div>
     </main>
