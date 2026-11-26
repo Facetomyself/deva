@@ -492,14 +492,15 @@ async function run() {
     step('start.webdriver-sandbox')
     process.env.CHROME_BIN = chrome
     process.env.CHROMEDRIVER_BIN = driver
-    let uiProcess
-    const browser = await startLocalWebDriver({ root, profile, origin: workbench.origin, signal: stop.signal })
+    let uiProcess, browser
     cleanup.push(['webdriver', async () => {
-      try { await browser.close() } finally {
+      try { await browser?.close() } finally {
         // Also check exact profile helpers when Chrome was lost before sandbox verification.
-        check(await processGone(uiProcess ?? { profile }, root), 'WEBDRIVER_CHROME_SURVIVED_CLEANUP')
+        await waitFor(() => processGone(uiProcess ?? { profile }, root), 'WEBDRIVER_CHROME_SURVIVED_CLEANUP', { timeout: 4_000 })
+          .catch(() => { throw new Failure('WEBDRIVER_CHROME_SURVIVED_CLEANUP') })
       }
     }])
+    browser = await startLocalWebDriver({ root, profile, origin: workbench.origin, signal: stop.signal })
     const screen = ui(browser)
     const passwordValue = `deva-e2e-${randomBytes(18).toString('hex')}`
     step('ui.auth.claim-owner')

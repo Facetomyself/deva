@@ -58,6 +58,9 @@ jobs:
         timeout-minutes: 5
         run: node scripts/workbench/e2e-attachments.mjs
 
+      - name: Select the same installed Chrome for UI and worker
+        run: bash scripts/workbench/ci-select-chromium.sh
+
       - name: Verify workbench UI controlling a second sandboxed browser
         timeout-minutes: 5
         run: node scripts/workbench/e2e-manual-browser.mjs
@@ -75,5 +78,7 @@ jobs:
           package-manager-cache: false
       - name: Verify worker protocols, egress and owner leases
         run: node --test --test-concurrency=1 apps/browser-worker/test/*.test.mjs test/browser-handoff.test.mjs
+      - name: Select the installed browser for pipe-based verification
+        run: bash scripts/workbench/ci-select-chromium.sh
       - name: Exercise a real sandboxed worker, handoff and shutdown
         run: node apps/browser-worker/test-real/engine-handoff.mjs

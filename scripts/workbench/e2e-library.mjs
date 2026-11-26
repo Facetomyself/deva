@@ -61,7 +61,16 @@ function avatarPng() {
 
 // Observations return predicates or W3C element references. They never return page URLs,
 // form values, cookies, CSRF, storage details, screenshots, or avatar bytes.
-function controls(browser, signal) {
+function controls(browser, signal, readOnlyNavigation = false) {
+  // The restored panel can replace a DOM node between a W3C element lookup and click.
+  // Re-resolve a stale reference once in the readback phase ONLY. Never replay writes or a chat launch.
+  async function clickResolved(lookup) {
+    try { await browser.click(await lookup()) }
+    catch (error) {
+      if (!readOnlyNavigation || !(error instanceof WebDriverError) || error.detail !== 'stale element reference') throw error
+      await browser.click(await lookup())
+    }
+  }
   const until = (predicate, description) => waitFor(predicate, description, { signal })
   const element = (selector, description, text = null, child = null, hidden = false) => until(async () => {
     const result = await browser.execute(`
@@ -76,19 +85,18 @@ function controls(browser, signal) {
   }, description)
   return {
     element, until,
-    click: async (...args) => browser.click(await element(...args)),
+    click: (...args) => clickResolved(() => element(...args)),
     gone: (selector, description) => until(() => browser.execute('return !document.querySelector(arguments[0]);', selector), description),
     async fill(selector, value, replace = false) {
       const field = await element(selector, 'editable form field')
       await browser.keys(field, replace ? `\uE009a\uE000${value}` : value)
     },
     async choose(selector, name) {
-      const field = await element(selector, 'workspace selector')
-      const option = await until(() => browser.execute(`
-        return [...arguments[0].options].find(node => !node.disabled && node.textContent.trim() === arguments[1]) ?? null;
-      `, field, name), 'catalogued workspace option')
-      await browser.click(option)
-      await until(() => browser.execute('return arguments[0].selectedOptions[0]?.textContent.trim() === arguments[1];', field, name),
+      await clickResolved(() => until(() => browser.execute(`
+        const select = document.querySelector(arguments[0]);
+        return select && !select.disabled && select.getClientRects().length ? [...select.options].find(node => !node.disabled && node.textContent.trim() === arguments[1]) ?? null : null;
+      `, selector, name), 'catalogued workspace option'))
+      await until(() => browser.execute('return document.querySelector(arguments[0])?.selectedOptions[0]?.textContent.trim() === arguments[1];', selector, name),
         'selected workspace option')
     }
   }
@@ -362,7 +370,7 @@ try {
   stage = 'sign out and log in again through the existing auth UI'
   await loginAgain(ui, http, passwordValue)
   stage = 'check avatar and all three memory scopes in a fresh document'
-  await verifyPersistence(browser, ui)
+  await verifyPersistence(browser, controls(browser, stop.signal, true))
   stage = 'start a role-bound text conversation and verify its identity after refresh'
   await verifyBoundChat(browser, ui, http)
 } catch (error) {
