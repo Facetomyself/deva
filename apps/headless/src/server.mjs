@@ -46,6 +46,12 @@ function options(opts) {
   if (inside(webDir, keyFile) || [dataDir, runDir].some(dir => inside(dir, webDir) || inside(webDir, dir))) {
     throw Error('Web directory must be separate from private runtime paths')
   }
+  const ttyDir = opts.businessOptions?.terminalRunDir
+  if (ttyDir !== undefined) {
+    const otherRoots = [dataDir,keyFile,runDir,webDir,opts.businessOptions?.workspaceRoot,opts.businessOptions?.browserRunDir,'/proc','/sys','/dev','/etc','/root'].filter(Boolean)
+    if (typeof ttyDir !== 'string' || !isAbsolute(ttyDir) || ttyDir.includes('\0') || resolve(ttyDir) !== ttyDir || ttyDir === '/' ||
+        otherRoots.some(path => inside(path,ttyDir) || inside(ttyDir,path))) throw Error('Terminal control requires a separate private directory')
+  }
   if (typeof host !== 'string' || !(isIP(host) || host === 'localhost')) throw Error('Bind host must be an IP address or localhost')
   if (!Number.isInteger(port) || port < 0 || port > 65535) throw Error('Port must be an integer from 0 to 65535')
   if (typeof version !== 'string' || !version || !Number.isSafeInteger(shutdownTimeoutMs) || shutdownTimeoutMs < 0 || shutdownTimeoutMs > 60_000) {
@@ -180,7 +186,7 @@ export async function startWorkbench(opts = {}) {
     const auth = await createAuthService({ dataDir })
     stage = 'business service'
     const openBusiness = opts.businessFactory ?? (await import('./business/handlers.mjs')).openBusiness
-    business = await openBusiness({ ...opts.businessOptions, dataDir, vault, auth, version, privateRoots: [dataDir, keyFile, runDir, webDir, opts.businessOptions?.browserRunDir] })
+    business = await openBusiness({ ...opts.businessOptions, dataDir, vault, auth, version, privateRoots: [dataDir, keyFile, runDir, webDir, opts.businessOptions?.browserRunDir, opts.businessOptions?.terminalRunDir] })
     if (typeof business?.getConfig !== 'function' || typeof business.handle !== 'function' || typeof business.close !== 'function') {
       throw TypeError('Invalid workbench business service')
     }

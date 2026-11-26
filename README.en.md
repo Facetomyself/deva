@@ -345,6 +345,7 @@ The [amd64 Docker Compose workbench](apps/headless/README.md) runs independently
 
 - **Conversations:** claim the instance, configure models, stream, stop and reconnect. Use the desktop message menu to copy a selection or quote it in an unsent draft. Clipboard, sidebar shortcuts and page fullscreen belong to the client browser.
 - **Library and projects:** manage profiles, roles, avatars and scoped notes. A conversation can inherit or explicitly attach an approved project; manually opening its files or notes does not send them to a model.
+- **Read-only terminal:** an optional [network-isolated PTY worker](apps/terminal-worker/README.md) displays a confirmed, saved workspace text file in the original file panel. Navigation, resize and exit come from a real native process; this is not a host command shell.
 - **Attachments and deliveries:** explicitly send supported text, static images or PDFs on compatible adapters. Export confirmed replies or use the desktop delivery card to download and reveal an authorized project file.
 - **Inspection:** view branches, first-parent history and staged or working-tree differences in separately approved repositories. Inspect recorded desktop tasks, preview a schedule in an explicit time zone, and pause an active record after confirmation. The server does not run a task scheduler.
 

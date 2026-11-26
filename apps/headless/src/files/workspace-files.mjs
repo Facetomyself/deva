@@ -61,11 +61,11 @@ function listDirectory(scope, parts, writable) {
   })
   return { path: parts.join('/'), entries, writable: writable && editableDirectory(fd) }
 }
-function revision(path, info, bytes) {
+export function workspaceTextRevision(path, info, bytes) {
   const key = [path, info.dev, info.ino, info.birthtimeNs, info.size, info.ctimeNs, info.mtimeNs].map(String)
   return 'r_' + createHash('sha256').update(JSON.stringify(key)).update(bytes).digest('hex')
 }
-function decodeText(bytes) {
+export function decodeWorkspaceText(bytes) {
   try {
     const content = decodeUtf8(bytes)
     return BINARY_CONTROL.test(content) ? null : content
@@ -88,9 +88,9 @@ function readText(scope, name, path, writable) {
     if (fd === undefined) return { path, content: null, tooLarge: true, revision: null, writable: false }
     const bytes = readBytes(fd, info)
     assertFile(scope, name, info)
-    const content = decodeText(bytes)
+    const content = decodeWorkspaceText(bytes)
     if (content === null) return { path, content: null, binary: true, revision: null, writable: false }
-    return { path, content, revision: revision(path, info, bytes), writable: writable && editableFile(scope, pin, info) }
+    return { path, content, revision: workspaceTextRevision(path, info, bytes), writable: writable && editableFile(scope, pin, info) }
   })
 }
 function checkTemp(parent, tempName, expected) {
@@ -133,7 +133,7 @@ function replaceText(scope, name, path, previous, bytes) {
     const saved = stat(temp)
     if (!sameInode(saved, prepared) || saved.size !== BigInt(bytes.length) || !readBytes(temp, saved).equals(bytes)) fail('CONFLICT')
     assertFile(scope, name, saved)
-    return { ok: true, revision: revision(path, saved, bytes) }
+    return { ok: true, revision: workspaceTextRevision(path, saved, bytes) }
   } finally {
     if (temp !== undefined && !renamed) cleanTemp(parent, tempName, temp)
     close(temp)
@@ -146,8 +146,8 @@ function writeText(scope, name, path, version, bytes) {
     if (fd === undefined) fail('LIMIT')
     const original = readBytes(fd, info)
     assertFile(scope, name, info)
-    if (revision(path, info, original) !== version) fail('CONFLICT')
-    if (decodeText(original) === null) fail('UNSAFE')
+    if (workspaceTextRevision(path, info, original) !== version) fail('CONFLICT')
+    if (decodeWorkspaceText(original) === null) fail('UNSAFE')
     return replaceText(scope, name, path, info, bytes)
   })
 }

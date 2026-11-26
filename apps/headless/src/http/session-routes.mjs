@@ -52,7 +52,7 @@ export function sessionRoutes({ auth, policy, version, getConfig, capabilities }
             browserPanel: capabilities?.browserPanel === true, sessionPreferences: capabilities?.sessionPreferences === true,
             deliveries: capabilities?.deliveries === true, gitInspect: capabilities?.gitInspect === true,
             sessionWorkspaces: capabilities?.sessionWorkspaces === true,
-            taskInspection: capabilities?.taskInspection === true } })
+            taskInspection: capabilities?.taskInspection === true, terminalViewer: capabilities?.terminalViewer === true } })
         return true
       }
       if (path === '/api/v1/auth/logout') {
