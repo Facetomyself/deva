@@ -87,3 +87,30 @@ jobs:
         if: ${{ failure() && steps.handoff.outcome == 'failure' }}
         timeout-minutes: 4
         run: node apps/browser-worker/test-real/engine-navigation-matrix.mjs
+
+  packaged-browser:
+    name: Packaged Chromium on native amd64 Docker
+    # Measure the actual optional image on its own draft; downstream workbench PRs already
+    # exercise the ordinary browser client and do not need to download Chromium at every push.
+    if: ${{ github.event_name == 'pull_request' && github.head_ref == 'feat/web-workbench-browser' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v5
+      - name: Build the production Debian Chromium worker
+        timeout-minutes: 8
+        run: |
+          set -eu
+          test "$(uname -m)" = x86_64
+          docker build --platform linux/amd64 -f apps/browser-worker/Dockerfile --target browser -t deva-browser-worker:verify .
+          docker image inspect -f '{{.Os}}/{{.Architecture}} {{.Id}} {{.Size}} bytes' deva-browser-worker:verify
+      - name: Verify the image with its actual non-root, capability-free sandbox
+        timeout-minutes: 3
+        run: |
+          set -eu
+          test -f "$PWD/apps/browser-worker/test-real/engine-handoff.mjs"
+          docker run --rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges:true --user 1000:1000 --entrypoint /usr/bin/chromium deva-browser-worker:verify --version
+          docker run --rm --init --network none --read-only --cap-drop ALL --security-opt no-new-privileges:true --user 1000:1000 --pids-limit 256 --memory 1536m --cpus 2 --shm-size 256m \
+            --tmpfs /tmp:rw,nosuid,nodev,noexec,mode=1777,size=192m \
+            --mount "type=bind,src=$PWD/apps/browser-worker/test-real,dst=/opt/browser-worker/test-real,readonly" \
+            --entrypoint node deva-browser-worker:verify /opt/browser-worker/test-real/engine-handoff.mjs /usr/bin/chromium
