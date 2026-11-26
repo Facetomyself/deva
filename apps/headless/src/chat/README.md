@@ -5,9 +5,11 @@
 | 同源地址 | 行为 |
 |---|---|
 | `GET /api/v1/chats` | 当前所有者的会话列表，含兼容性与可写状态。|
-| `POST /api/v1/chats` | `{}` 创建通用会话；`{sessionId}` 提供规范 UUID 或受限桌面 `sess_…` ID；可另给 `personaId` 绑定已启用的服务器角色并定格首选模型。客户端只传角色 ID，重复创建不会覆盖身份或触发新的模型请求。|
+| `POST /api/v1/chats` | `{}` 创建通用会话；`{sessionId}` 提供规范 UUID 或受限桌面 `sess_…` ID；可另给 `personaId` 绑定已启用的服务器角色并定格首选模型。客户端只传角色和项目 ID。新建时省略 `workspaceId` 可继承角色已确认的项目，显式 `null` 表示不关联；显式授权 ID 覆盖角色默认。重复创建同一会话不会覆盖后来手动保存的选择或触发模型请求。|
 | `GET /api/v1/chats/:sid` | 取历史、正在生成的部分文字、回合 ID、起始时间、最近终态和同一水位的游标。|
 | `POST /api/v1/chats/:sid/turns` | `{clientRequestId,text,model,attachments?}`。可选 `attachments` 最多是本会话的 4 个上传 ID，并非路径；顺序纳入幂等比较。同一请求 ID 再试不会重开上游请求。新请求在用户消息及幂等记录落盘后回 `202`；相同 ID 与同内容重复调用返回原回合，内容不同时为 `409`。|
+| `GET /api/v1/chats/:sid/workspace` | 读取当前会话的绑定及修订号：未关联时为 `workspace:null`；已关联仅返回项目 ID、可显示的名称、当前可用性和来源（`manual` 或 `role`）。挂载失效后名称为 `null`。|
+| `PATCH /api/v1/chats/:sid/workspace` | `{workspaceId,revision}`，其中 `workspaceId:null` 是明确解除关联。目录路径不是请求字段；条件写入和严格落盘成功后才使其他窗口的列表失效。此操作不会读取项目文件或改变模型请求。|
 | `GET /api/v1/chats/:sid/preferences` | 当前会话标题、自定义标题、归档状态、模型选项和该会话版本。版本用于条件写入，不是访问凭证。|
 | `PATCH /api/v1/chats/:sid/preferences` | `{revision,set}` 只改指定字段（如 `customTitle:null`、`archived:true` 或 `model:null`）。取得持久化回执后更新 UI，同版本并发写不能静默覆盖。普通 `model` 字符串请求保持兼容；`model:null` 发送表示由服务端选择该时刻的默认模型。|
 | `WS /api/v1/chats/stream` | 登录所有者的只读列表失效通知。首帧 `sessions-snapshot` 给出真实水位，之后 `sessions-changed` 触发重新 GET 列表；重连和服务重启都重新取快照。通知不含会话名称、ID、正文或其他标签的操作。|
