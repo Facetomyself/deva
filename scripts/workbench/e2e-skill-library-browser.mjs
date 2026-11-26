@@ -2,7 +2,7 @@ import { constants } from 'node:fs'
 import { lstat, mkdir, open, realpath } from 'node:fs/promises'
 import { dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { builtinIds, check, guide, marker, notes, revisedGuide, roleName } from './e2e-skill-library-fixture.mjs'
+import { builtinIds, check, guide, marker, notes, revisedGuide, roleName, SkillCheckError } from './e2e-skill-library-fixture.mjs'
 import { waitFor, WebDriverError } from './webdriver-local.mjs'
 
 const id = name => `[data-testid="workbench-${name}"]`
@@ -328,10 +328,18 @@ export async function runSkillBrowser(ctx) {
     mark('interrupt one pending read, scrub the preview and restore it from the unchanged native revision')
     const beforeDrop=ctx.rows.length
     await wait(first,()=>ctx.dropChanges(),'one live owner metadata request to interrupt',5000)
-    await wait(first,()=>observe(first,`return !document.querySelector(arguments[0]) &&
-      /reconnect/i.test(document.querySelector(arguments[1])?.textContent) &&
-      !document.querySelector(arguments[2]) && document.querySelector(arguments[3])?.disabled === true;`,
-      instructions,skill('status'),skill('roles'),`${detail} ${skill('toggle')} button`),'document scrubbed and preferences frozen after genuine transport loss',5000)
+    try {
+      await wait(first,()=>observe(first,`return !document.querySelector(arguments[0]) &&
+        /reconnect/i.test(document.querySelector(arguments[1])?.textContent) &&
+        !document.querySelector(arguments[2]) && document.querySelector(arguments[3])?.disabled === true;`,
+        instructions,skill('status'),skill('roles'),`${detail} ${skill('toggle')} button`),'document scrubbed and preferences frozen after genuine transport loss',8000)
+    } catch (error) {
+      const flags=await observe(first,`return [!!document.querySelector(arguments[0]),/reconnect/i.test(document.querySelector(arguments[1])?.textContent),
+        !!document.querySelector(arguments[2]),document.querySelector(arguments[3])?.disabled === true].map(Number).join('');`,
+        instructions,skill('status'),skill('roles'),`${detail} ${skill('toggle')} button`)
+      if(!/^[01]{4}$/.test(flags))throw error
+      throw new SkillCheckError(`Reconnect state: document=${flags[0]} reconnecting=${flags[1]} roleButton=${flags[2]} frozen=${flags[3]}`)
+    } finally {ctx.resumeChanges()}
     await verifyDocument(first,revisedGuide)
     await wait(first,()=>[listPath,selectedPath].every(path=>requests(first,path,'GET',beforeDrop).some(r=>r.status===200)),
       'reconnect independently verifies catalog and selected document even without a new revision')

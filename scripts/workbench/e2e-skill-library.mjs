@@ -11,13 +11,20 @@ import { startLocalWebDriver, WebDriverError } from './webdriver-local.mjs'
 // Observe the real dispatcher without altering request bodies, response bodies or authorization.
 // Capturing from request arrival also sees in-flight polls excluded from Resource Timing.
 function observeBusiness(rows, openBusiness, disconnect) {
-  let firstLogin
+  let firstLogin, recoveryGate
   const firstPolls=new Set()
-  // Test-only transport fault. Select a genuine pending read for the first fixture login,
-  // not a preference operation, and close the socket without constructing a fake receipt.
+  disconnect.resume = () => { recoveryGate?.resolve(); recoveryGate=undefined }
+  // Truncate an actual in-flight response *after headers*. A pooled socket dropped
+  // before headers may be retried transparently inside Chrome and never reach the UI.
+  // Hold the next catalog read until the browser observes its frozen, scrubbed state.
   disconnect.once = () => {
-    for (const peer of firstPolls) if (!peer.res.destroyed && !peer.res.writableEnded && performance.now()-peer.since>120) {
-      firstPolls.delete(peer);peer.res.destroy();return true
+    for (const peer of firstPolls) if (!peer.res.destroyed && !peer.res.headersSent && performance.now()-peer.since>120) {
+      firstPolls.delete(peer)
+      recoveryGate=Promise.withResolvers()
+      const timer=setTimeout(disconnect.resume,9000); recoveryGate.promise.then(()=>clearTimeout(timer))
+      peer.res.writeHead(200,{'content-type':'application/json','content-length':'160','cache-control':'no-store',connection:'close'})
+      peer.res.write('{"changed":',()=>peer.res.destroy())
+      return true
     }
     return false
   }
@@ -36,6 +43,8 @@ function observeBusiness(rows, openBusiness, disconnect) {
         }
       }
       res.once('finish', () => { row.status = res.statusCode })
+      if (recoveryGate && path==='/api/v1/skills' && req.method==='GET' &&
+          context.auth.identify(context.policy.cookie(req)).loginSessionId===firstLogin) await recoveryGate.promise
       return business.handle(req, res, context)
     } }
   }
@@ -95,7 +104,7 @@ async function run({ fixtureOnly }) {
         browsers.push(browser)
         return browser
       }
-      await runSkillBrowser({ fixture, rows, origin, password, openBrowser, signal, mark, dropChanges:disconnect.once,
+      await runSkillBrowser({ fixture, rows, origin, password, openBrowser, signal, mark, dropChanges:disconnect.once, resumeChanges:disconnect.resume,
         claim: () => requestControl({ runDir, op: 'claim' }), ownerClaimed: async () => (await requestControl({ runDir, op: 'status' })).claimed })
       assertOnlyAcceptedTraffic(rows)
     }
