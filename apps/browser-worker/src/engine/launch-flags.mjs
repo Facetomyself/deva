@@ -13,7 +13,9 @@ export function browserFlags(profile, proxyUrl) {
     '--disable-component-update', '--disable-extensions', '--disable-sync',
     // Built-in apps and component extensions can otherwise start workers in a blank profile.
     '--disable-default-apps', '--disable-component-extensions-with-background-pages',
-    '--disable-breakpad', '--disable-crash-reporter', '--disable-crashpad-for-testing',
+    // Keep browser crash reporting disabled. Its testing-only Crashpad override can
+    // repeatedly terminate Chromium's network utility before the first proxy request.
+    '--disable-breakpad', '--disable-crash-reporter',
     '--password-store=basic', BOOTSTRAP_URL,
   ];
 }

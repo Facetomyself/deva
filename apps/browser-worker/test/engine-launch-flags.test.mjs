@@ -15,7 +15,7 @@ test('Chromium launches with fixed private-pipe, restricted-egress, blank-only a
     '--no-first-run', '--no-default-browser-check', '--disable-background-networking',
     '--disable-component-update', '--disable-extensions', '--disable-sync',
     '--disable-default-apps', '--disable-component-extensions-with-background-pages',
-    '--disable-breakpad', '--disable-crash-reporter', '--disable-crashpad-for-testing',
+    '--disable-breakpad', '--disable-crash-reporter',
     '--password-store=basic', 'about:blank',
   ]);
 });
