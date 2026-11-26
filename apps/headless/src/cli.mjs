@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { realpathSync } from 'node:fs'
 import { readdir } from 'node:fs/promises'
-import { basename, dirname, join } from 'node:path'
+import { basename, dirname, isAbsolute, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { parseArgs } from 'node:util'
 import { requestControl } from './control/socket.mjs'
@@ -31,6 +31,7 @@ Options override the environment:
   --workspace-root PATH   DEVA_WORKSPACE_ROOT (optional mounted parent for registered projects; default none)
   --workspace-write       DEVA_WORKSPACE_WRITE=1 (explicit permission to save an existing text file; default 0)
   --browser-control-dir PATH  DEVA_BROWSER_CONTROL_DIR (optional private browser-worker socket mount)
+  --terminal-control-dir PATH DEVA_TERMINAL_CONTROL_DIR (optional dedicated private read-only TTY viewer socket mount)
   --git-projects JSON      DEVA_GIT_PROJECTS (optional array of project names approved for read-only Git history)
   --help                  Show this help.
 
@@ -43,7 +44,7 @@ const runtime = { 'run-dir': str }
 const origin = { host: str, port: str, 'public-url': str }
 const flags = Object.freeze({
   'init-key': { ...paths, ...key, 'if-missing': { type: 'boolean' } },
-  serve: { ...paths, ...key, ...runtime, ...origin, 'web-dir': str, 'workspace-root': str, 'workspace-write': { type: 'boolean' }, 'browser-control-dir': str, 'git-projects': str },
+  serve: { ...paths, ...key, ...runtime, ...origin, 'web-dir': str, 'workspace-root': str, 'workspace-write': { type: 'boolean' }, 'browser-control-dir': str, 'terminal-control-dir': str, 'git-projects': str },
   claim: { ...paths, ...runtime, ...origin },
   status: { ...paths, ...runtime }
 })
@@ -75,6 +76,8 @@ function configuration(command, values, env) {
     const workspaceRoot = values['workspace-root'] ?? env.DEVA_WORKSPACE_ROOT
     const browserControl = values['browser-control-dir'] ?? env.DEVA_BROWSER_CONTROL_DIR
     const gitProjects = values['git-projects'] ?? env.DEVA_GIT_PROJECTS
+    const terminalControl = values['terminal-control-dir'] ?? env.DEVA_TERMINAL_CONTROL_DIR
+    if (terminalControl && !isAbsolute(terminalControl)) throw Error('Terminal control directory must be absolute')
     const writeFlag = env.DEVA_WORKSPACE_WRITE ?? '0'
     if (!['0', '1'].includes(writeFlag)) throw Error('DEVA_WORKSPACE_WRITE must be 0 or 1')
     const workspaceWritable = values['workspace-write'] === true || writeFlag === '1'
@@ -82,6 +85,7 @@ function configuration(command, values, env) {
     config.businessOptions = {
       workspaceWritable,
       ...(gitProjects ? { gitProjects } : {}),
+      ...(terminalControl ? { terminalRunDir: workbenchPath(terminalControl, 'Terminal control directory') } : {}),
       ...(browserControl ? { browserRunDir: workbenchPath(browserControl, 'Browser control directory') } : {}),
       ...(origins ? { allowedOrigins: origins.split(',').map(origin => origin.trim()) } : {}),
       ...(workspaceRoot ? { workspaceRoot: workbenchPath(workspaceRoot, 'Workspace root') } : {})

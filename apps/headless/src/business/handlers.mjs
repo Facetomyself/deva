@@ -12,6 +12,8 @@ import { openGitService } from '../git/service.mjs'
 import { openTaskStore } from '../tasks/store.mjs'
 import { openTaskPreview } from '../tasks/preview.mjs'
 import { taskRoutes } from '../tasks/routes.mjs'
+import { openTerminalService } from '../terminal/service.mjs'
+import { terminalRoutes } from '../terminal/routes.mjs'
 import { HttpError, json, readJson } from '../http/policy.mjs'
 import { openSettings } from './settings.mjs'
 import { allowedModelOrigins } from './provider-fetch.mjs'
@@ -48,12 +50,13 @@ async function probe(settings, supplied, opts, signal) {
   return connection.listModels()
 }
 
-export async function openBusiness({ dataDir, vault, auth, version, allowedOrigins = [], workspaceRoot, workspaceWritable = false, privateRoots, browserRunDir, gitProjects }) {
+export async function openBusiness({ dataDir, vault, auth, version, allowedOrigins = [], workspaceRoot, workspaceWritable = false, privateRoots, browserRunDir, terminalRunDir, gitProjects }) {
   const opts = { version, allowedOrigins: [...allowedModelOrigins(allowedOrigins)] }
   const settings = await openSettings({ dataDir, vault })
   const lifetime = new AbortController()
   const journal = createEventJournal()
   let library, turns, uploads, browser, closingBrowser, git, closingGit, taskStore, preview, tasks, closingTasks
+  let terminalService, closingTerminals
   try {
     library = await openLibrary({ dataDir, workspaceRoot, workspaceWritable, privateRoots, gitProjects })
     if (library.gitGrants.enabled) git = openGitService({ grants: library.gitGrants, auth })
@@ -63,6 +66,12 @@ export async function openBusiness({ dataDir, vault, auth, version, allowedOrigi
     uploads = await openUploadStore({ dataDir })
     turns = createTextTurns({ dataDir, settings, journal, ...opts, resolveRole: library.resolveRole,
       withWorkspace: library.withWorkspace, uploads, deliveries: true })
+    // A workspace plus an explicit private control mount enables the human-only viewer.
+    // Do not start a process here or make app readiness depend on the optional sidecar.
+    if (terminalRunDir && library.terminalSource) {
+      const { createTerminalClient } = await import('../../../terminal-worker/src/client.mjs')
+      terminalService = openTerminalService({ auth, openSource: library.terminalSource, worker: createTerminalClient({ runDir: terminalRunDir }) })
+    }
     // The Unix client is loaded only when the operator mounted a private worker socket.
     if (browserRunDir) {
       const { createManualBrowser } = await import('../browser/manual-browser.mjs')
@@ -70,9 +79,10 @@ export async function openBusiness({ dataDir, vault, auth, version, allowedOrigi
     }
   } catch (err) {
     journal.close()
-    await Promise.allSettled([git?.close(), ...(tasks ? [tasks.close()] : [preview?.close(), taskStore?.close?.()]),
+    await Promise.allSettled([terminalService?.close(), git?.close(), ...(tasks ? [tasks.close()] : [preview?.close(), taskStore?.close?.()]),
       turns?.close(), uploads?.close(), library?.close()]); throw err
   }
+  const terminals = terminalRoutes(terminalService)
   const handleGit = gitViewRoutes(git)
   const handleBrowser = browserRoutes(browser)
   const chats = chatRoutes(turns, { withRoleForChat: library.withRoleForChat })
@@ -80,6 +90,7 @@ export async function openBusiness({ dataDir, vault, auth, version, allowedOrigi
   const deliveries = deliveryRoutes({ turns, files: library.deliveryFiles })
   function beginShutdown() {
     lifetime.abort(); attachments.close()
+    if (!closingTerminals) { closingTerminals = terminals.close(); void closingTerminals.catch(() => {}) }
     if (!closingTasks) { closingTasks = tasks.close(); void closingTasks.catch(() => {}) }
     if (git && !closingGit) { closingGit = git.close(); void closingGit.catch(() => {}) }
     if (browser && !closingBrowser) { closingBrowser = Promise.resolve(browser.close()); void closingBrowser.catch(() => {}) }
@@ -88,12 +99,15 @@ export async function openBusiness({ dataDir, vault, auth, version, allowedOrigi
     beginShutdown,
     capabilities: Object.freeze({ textChat: true, library: true, workspaceFiles: library.workspaceFilesEnabled, attachments: true,
       browserPanel: !!browser, gitInspect: !!git, taskInspection: Boolean(tasks), deliveries: typeof turns.deliverySnapshot === 'function',
+      terminalViewer: Boolean(terminalService),
       sessionWorkspaces: typeof turns.getWorkspace === 'function' && typeof turns.setWorkspace === 'function',
       sessionPreferences: typeof turns.patchPreferences === 'function' && typeof journal.watchSessions === 'function' }),
     createRealtime: ({ auth, policy }) => createChatWebSocket({ turns, journal, auth, policy }),
     getConfig: () => settings.getPublicConfig(),
     async handle(req, res, { auth, policy }) {
       const path = (req.url ?? '').split('?', 1)[0]
+      if ((path === '/api/v1/terminal/profiles' || (path.startsWith('/api/v1/workspaces/') && path.includes('/terminals'))) &&
+          await terminals.handle(req,res,{auth,policy})) return true
       if ((path === '/api/v1/tasks' || path.startsWith('/api/v1/tasks/')) && await tasks.handle(req, res, { auth, policy })) return true
       if (path.startsWith('/api/v1/workspaces/') && path.includes('/git/') && await handleGit(req, res, { auth, policy })) return true
       if (path.includes('/browser') && await handleBrowser(req, res, { auth, policy })) return true
@@ -147,7 +161,7 @@ export async function openBusiness({ dataDir, vault, auth, version, allowedOrigi
       try { await turns.close() } finally {
         journal.close()
         try {
-          const results = await Promise.allSettled([closingBrowser, closingGit, closingTasks])
+          const results = await Promise.allSettled([closingBrowser, closingGit, closingTasks, closingTerminals])
           if (results.some(row => row.status === 'rejected')) throw Error('Optional service shutdown unconfirmed')
         } finally { try { await uploads.close() } finally { await library.close() } }
       }

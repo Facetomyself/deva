@@ -9,6 +9,7 @@ import { workspaceBindingResolver } from './workspace-binding.mjs'
 import { gitGrants, gitProjectNames } from '../git/access.mjs'
 import { openWorkspaceFiles } from '../files/workspace-files.mjs'
 import { workspaceFileRoutes } from '../files/workspace-routes.mjs'
+import { openTerminalSource } from '../terminal/source.mjs'
 import { openDeliveryFiles } from '../files/delivery-files.mjs'
 
 const rolePath = /^\/api\/v1\/personas\/([A-Za-z0-9][A-Za-z0-9_.-]{0,63})(?:\/(enabled|avatar-image))?$/
@@ -98,6 +99,7 @@ export async function openLibrary({ dataDir, workspaceRoot, workspaceWritable = 
   }
   return {
     workspaceFilesEnabled: Boolean(fileCommands),
+    terminalSource: workspaceRoot ? (id, path, revision) => openTerminalSource(catalog,id,path,revision) : undefined,
     gitGrants: approvedGit,
     deliveryFiles: workspaceRoot ? openDeliveryFiles({ catalog }) : undefined,
     resolveRole: id => serial(() => enabledRole(id)),

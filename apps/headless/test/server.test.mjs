@@ -230,6 +230,17 @@ test('Unix claim, HTTP sessions, vault, and business API all use the same instan
   assert.equal((await http(svc, '/api/v1/bootstrap', { headers: { cookie } })).status, 401)
 })
 
+test('the optional terminal control mount is distinct from data, web, project and owner-control paths', async t => {
+  const paths = await fixture(t)
+  const workspaceRoot = join(paths.root, 'approved'), browserRunDir = join(paths.root, 'browser')
+  for (const terminalRunDir of ['relative', '/', '/dev/pts', paths.dataDir, paths.keyFile, paths.runDir, paths.webDir,
+    join(paths.dataDir,'subdir'), workspaceRoot, join(workspaceRoot,'control'), browserRunDir, paths.root, `${paths.root}/./terminal`]) {
+    await assert.rejects(paths.start({ businessOptions: { workspaceRoot, browserRunDir, terminalRunDir } }), /separate private directory/)
+  }
+  // The optional feature's configuration check runs before the writer lock or private state is created.
+  await assert.rejects(fs.lstat(paths.dataDir), { code:'ENOENT' })
+})
+
 test('exclusive writer and startup rollback preserve data and release the Unix endpoint', async t => {
   const paths = await fixture(t)
   const svc = await paths.start()
