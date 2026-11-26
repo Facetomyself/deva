@@ -233,11 +233,19 @@ async function newChat(browser, screen) {
   const previous = await observe(browser, 'sessions', `${api}/chats`)
   check(previous, 'CHAT_LIST_MISSING')
   await screen.click(hook('new-chat'), 'NEW_CHAT_BUTTON_MISSING')
-  return until(async () => {
+  const sid = await until(async () => {
     const ids = await observe(browser, 'sessions', `${api}/chats`)
     const added = ids?.filter(id => !previous.includes(id))
     return added?.length === 1 ? added[0] : null
   }, 'NEW_CHAT_NOT_PERSISTED')
+  // A persisted session can arrive at the server before React has selected the new chat.
+  await until(() => browser.execute(`
+    const [create, count] = arguments;
+    return document.querySelector(create)?.disabled === false &&
+      document.querySelectorAll('.wb-chat .cf-thread').length === count &&
+      !!document.querySelector('.wb-chat .cf-thread.is-active');
+  `, hook('new-chat'), previous.length + 1), 'NEW_CHAT_NOT_SELECTED')
+  return sid
 }
 
 async function openPanel(screen) {
@@ -263,7 +271,7 @@ async function emptyScope(browser, sid) {
 async function openSite(browser, screen, fixture, sid) {
   await screen.status(['ready'])
   const oldDocs = fixture.documents.length
-  const option = `${panel('site')} option[value="${siteId}"]`
+  const option = `option[value="${siteId}"]`
   const selector = await screen.element(panel('site'), 'SITE_SELECTOR_MISSING')
   const actualOption = await until(() => browser.execute(`
     const [select, option, label, origin] = arguments;
@@ -330,6 +338,10 @@ async function verifyManual({ browser, screen, fixture, sid, own, release }) {
   step('ui.lease.claim')
   let frame = await claim(screen, browser, fixture, nonce, 'ready')
   check(await tabIn(browser, sid, 'leased') === tabId, 'LEASE_TARGET_CHANGED')
+  const invalidProof = 'A'.repeat(43)
+  check(await observe(browser, 'tab-deny', `${browserScope(sid)}/${tabId}/frame`, {
+    viewerNonce: invalidProof, token: invalidProof
+  }) === 403, 'FRAME_WITHOUT_LEASE_PROOF')
   step('ui.form.focus')
   // W3C element click performs a trusted pointer click at the visible image centre;
   // the fixture first places its real name input, then the enabled Confirm there.

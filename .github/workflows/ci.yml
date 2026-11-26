@@ -68,9 +68,11 @@ jobs:
     timeout-minutes: 6
     steps:
       - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v5
         with:
           node-version: 22
+          package-manager-cache: false
       - name: Verify worker protocols, egress and owner leases
         run: node --test --test-concurrency=1 apps/browser-worker/test/*.test.mjs test/browser-handoff.test.mjs
       - name: Exercise a real sandboxed worker, handoff and shutdown
