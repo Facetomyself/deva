@@ -30,10 +30,18 @@ export function access(fd, info, mode) {
 export function onProjectMount(project, fd) {
   if (mountId(fd) !== project.mount) fail('UNSAFE')
 }
-export function withDirectory(catalog, id, parts, fn) {
+// File readers may borrow a directory for one operation, or retain it while a human
+// reviews a confirmed snapshot. Holding every ancestor prevents same-name inode reuse.
+export function pinWorkspaceDirectory(catalog, id, parts) {
   const project = catalog.pinProject(id)
   const chain = []
-  let fd = project.fd
+  let fd = project.fd, released = false
+  function release() {
+    if (released) return
+    released = true
+    for (let i = chain.length - 1; i >= 0; i--) close(chain[i].fd)
+    project.close()
+  }
   try {
     for (const name of parts) {
       if (!access(fd, stat(fd), C.X_OK)) fail('UNSAFE')
@@ -46,6 +54,7 @@ export function withDirectory(catalog, id, parts, fn) {
     }
     if (!access(fd, stat(fd), C.X_OK)) fail('UNSAFE')
     function assertCurrent() {
+      if (released) fail('CONFLICT')
       project.assertCurrent()
       for (const step of chain) {
         let current
@@ -60,11 +69,12 @@ export function withDirectory(catalog, id, parts, fn) {
       project.assertCurrent()
     }
     assertCurrent()
-    return fn({ project, fd, assertCurrent })
-  } finally {
-    for (const step of chain.reverse()) close(step.fd)
-    project.close()
-  }
+    return Object.freeze({ project, fd, assertCurrent, close: release })
+  } catch (error) { release(); throw error }
+}
+export function withDirectory(catalog, id, parts, fn) {
+  const scope = pinWorkspaceDirectory(catalog, id, parts)
+  try { return fn(scope) } finally { scope.close() }
 }
 export function regular(info) {
   return info.isFile() && info.nlink === 1n

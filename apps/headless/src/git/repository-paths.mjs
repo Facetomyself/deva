@@ -1,4 +1,4 @@
-import { validWorkspaceName, workspacePathParts } from '../files/workspace-files-fd.mjs'
+import { validWorkspaceName } from '../files/workspace-files-fd.mjs'
 
 export const MAX_GIT_DEPTH = 16
 const META = new Set(['HEAD', 'packed-refs', 'index', 'shallow', 'MERGE_HEAD'])
@@ -49,14 +49,4 @@ export function listMetaType(parts, name) {
   return (parts[1] === 'pack' ? packSHA1.test(name) : hex38.test(name)) ? 'file' : undefined
 }
 
-const sensitiveName = /(?:^|[._ -])(?:env|credentials?|secrets?|passwords?|private[-_ ]?keys?|api[-_ ]?keys?|(?:access[-_ ]?|refresh[-_ ]?)?tokens?|id[-_](?:rsa|dsa|ecdsa|ed25519)|known_hosts|authorized_keys|passwd|shadow|htpasswd|kubeconfig|keyrings?|keystores?|netrc|npmrc|pypirc|auth\.json)(?:[._ -]|$)|\.(?:pem|key|p12|pfx|pkcs12|kdbx|jks|keystore|ovpn|ppk)(?:\.|$)/iu
-export function workPath(rel) {
-  const parts = workspacePathParts(rel)
-  if (!parts || parts.some(name => sensitiveName.test(name) || /[\p{Cf}\p{Zl}\p{Zp}]/u.test(name))) return null
-  return parts
-}
-
-export function sensitiveBytes(bytes) {
-  // Check the bounded payload, including keys embedded below a comment or JSON prefix.
-  return /(?<!-)-{3,16}\s{0,16}BEGIN [A-Z0-9 -]{0,64}(?:PRIVATE KEY(?: BLOCK)?|PKCS12)\s{0,16}-{3}|PuTTY-User-Key-File-\d+:|"(?:private_key|client_secret|access_token|refresh_token)"\s*:\s*"[^"\r\n]+"/iu.test(bytes.toString('latin1'))
-}
+export { disclosurePath as workPath, sensitiveBytes } from '../files/workspace-disclosure.mjs'
