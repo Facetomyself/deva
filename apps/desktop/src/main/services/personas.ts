@@ -13,7 +13,7 @@ import { pruneRoles } from './ext-roles'
 import { setSkillEnabled } from './skills'
 import { setEnabled as setMcpEnabled } from './mcp-config'
 import { DEFAULT_PERSONAS, LEGACY_PROMPT_HASHES, type DefaultPersona } from './default-personas'
-import { fmScalar, fmString, parseFrontmatter } from './frontmatter'
+import { parsePersonaMarkdown, serializePersonaMarkdown as composePersonaMd } from './persona-format'
 import { reassignTaskPersona } from './tasks'
 import { AUTO_SHAPE, legacyAutoShape } from '../../shared/avatar-shape'
 import { removeRoleMemory } from './memory'
@@ -30,8 +30,8 @@ import { removeRoleMemory } from './memory'
  *   frontmatter），故重命名不触发文件搬迁，UI 的「id 稳定 / name 可编辑」模型天然成立。
  * - 启用态**不入 .md**，集中存 `config.json` 的 `personas.enabled[id]`，默认关。
  * - `<id>.md` = frontmatter（name/description）+ 正文（prompt，即要追加的提示词）。
- * - 自定义头像图片（用户上传）另存 `personas/avatars/<id>.<ext>`，**不入 frontmatter**：有图即覆盖
- *   生成头像，一个 id 至多一张（重传先清变体），删角色时一并删（否则 id 复用会串脸）。
+ * - 自定义头像图片另存 `personas/avatars/.managed-v1/` 的单槽位，**不入 frontmatter**；
+ *   兼容旧 `<id>.<ext>`。清图保留空槽标记，避免旧备份恢复后重新生效。
  *
  * 运行期（chat.ts 同进程直接调用，无需 IPC）：主轮只注入本对话角色这一条的 name+prompt（见 resolvePersonaId；
  * 子智能体有自己的系统提示词，刻意不注入，避免串味）。
@@ -57,7 +57,7 @@ export interface PersonaRecord {
   avatar: string
   /**
    * 自定义头像图片，**只读派生字段**（data URI；空串 = 没传过图，回落 Humation 生成头像）。
-   * 真源是磁盘上的 `personas/avatars/<id>.*` 是否存在——故**不入 frontmatter**、不进 upsert 输入，
+   * 真源是磁盘上的角色图片单槽——故**不入 frontmatter**、不进 upsert 输入，
    * 改图走独立的 set/clear IPC（见文件末）。渲染层 CSP 不许 `file:`，只能以 data URI 交付。
    *
    * **按需读取**：只有 IPC 出口（给渲染层显示）才填，主进程内部调用（组装系统提示词、
@@ -98,8 +98,8 @@ function personaFile(id: string): string {
   return join(personasDir(), `${id}.md`)
 }
 
-// ── 自定义头像图片（personas/avatars/<id>.<ext>）─────────────────────────────
-// 落盘细节（一 id 一图、MIME 白名单、大小兜底）见 avatar-image.ts；此处只加 id 合法性守卫。
+// ── 自定义头像图片 ─────────────────────────────────────────────────────────
+// 私有单槽、旧扩展名兼容和格式校验统一由 avatar-image.ts 负责。
 
 function avatarsDir(): string {
   return join(personasDir(), 'avatars')
@@ -175,19 +175,9 @@ function makeId(name: string): string {
 }
 
 function parsePersona(id: string, raw: string, enabled: boolean, withImage: boolean): PersonaRecord {
-  const { data, body } = parseFrontmatter(raw)
-  const name = fmString(data, 'name') || id
-  return {
-    id,
-    name,
-    description: fmString(data, 'description'),
-    avatar: fmString(data, 'avatar'),
-    avatarImage: withImage ? readAvatarImage(id) : '',
-    model: fmString(data, 'model'),
-    workspace: fmString(data, 'workspace'),
-    prompt: body.trim(),
-    enabled
-  }
+  const { name, description, avatar, model, workspace, prompt } = parsePersonaMarkdown(id, raw)
+  return { id, name, description, avatar, avatarImage: withImage ? readAvatarImage(id) : '',
+    model, workspace, prompt, enabled }
 }
 
 /**
@@ -246,26 +236,6 @@ export function getPersona(id: string, withImage = false): PersonaRecord | null 
  */
 export function resolvePersonaId(id: string | undefined): string {
   return id && isSafeId(id) && existsSync(personaFile(id)) ? id : DEFAULT_PERSONA_ID
-}
-
-/** 组装 persona.md 文本（frontmatter + 正文）。 */
-function composePersonaMd(input: {
-  name: string
-  description: string
-  avatar: string
-  model: string
-  workspace?: string
-  prompt: string
-}): string {
-  const lines = ['---', `name: ${fmScalar(input.name)}`]
-  if (input.description) lines.push(`description: ${fmScalar(input.description)}`)
-  // avatar 为 JSON 字符串（含引号/大括号），必须经 fmScalar 引号化 + 转义，方能安全存进 YAML 单行。
-  if (input.avatar) lines.push(`avatar: ${fmScalar(input.avatar)}`)
-  if (input.model) lines.push(`model: ${fmScalar(input.model)}`)
-  // 路径常含空格 / 中文，同样经 fmScalar 引号化；空 = 用默认工作区，不写该行（旧文件零差异）。
-  if (input.workspace) lines.push(`workspace: ${fmScalar(input.workspace)}`)
-  lines.push('---', '', input.prompt.trim(), '')
-  return lines.join('\n')
 }
 
 /** 新建或覆盖一条 persona，返回最终记录。 */
