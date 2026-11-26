@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import { Plus, Search } from 'lucide-react'
+import { Globe, Plus, Search } from 'lucide-react'
 import { useI18n } from '../renderer/src/i18n/i18n'
 import { findActive, useModels } from '../renderer/src/store/models'
 import { ChatSurface, ConversationHeader, ConversationScroller, ConversationSurface } from '../renderer/src/redesign/ChatSurface'
@@ -12,6 +12,9 @@ import { modelGroups, ModelSelectButton } from '../renderer/src/redesign/ModelMe
 import { clampComposer, clampSidebar, COMPOSER_DEFAULT, ICONRAIL_W, ResizeHandle, SIDEBAR_DEFAULT, useViewport } from '../renderer/src/redesign/resizable'
 import { browserFiles, readyAttachmentIds, type AttachmentDraft, type BrowserFiles } from './attachment-drafts'
 import { attachmentCard, AttachmentDraftCards, AttachmentHint, AttachmentIssues, AttachmentPicker, useAttachmentDrafts } from './attachment-ui'
+import { createManualBrowserPanel, type ManualBrowserPanel } from './browser-manual'
+import { ManualBrowserDialog } from './browser-panel'
+import { createBrowserTransport, type BrowserTransport } from './browser-transport'
 import { chatCopy, turnLabel, type ChatCopy } from './chat-copy'
 import { createChatTransport, inputBytes, MAX_TEXT_INPUT, type ChatState } from './chat-transport'
 import { createLibrary, type Roster } from './library-transport'
@@ -73,6 +76,12 @@ export default function TextWorkbench({ transport, bootstrap, beforeWrite, onExp
   const personaId = state?.personaId ?? selectedEntry?.personaId
   const scope = wk.attachments ? (locale === 'zh-CN' ? '文本对话与手动上传附件' : 'Text chat with manual attachment uploads') : library ? c.libraryScope : c.scope
   const sid = wk.selected
+  const browserConfigured = bootstrap.capabilities?.browserPanel === true
+  const browser = useMemo(() => browserConfigured ? createBrowserTransport(transport, bootstrap.csrf) : undefined,
+    [browserConfigured, transport, bootstrap.csrf])
+  const [browserOpen, setBrowserOpen] = useState<{ sid: string; transport: BrowserTransport; panel: ManualBrowserPanel }>()
+  const browserVisible = browserOpen && browserOpen.sid === sid && browserOpen.transport === browser && !locked && !settingsOpen
+  useEffect(() => { if (browserOpen && !browserVisible) setBrowserOpen(undefined) }, [browserOpen, browserVisible])
   const dropFiles = wk.attachments && sid ? (event: React.DragEvent<HTMLElement>): void => {
     if (!event.dataTransfer.types.includes('Files') || !event.currentTarget.contains(event.target as Node)) return
     event.preventDefault()
@@ -133,6 +142,10 @@ export default function TextWorkbench({ transport, bootstrap, beforeWrite, onExp
           {personaId && <span className="wb-chat__persona" data-testid="workbench-chat-persona"><Avatar persona={appearance(personaId)} size={22} plain />{appearance(personaId).name}</span>}
           {openFiles && !(wk.selected && (state?.writable || state?.active)) &&
             <ComposerWorkspaceButton label={workspaceLabel} onClick={openFiles} testId={WORKSPACE_OPEN} />}
+          {browser && sid && <button className="cf-wschip wb-browser__launch" type="button" data-testid="workbench-browser-open"
+            aria-haspopup="dialog" aria-label={t('browser.title')} disabled={locked} onClick={() => {
+              setBrowserOpen({ sid, transport: browser, panel: createManualBrowserPanel(browser, sid, onExpired) })
+            }}><Globe size={15} /><span>{t('browser.title')}</span></button>}
           <span className="cf-conv__tag wb-chat__scope" title={scope}>{scope}</span>
         </ConversationHeader>
         {notice}
@@ -152,6 +165,7 @@ export default function TextWorkbench({ transport, bootstrap, beforeWrite, onExp
       </ConversationSurface>
     </div>
     {settingsOpen && renderSettings(() => setSettingsOpen(false))}
+    {browserOpen && browserVisible && <ManualBrowserDialog api={browserOpen.panel} dismiss={() => setBrowserOpen(undefined)} />}
     {files && <WorkspaceFilesPanel open={filesOpen} close={() => setFilesOpen(false)} controller={files} />}
   </ChatSurface>
   return library ? <LibraryWorkspace api={library} panel={panel} locked={locked} notice={notice} onRoster={setRoster}
