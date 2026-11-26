@@ -104,6 +104,10 @@ export async function openLibrary({ dataDir, workspaceRoot, workspaceWritable = 
     deliveryFiles: workspaceRoot ? openDeliveryFiles({ catalog }) : undefined,
     resolveRole: id => serial(() => enabledRole(id)),
     withWorkspace: workspaceBindingResolver(catalog),
+    withSkillRoleChoices: action => serial(async () => {
+      const { roles, verify } = await personas.listSkillRoleChoices()
+      return action(roles,verify)
+    }),
     withRoleForChat: (id, action) => serial(async () => action(await enabledRole(id, true))),
     async handle(req, res, { auth, policy }) {
       const path = (req.url ?? '').split('?', 1)[0]
