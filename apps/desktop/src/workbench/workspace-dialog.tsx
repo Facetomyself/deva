@@ -3,6 +3,8 @@ import { ChevronDown, ChevronRight, FileText, Folder, FolderOpen, X } from 'luci
 import { useI18n } from '../renderer/src/i18n/i18n'
 import { authorizedWorkspaceId, bindWorkspaceGitView, type WorkspaceGitView } from './git-view-controller'
 import { WorkspaceGitPanel } from './git-view-panel'
+import { bindTerminalView, terminalTarget, type TerminalView } from './terminal-view-controller'
+import { TerminalViewer } from './terminal-view-panel'
 import { type FileDraft, type WorkspaceFiles, type WorkspaceFilesView } from './workspace-files'
 import { workspaceEditorText } from './workspace-line-endings'
 import './workspace-dialog.css'
@@ -39,22 +41,33 @@ const copy = {
 }
 type Copy = (typeof copy)['en']
 
-export function WorkspaceFilesPanel({ open, close, controller, git }: {
-  open: boolean; close: () => void; controller: WorkspaceFiles; git?: WorkspaceGitView
+export function WorkspaceFilesPanel({ open, close, controller, git, terminal }: {
+  open: boolean; close: () => void; controller: WorkspaceFiles; git?: WorkspaceGitView; terminal?: TerminalView
 }): React.JSX.Element | null {
-  const view = useSyncExternalStore(controller.subscribe, controller.snapshot)
+  const view = useSyncExternalStore(controller.subscribe, controller.snapshot, controller.snapshot)
   useLayoutEffect(() => open && git ? bindWorkspaceGitView(git, controller) : undefined, [open, git, controller])
+  useLayoutEffect(() => {
+    if (!open || !terminal) return
+    const unbind = bindTerminalView(terminal, controller)
+    window.addEventListener('pagehide', terminal.dismiss)
+    window.addEventListener('offline', terminal.disconnect)
+    return () => {
+      window.removeEventListener('pagehide', terminal.dismiss)
+      window.removeEventListener('offline', terminal.disconnect)
+      unbind()
+    }
+  }, [open, terminal, controller])
   useEffect(() => {
     if (!view.anyDirty) return
     const warn = (event: BeforeUnloadEvent): void => { event.preventDefault(); event.returnValue = true }
     window.addEventListener('beforeunload', warn)
     return () => window.removeEventListener('beforeunload', warn)
   }, [view.anyDirty])
-  return open ? <WorkspaceFilesDialog view={view} api={controller} close={close} git={git} /> : null
+  return open ? <WorkspaceFilesDialog view={view} api={controller} close={() => { terminal?.dismiss(); close() }} git={git} terminal={terminal} /> : null
 }
 
-function WorkspaceFilesDialog({ view, api, close, git }: {
-  view: WorkspaceFilesView; api: WorkspaceFiles; close: () => void; git?: WorkspaceGitView
+function WorkspaceFilesDialog({ view, api, close, git, terminal }: {
+  view: WorkspaceFilesView; api: WorkspaceFiles; close: () => void; git?: WorkspaceGitView; terminal?: TerminalView
 }): React.JSX.Element {
   const labels = copy[useI18n().locale === 'zh-CN' ? 'zh-CN' : 'en']
   const title = useId()
@@ -71,7 +84,7 @@ function WorkspaceFilesDialog({ view, api, close, git }: {
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's') {
         event.preventDefault()
         event.stopPropagation()
-        if (!(event.target instanceof Element) || !event.target.closest('[data-workspace-git]')) void api.save()
+        if (!(event.target instanceof Element) || !event.target.closest('[data-workspace-git], [data-workspace-tty]')) void api.save()
       }
     }}>
     <div className="wb-workspace__head">
@@ -107,7 +120,7 @@ function WorkspaceFilesDialog({ view, api, close, git }: {
           </li>)}</ul>
         </div>}
       </nav>
-      {view.file ? <FileDetails file={view.file} view={view} api={api} labels={labels} /> : <p className="wb-workspace__muted">{labels.selectFile}</p>}
+      {view.file ? <FileDetails file={view.file} view={view} api={api} labels={labels} terminal={terminal} /> : <p className="wb-workspace__muted">{labels.selectFile}</p>}
     </div>}
   </dialog>
 }
@@ -136,9 +149,10 @@ function Directory({ path, view, api, labels }: { path: string; view: WorkspaceF
   })}</ul>
 }
 
-function FileDetails({ file, view, api, labels }: {
-  file: FileDraft; view: WorkspaceFilesView; api: WorkspaceFiles; labels: Copy
+function FileDetails({ file, view, api, labels, terminal }: {
+  file: FileDraft; view: WorkspaceFilesView; api: WorkspaceFiles; labels: Copy; terminal?: TerminalView
 }): React.JSX.Element {
+  const target = terminal && terminalTarget(view)
   const editing = view.writable && file.pending !== 'read'
   const nonText = file.disk?.kind === 'text' ? undefined : file.disk?.kind
   const status = file.pending === 'save' ? 'saving' : file.pending === 'read' ? 'loading' :
@@ -154,6 +168,7 @@ function FileDetails({ file, view, api, labels }: {
     </div>
     {status && !view.issue && <p className={file.issue && file.issue !== 'readonly' ? 'wb-workspace__alert' : 'wb-workspace__muted'}
       role={file.issue && file.issue !== 'readonly' ? 'alert' : 'status'} data-testid="workbench-workspace-status" data-status={status}>{labels[status]}</p>}
+    {terminal && target && <TerminalViewer api={terminal} target={target} />}
     {file.text !== undefined && <textarea className="input wb-workspace__editor" data-testid="workbench-workspace-editor"
       aria-label={labels.editor} spellCheck={false} value={file.text} readOnly={!editing} onChange={(event) => api.edit(workspaceEditorText(file.text ?? '', event.currentTarget.value))} />}
     {file.review && file.disk?.kind === 'text' && !view.issue && <div className="wb-workspace__review">

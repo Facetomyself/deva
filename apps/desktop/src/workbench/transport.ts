@@ -14,7 +14,7 @@ export interface Bootstrap {
   config: RecordValue
   csrf: string
   expiresAt: number
-  capabilities?: { textChat?: true; library?: true; workspaceFiles?: true; attachments?: true; browserPanel?: true; sessionPreferences?: true; deliveries?: true; gitInspect?: true; sessionWorkspaces?: true; taskInspection?: true }
+  capabilities?: { textChat?: true; library?: true; workspaceFiles?: true; attachments?: true; browserPanel?: true; sessionPreferences?: true; deliveries?: true; gitInspect?: true; sessionWorkspaces?: true; taskInspection?: true; terminalViewer?: true }
 }
 
 export type SessionScreen = { mode: 'authenticated'; bootstrap: Bootstrap } | { mode: 'claim' | 'login' }
@@ -62,7 +62,7 @@ export function captureClaim(location: Pick<Location, 'hash' | 'pathname' | 'sea
 }
 
 export function createTransport(send: Fetch = fetch) {
-  async function fetchJson(path: string, init: RequestInit, referrerPolicy: ReferrerPolicy = 'no-referrer'): Promise<unknown> {
+  async function fetchJson(path: string, init: RequestInit, referrerPolicy: ReferrerPolicy = 'no-referrer', expectedStatus?: number): Promise<unknown> {
     const response = await send(prefix + path, {
       ...init, credentials: 'same-origin', mode: 'same-origin', redirect: 'error',
       cache: 'no-store', referrerPolicy
@@ -72,17 +72,22 @@ export function createTransport(send: Fetch = fetch) {
       const code = record(failure) ? failure.error ?? failure.code : undefined
       throw new HttpFailure(response.status, typeof code === 'string' ? code : undefined)
     }
+    if (expectedStatus !== undefined && response.status !== expectedStatus) {
+      void response.body?.cancel().catch(() => {})
+      throw new Error('Unexpected HTTP status')
+    }
     return response.status === 204 ? undefined : response.json()
   }
 
   function request(path: string, method = 'GET', body?: unknown, csrf?: string, options?: {
-    signal?: AbortSignal; referrerPolicy?: ReferrerPolicy
+    signal?: AbortSignal; referrerPolicy?: ReferrerPolicy; expectedStatus?: number; keepalive?: boolean
   }): Promise<unknown> {
     const headers: Record<string, string> = { accept: 'application/json' }
     if (body !== undefined) headers['content-type'] = 'application/json'
     if (csrf) headers[csrfHeader] = csrf
     return fetchJson(path, { method, headers, body: body === undefined ? undefined : JSON.stringify(body),
-      ...(options?.signal ? { signal: options.signal } : {}) }, options?.referrerPolicy)
+      ...(options?.signal ? { signal: options.signal } : {}), ...(options?.keepalive ? { keepalive: true } : {}) },
+    options?.referrerPolicy, options?.expectedStatus)
   }
 
   function gitRequest(path: string, body: object, csrf: string, signal: AbortSignal): Promise<unknown> {
@@ -124,6 +129,7 @@ export function createTransport(send: Fetch = fetch) {
       if (result.capabilities.gitInspect === true) capabilities.gitInspect = true
       if (result.capabilities.sessionWorkspaces === true) capabilities.sessionWorkspaces = true
       if (result.capabilities.taskInspection === true) capabilities.taskInspection = true
+      if (result.capabilities.terminalViewer === true) capabilities.terminalViewer = true
     }
     return { protocol, version, platform, config, csrf, expiresAt, ...(Object.keys(capabilities).length ? { capabilities } : {}) }
   }

@@ -36,6 +36,8 @@ import { AttachedWorkspaceLabel, SessionWorkspaceControls, useSessionWorkspace }
 import { closedTaskSnapshot, createTaskInspection, idleTaskSubscription } from './task-inspection-controller'
 import { createTaskInspectionTransport } from './task-inspection-transport'
 import { TaskInspectionPanel } from './task-inspection-ui'
+import { createTerminalView } from './terminal-view-controller'
+import { createTerminalViewTransport } from './terminal-view-transport'
 import type { Bootstrap, LibraryQueue, Transport } from './transport'
 import { useTextWorkbench } from './use-text-workbench'
 import { ClientFullscreenButton, useClientShell } from './client-shell-ui'
@@ -112,6 +114,9 @@ export default function TextWorkbench({ transport, bootstrap, beforeWrite, onExp
   const [filesOpen, setFilesOpen] = useState(false)
   const workspaceLabel = locale === 'zh-CN' ? '工作区文件' : 'Workspace files'
   const sid = wk.selected
+  const terminalEnabled = filesEnabled && bootstrap.capabilities?.terminalViewer === true
+  const terminal = useMemo(() => terminalEnabled ? createTerminalView(createTerminalViewTransport(transport, bootstrap.csrf), onExpired) : undefined,
+    [terminalEnabled, transport, bootstrap.csrf, bootstrap.expiresAt, onExpired, sid])
   const selectedEntry = wk.sessions.find((s) => s.id === sid)
   const workspaceSid = !locked && selectedEntry?.compatibility === 'text' && wk.projection?.status !== 'missing' ? selectedEntry.id : undefined
   const workspaceWritable = !!workspaceSid && wk.projection?.status === 'ready' && state?.compatibility === 'text' && !state.active && !wk.pending
@@ -325,7 +330,8 @@ export default function TextWorkbench({ transport, bootstrap, beforeWrite, onExp
     {settingsOpen && renderSettings(() => setSettingsOpen(false))}
     {browserOpen && browserVisible && <ManualBrowserDialog api={browserOpen.panel} dismiss={() => setBrowserOpen(undefined)} />}
     {files && <WorkspaceFilesPanel open={filesOpen || (!!sid && locatedFilesSid === sid && !locked) || approvedProject?.kind === 'files'}
-      close={() => { setFilesOpen(false); setLocatedFilesSid(undefined); binding?.closeProject() }} controller={files} git={locked ? undefined : git} />}
+      close={() => { setFilesOpen(false); setLocatedFilesSid(undefined); binding?.closeProject() }} controller={files} git={locked ? undefined : git}
+      terminal={locked ? undefined : terminal} />}
     {library && !panel && !settingsOpen && approvedProject?.kind === 'notes' && <ProjectMemoryDialog
       key={`${workspaceSid}:${approvedProject.workspace.id}`} api={library} locked={locked} notice={notice}
       lockedProject={{ ...approvedProject.workspace, signal: approvedProject.signal }} onClose={() => binding?.closeProject()} />}
