@@ -180,7 +180,7 @@ export async function startWorkbench(opts = {}) {
     const auth = await createAuthService({ dataDir })
     stage = 'business service'
     const openBusiness = opts.businessFactory ?? (await import('./business/handlers.mjs')).openBusiness
-    business = await openBusiness({ ...opts.businessOptions, dataDir, vault, version, privateRoots: [dataDir, keyFile, runDir, webDir] })
+    business = await openBusiness({ ...opts.businessOptions, dataDir, vault, auth, version, privateRoots: [dataDir, keyFile, runDir, webDir, opts.businessOptions?.browserRunDir] })
     if (typeof business?.getConfig !== 'function' || typeof business.handle !== 'function' || typeof business.close !== 'function') {
       throw TypeError('Invalid workbench business service')
     }
