@@ -41,3 +41,7 @@ jobs:
       - run: pnpm workbench:check
 
       - run: pnpm headless:test
+
+      - name: Verify first-use settings in real sandboxed Chrome
+        timeout-minutes: 4
+        run: node scripts/workbench/e2e-browser.mjs

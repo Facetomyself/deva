@@ -34,9 +34,9 @@
       "name": "config",
       "host": "apps/desktop/src/main/services/config.ts",
       "methods": [
-        {"name":"getSync","kind":"sendSync","channel":"config:get-sync","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/theme/ThemeContext.tsx","use":"首帧读主题、语言、布局等避免闪烁"},"web":{"status":"pending","target":"bootstrap","semantic":"启动时在首个可见渲染前取得允许公开的主题和语言；不用同步 IPC 或整份账户配置模拟首帧。"}},
-        {"name":"get","kind":"invoke","channel":"config:get","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/store/models.tsx","use":"模型设置加载当前配置与活跃模型"},"web":{"status":"pending","target":"rpc","semantic":"按设置用途返回投影；密钥不进入配置快照。"}},
-        {"name":"set","kind":"invoke","channel":"config:set","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/store/models.tsx","use":"模型、主题等设置以顶层补丁持久化"},"web":{"status":"pending","target":"rpc","semantic":"允许写入的配置键应明确；区分省略、删除和设置，回读验证持久结果。"}}
+        {"name":"getSync","kind":"sendSync","channel":"config:get-sync","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/theme/ThemeContext.tsx","use":"首帧读主题、语言、布局等避免闪烁"},"web":{"status":"implemented","target":"bootstrap","semantic":"启动时在首个可见渲染前取得允许公开的主题和语言；不用同步 IPC 或整份账户配置模拟首帧。","implementation":{"handler":"apps/desktop/src/workbench/transport.ts","test":"scripts/workbench/session-ui.test.mjs"}}},
+        {"name":"get","kind":"invoke","channel":"config:get","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/store/models.tsx","use":"模型设置加载当前配置与活跃模型"},"web":{"status":"implemented","target":"rpc","semantic":"按设置用途返回投影；密钥不进入配置快照。","implementation":{"handler":"apps/headless/src/business/handlers.mjs","test":"apps/headless/test/business-http.test.mjs"}}},
+        {"name":"set","kind":"invoke","channel":"config:set","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/store/models.tsx","use":"模型、主题等设置以顶层补丁持久化"},"web":{"status":"implemented","target":"rpc","semantic":"允许写入的配置键应明确；区分省略、删除和设置，回读验证持久结果。","implementation":{"handler":"apps/headless/src/business/handlers.mjs","test":"apps/headless/test/business-http.test.mjs"}}}
       ]
     },
     {
@@ -105,18 +105,18 @@
       "name": "secrets",
       "host": "apps/desktop/src/main/services/secrets.ts",
       "methods": [
-        {"name":"set","kind":"invoke","channel":"secrets:set","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/store/models.tsx","use":"模型设置向宿主写入 provider API 密钥"},"web":{"status":"pending","target":"rpc","semantic":"仅写或清除，校验 provider 身份和管理权限，日志及响应不得回显值。"}},
-        {"name":"has","kind":"invoke","channel":"secrets:has","desktop":{"surface":"bridge-only","use":"查询单一 provider 是否已有密钥的桥接"},"web":{"status":"pending","target":"rpc","semantic":"针对可管理的 provider 返回存在标记；无权范围应被隔离。"}},
-        {"name":"delete","kind":"invoke","channel":"secrets:delete","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/store/models.tsx","use":"移除模型服务商时删除密钥"},"web":{"status":"pending","target":"rpc","semantic":"按 provider 标识删除秘密而不回显值，随后刷新配置状态。"}},
-        {"name":"list","kind":"invoke","channel":"secrets:list","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/store/models.tsx","use":"模型设置初始化已配置密钥的 provider ID"},"web":{"status":"pending","target":"rpc","semantic":"只返回当前可见的已配置标识；不带密钥内容。"}},
-        {"name":"available","kind":"invoke","channel":"secrets:available","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/store/models.tsx","use":"模型设置探测系统加密存储可用性"},"web":{"status":"pending","target":"rpc","semantic":"对当前宿主呈现秘密存储是否可写，不能用浏览器本地存储冒充。"}}
+        {"name":"set","kind":"invoke","channel":"secrets:set","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/store/models.tsx","use":"模型设置向宿主写入 provider API 密钥"},"web":{"status":"implemented","target":"rpc","semantic":"仅写或清除，校验 provider 身份和管理权限，日志及响应不得回显值。","implementation":{"handler":"apps/headless/src/business/handlers.mjs","test":"apps/headless/test/business-http.test.mjs"}}},
+        {"name":"has","kind":"invoke","channel":"secrets:has","desktop":{"surface":"bridge-only","use":"查询单一 provider 是否已有密钥的桥接"},"web":{"status":"implemented","target":"rpc","semantic":"针对可管理的 provider 返回存在标记；无权范围应被隔离。","implementation":{"handler":"apps/desktop/src/workbench/transport.ts","test":"scripts/workbench/session-ui.test.mjs"}}},
+        {"name":"delete","kind":"invoke","channel":"secrets:delete","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/store/models.tsx","use":"移除模型服务商时删除密钥"},"web":{"status":"implemented","target":"rpc","semantic":"按 provider 标识删除秘密而不回显值，随后刷新配置状态。","implementation":{"handler":"apps/headless/src/business/handlers.mjs","test":"apps/headless/test/business-http.test.mjs"}}},
+        {"name":"list","kind":"invoke","channel":"secrets:list","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/store/models.tsx","use":"模型设置初始化已配置密钥的 provider ID"},"web":{"status":"implemented","target":"rpc","semantic":"只返回当前可见的已配置标识；不带密钥内容。","implementation":{"handler":"apps/headless/src/business/handlers.mjs","test":"apps/headless/test/business-http.test.mjs"}}},
+        {"name":"available","kind":"invoke","channel":"secrets:available","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/store/models.tsx","use":"模型设置探测系统加密存储可用性"},"web":{"status":"implemented","target":"rpc","semantic":"对当前宿主呈现秘密存储是否可写，不能用浏览器本地存储冒充。","implementation":{"handler":"apps/desktop/src/workbench/transport.ts","test":"scripts/workbench/session-ui.test.mjs"}}}
       ]
     },
     {
       "name": "provider",
       "host": "apps/desktop/src/main/services/provider.ts",
       "methods": [
-        {"name":"listModels","kind":"invoke","channel":"provider:list-models","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/features/settings/ModelSettings.tsx","use":"模型设置在主进程探测 provider 的模型列表"},"web":{"status":"pending","target":"rpc","semantic":"从宿主以受控配置探测，返回模型名和失败分类，凭据不离开宿主。"}}
+        {"name":"listModels","kind":"invoke","channel":"provider:list-models","desktop":{"surface":"ui","entry":"apps/desktop/src/renderer/src/features/settings/ModelSettings.tsx","use":"模型设置在主进程探测 provider 的模型列表"},"web":{"status":"implemented","target":"rpc","semantic":"从宿主以受控配置探测，返回模型名和失败分类，凭据不离开宿主。","implementation":{"handler":"apps/headless/src/business/handlers.mjs","test":"apps/headless/test/business-http.test.mjs"}}}
       ]
     },
     {

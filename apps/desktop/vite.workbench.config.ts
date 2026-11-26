@@ -32,7 +32,10 @@ export default defineConfig({
     manifest: 'manifest.json',
     target: 'es2020',
     rollupOptions: {
-      input: { workbench: resolve(__dirname, 'src/workbench/entry.ts') },
+      input: {
+        workbench: resolve(__dirname, 'src/workbench/entry.ts'),
+        index: resolve(__dirname, 'src/workbench/index.html')
+      },
       preserveEntrySignatures: 'strict',
       output: { entryFileNames: '[name].js' }
     }

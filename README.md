@@ -330,6 +330,10 @@ IM 机器人支持 `/new [角色名]`、`/list`、`/stop`、`/status`、`/help`�
 
 </details>
 
+## 无 GUI 服务器工作台（本分支开发中）
+
+[amd64 Docker Compose 与 Web 工作台说明](apps/headless/README.md)：当前可在浏览器认领服务器并使用原桌面模型设置页。它和手机版中转是两个不同部署目标；完整业务进度见[对等清单](docs/development/web-workbench/README.md)。
+
 ## 从源码构建
 
 技术栈：Electron 33 · React 18 · TypeScript · electron-vite · pnpm workspace。需要 Node.js 20 及以上与 pnpm 10。

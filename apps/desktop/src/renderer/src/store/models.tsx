@@ -1,4 +1,4 @@
-import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from 'react'
+import { createContext, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { seedProviders, type Provider, type ModelDef, type ProviderPurpose } from '../mock/models'
 import type { EffortLevel } from '../../../preload'
 
@@ -116,7 +116,14 @@ function freshSeed(p: Provider): Provider {
   return { ...p, purpose: p.purpose ?? 'llm', models: p.models.map((mm) => ({ ...mm })) }
 }
 
-export function ModelsProvider({ children }: { children: ReactNode }): React.JSX.Element {
+function credentialAddress(value: string): string | null {
+  try {
+    const url = new URL(value)
+    return `${url.origin}${url.pathname.replace(/\/+$/, '')}`
+  } catch { return null }
+}
+
+export function ModelsProvider({ children, browserSettings = false }: { children: ReactNode; browserSettings?: boolean }): React.JSX.Element {
   const [providers, setProviders] = useState<Provider[]>(() => seedProviders.map(freshSeed))
   const [selectedProviderId, setSelectedProviderId] = useState<string>(seedProviders[0].id)
   // 不内置默认模型，也不设显式「默认」入口：新用户首次在对话输入框选择模型后即记为「最近使用」，
@@ -128,8 +135,11 @@ export function ModelsProvider({ children }: { children: ReactNode }): React.JSX
   const [keyStatus, setKeyStatus] = useState<Record<string, boolean>>({})
   const [secretsAvailable, setSecretsAvailable] = useState(true)
 
-  // 配置载入完成前不回写，避免用默认种子覆盖已存 ~/.deva/config.json
+  // 只有读到真实配置才解锁写入；初始种子和载入整理结果都不是用户编辑。
   const [hydrated, setHydrated] = useState(false)
+  const modelFields = useRef<Record<string, unknown>>({})
+  const lastCommit = useRef<{ providers: Provider[]; activeModelId: string | null; activeEffort: EffortLevel }>()
+  const removedKeys = useRef<string[]>([])
 
   useEffect(() => {
     let alive = true
@@ -161,6 +171,7 @@ export function ModelsProvider({ children }: { children: ReactNode }): React.JSX
           | { providers?: unknown; activeModelId?: unknown; activeEffort?: EffortLevel }
           | undefined
         if (!alive) return
+        modelFields.current = saved && typeof saved === 'object' && !Array.isArray(saved) ? { ...saved } : {}
         const savedProviders = Array.isArray(saved?.providers)
           ? saved.providers.map(normalizeProvider).filter((p): p is Provider => p !== null)
           : []
@@ -181,10 +192,10 @@ export function ModelsProvider({ children }: { children: ReactNode }): React.JSX
         if (saved && 'activeModelId' in saved)
           setActiveModelId(typeof saved.activeModelId === 'string' ? saved.activeModelId : null)
         if (saved?.activeEffort) setActiveEffort(saved.activeEffort)
+        setHydrated(true)
       } catch {
-        /* 无配置 / 读取失败：沿用默认种子 */
-      } finally {
-        if (alive) setHydrated(true)
+        // 读取失败时保持未就绪，排除将默认种子覆盖服务端已有配置的路径。
+        if (alive) console.error('[models] Failed to load model settings')
       }
     })()
     return () => {
@@ -192,12 +203,27 @@ export function ModelsProvider({ children }: { children: ReactNode }): React.JSX
     }
   }, [])
 
-  // 变更后回写（仅在 hydrate 之后）。密钥不在此列——始终只在主进程加密存储。
-  useEffect(() => {
+  // 在下一次用户操作（例如拉取模型清单）之前，把本次 React 提交排入宿主的写入队列。
+  useLayoutEffect(() => {
     if (!hydrated) return
-    // models 段整块替换（config:set 只做顶层浅合并），新增的兄弟字段必须一并写，漏写即被清掉。
-    void window.deva.config.set({ models: { providers, activeModelId, activeEffort } })
-  }, [hydrated, providers, activeModelId, activeEffort])
+    const previous = lastCommit.current
+    lastCommit.current = { providers, activeModelId, activeEffort }
+    if (!previous || (previous.providers === providers && previous.activeModelId === activeModelId && previous.activeEffort === activeEffort)) return
+    // config:set 只浅合并顶层；保留 models 段已有的其他字段。
+    const deleted = removedKeys.current.splice(0)
+    void window.deva.config.set({ models: { ...modelFields.current, providers, activeModelId, activeEffort } })
+      .then(async () => {
+        // 配置持久化确认后才删密钥，陈旧页面无法先删密钥再遇到配置冲突。
+        for (const id of deleted) await window.deva.secrets.delete(id)
+        if (browserSettings) {
+          // The browser bridge refreshes key flags after a credential-binding change and flushes
+          // already queued key writes before returning them, so an old read cannot undo a newer write.
+          const ids = await window.deva.secrets.list()
+          setKeyStatus(Object.fromEntries(ids.map((id) => [id, true])))
+        }
+      })
+      .catch(() => console.error('[models] Failed to save model settings'))
+  }, [hydrated, providers, activeModelId, activeEffort, browserSettings])
 
   const patchProvider = (id: string, fn: (p: Provider) => Provider): void =>
     setProviders((list) => list.map((p) => (p.id === id ? fn(p) : p)))
@@ -216,8 +242,10 @@ export function ModelsProvider({ children }: { children: ReactNode }): React.JSX
       updateProvider: (id, patch) => {
         patchProvider(id, (p) => {
           const next = { ...p, ...patch }
-          // 清空自定义请求头：删键而不是留 undefined / 空表，落盘的配置里不残留空字段。
-          if (!next.headers || Object.keys(next.headers).length === 0) delete next.headers
+          // Web credentials (including headers) are bound to one server address. Never send a
+          // previous address's headers as new values when editing or applying another endpoint.
+          const changedAddress = browserSettings && credentialAddress(next.apiHost) !== credentialAddress(p.apiHost)
+          if (changedAddress || !next.headers || Object.keys(next.headers).length === 0) delete next.headers
           return next
         })
         // 禁用服务商时，若默认模型属于它则清空，避免对话页指向不可用模型
@@ -268,8 +296,8 @@ export function ModelsProvider({ children }: { children: ReactNode }): React.JSX
         setActiveModelId((cur) => (cur === `${pid}:${mid}` ? null : cur))
       },
       removeProvider: (id) => {
-        // 一并清理密钥、选中项与悬空默认模型；密钥删除交主进程（明文不经渲染层）
-        void window.deva.secrets.delete(id)
+        // 等配置提交成功后再清理密钥；密钥删除始终交给宿主。
+        removedKeys.current.push(id)
         // 官方预置不移出清单，而是恢复为初始状态（未启用、预置模型）：没了密钥又未启用，设置页列表即不再显示，
         // 对话区的接入引导仍能再选它。移出清单的话，引导卡里要到重启、载入时从种子补回才有它。
         const seed = seedProviders.find((p) => p.id === id)
@@ -291,16 +319,20 @@ export function ModelsProvider({ children }: { children: ReactNode }): React.JSX
         })
       },
       applyPreset: (pid, preset) =>
-        patchProvider(pid, (p) => ({
-          ...p,
-          name: preset.name,
-          apiHost: preset.apiHost,
-          adapter: preset.adapter,
-          accent: preset.accent,
-          docUrl: preset.docUrl,
-          // 深拷贝预置模型，避免与预置目录共享引用
-          models: preset.models.map((mm) => ({ ...mm }))
-        })),
+        patchProvider(pid, (p) => {
+          const next = {
+            ...p,
+            name: preset.name,
+            apiHost: preset.apiHost,
+            adapter: preset.adapter,
+            accent: preset.accent,
+            docUrl: preset.docUrl,
+            // 深拷贝预置模型，避免与预置目录共享引用
+            models: preset.models.map((mm) => ({ ...mm }))
+          }
+          if (browserSettings && credentialAddress(next.apiHost) !== credentialAddress(p.apiHost)) delete next.headers
+          return next
+        }),
       addCustomProvider: (name, purpose = 'llm') => {
         const id = `custom-${Date.now()}`
         const isDecision = purpose === 'decision'
@@ -325,18 +357,23 @@ export function ModelsProvider({ children }: { children: ReactNode }): React.JSX
       },
       hasKey: (providerId) => Boolean(keyStatus[providerId]),
       setApiKey: async (providerId, key) => {
-        const res = await window.deva.secrets.set(providerId, key)
-        if (res.ok) {
-          setKeyStatus((s) => ({ ...s, [providerId]: Boolean(key) }))
-          // 填入密钥即自动启用该服务商，省去手动开关（清空密钥不动启用态）
-          if (key) patchProvider(providerId, (p) => (p.enabled ? p : { ...p, enabled: true }))
+        try {
+          const res = await window.deva.secrets.set(providerId, key)
+          if (res.ok) {
+            setKeyStatus((s) => ({ ...s, [providerId]: Boolean(key) }))
+            // 填入密钥即自动启用该服务商，省去手动开关（清空密钥不动启用态）
+            if (key) patchProvider(providerId, (p) => (p.enabled ? p : { ...p, enabled: true }))
+          }
+          return res
+        } catch {
+          console.error('[models] Failed to save provider key')
+          return { ok: false, available: secretsAvailable }
         }
-        return res
       },
       secretsAvailable,
       ready: hydrated
     }),
-    [providers, selectedProviderId, activeModelId, activeEffort, keyStatus, secretsAvailable, hydrated]
+    [providers, selectedProviderId, activeModelId, activeEffort, keyStatus, secretsAvailable, hydrated, browserSettings]
   )
 
   return <ModelsContext.Provider value={value}>{children}</ModelsContext.Provider>

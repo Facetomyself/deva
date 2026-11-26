@@ -1,6 +1,6 @@
 # Web Workbench 能力清单与门禁
 
-[能力清单](./parity-manifest.json)按桌面 [preload 运行时 `const api`](../../../apps/desktop/src/preload/index.ts)逐项登记：**21 组、186 个方法（含 18 个订阅）、1 个值 `platform`**。PR1 业务层尚未注册独立 Workbench handler：186 个方法中 **182 个 `pending`、4 个 `desktop-only`**；`platform` 的启动投影也为 `pending`，宿主平台与客户端显示、快捷键分开处理。`implemented` 为 **0**。已有手机版 PWA/relay 和桌面 IPC 都是参照，不是 Workbench 覆盖证明。
+[能力清单](./parity-manifest.json)按桌面 [preload 运行时 `const api`](../../../apps/desktop/src/preload/index.ts)逐项登记：**21 组、186 个方法（含 18 个订阅）、1 个值 `platform`**。当前独立首用设置页已注册 **9 个 `implemented`**（`config` 3、`secrets` 5、`provider.listModels` 1），其余 **173 个 `pending`、4 个 `desktop-only`**。`platform` 的完整工作台投影仍为 `pending`：为启动页面传递服务器平台名称不等于已经处理完整外壳的快捷键和客户端布局。已有手机版 PWA/relay 和桌面 IPC 都是参照，不是 Workbench 覆盖证明。
 
 ## 本地与 CI
 

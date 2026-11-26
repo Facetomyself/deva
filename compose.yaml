@@ -1,0 +1,50 @@
+# Single-owner workbench development deployment; binds to the host loopback by default.
+x-workbench: &workbench
+  image: ${DEVA_IMAGE:-deva-workbench:dev}
+  platform: linux/amd64
+  build:
+    context: .
+    target: runtime
+  user: "1000:1000"
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+
+services:
+  init-key:
+    <<: *workbench
+    command: ["init-key", "--if-missing"]
+    network_mode: none
+    volumes:
+      - data:/data:ro
+      - keys:/keys
+    restart: "no"
+  workbench:
+    <<: *workbench
+    depends_on:
+      init-key:
+        condition: service_completed_successfully
+    init: true
+    environment:
+      DEVA_HOST: 0.0.0.0
+      DEVA_PUBLIC_URL: ${DEVA_PUBLIC_URL:-http://127.0.0.1:${DEVA_PUBLISHED_PORT:-18787}}
+      DEVA_PROVIDER_ORIGINS: ${DEVA_PROVIDER_ORIGINS:-}
+    ports:
+      - "127.0.0.1:${DEVA_PUBLISHED_PORT:-18787}:8787"
+    volumes:
+      - data:/data
+      - keys:/keys:ro
+    tmpfs:
+      - /run/deva:rw,nosuid,nodev,noexec,mode=0700,uid=1000,gid=1000
+      - /tmp:rw,nosuid,nodev,noexec,mode=1777,size=64m
+    pids_limit: 128
+    healthcheck:
+      test: ["CMD", "node", "--input-type=module", "-e", "import h from 'node:http'; const r=h.get({host:'127.0.0.1',port:8787,path:'/healthz',headers:{host:new URL(process.env.DEVA_PUBLIC_URL).host}},x=>{x.resume();process.exitCode=x.statusCode===200?0:1});r.setTimeout(2500,()=>r.destroy());r.on('error',()=>{process.exitCode=1})"]
+      interval: 20s
+      timeout: 4s
+      retries: 3
+      start_period: 5s
+    restart: unless-stopped
+volumes:
+  data:
+  keys:
