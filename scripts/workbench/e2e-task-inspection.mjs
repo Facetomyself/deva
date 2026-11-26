@@ -10,7 +10,7 @@ const hook = name => `[data-testid="workbench-${name}"]`
 const panel = hook('tasks-panel'), detail = `${panel} ${hook('task-detail')}`
 const row = id => `${panel} ${hook('task-row')}[data-task-id="${id}"]`
 const inPanel = name => `${panel} ${hook(name)}`
-const chat = hook('workbench-chat')
+const chat = hook('chat')
 const collection = '/api/v1/tasks'
 const taskPath = id => `${collection}/${id}`
 const previewPath = `${collection}/preview`, pausePath = `${taskPath(activeTask.id)}/status`
