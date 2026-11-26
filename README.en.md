@@ -341,7 +341,14 @@ When memory is full, the next write by the model first consolidates the existing
 
 ## Headless server workbench (fork development)
 
-The [amd64 Docker Compose workbench](apps/headless/README.md) supports browser enrollment, the original desktop model settings, and general text conversations with shared desktop UI, streaming, cancellation and reconnect. It also includes profile and role editing, avatar management, and notes scoped to the owner, a role, or a registered project. A conversation may keep an explicitly attached project or inherit its role’s registered project at creation. Browsing another folder is separate from changing this binding; neither operation sends files or notes to a model. Separately approved projects also have a manually activated Git view for tracked changes, branches, first-parent history and staged versus working-tree comparisons. The native task view shows saved schedules and run history, previews times in an explicit zone, and can pause one existing active record after confirmation. It does not run a scheduler. The workbench accepts supported UTF-8 text, static images and PDFs for compatible adapters. Confirmed replies can be exported as Markdown or plain text. Desktop delivery cards are reused for scoped downloads and project file reveal. The [optional human-operated browser](apps/browser-worker/README.md) remains experimental: it requires an independent sandboxed worker and its full handoff has not passed acceptance. The base app requires neither that worker nor a running desktop. This is separate from the mobile relay; see the [parity inventory](docs/development/web-workbench/README.md) for the remaining desktop workflows.
+The [amd64 Docker Compose workbench](apps/headless/README.md) runs independently of Electron, a remote desktop or the mobile relay, using the same React components as the desktop application.
+
+- **Conversations:** claim the instance, configure models, stream, stop and reconnect. Use the desktop message menu to copy a selection or quote it in an unsent draft. Clipboard, sidebar shortcuts and page fullscreen belong to the client browser.
+- **Library and projects:** manage profiles, roles, avatars and scoped notes. A conversation can inherit or explicitly attach an approved project; manually opening its files or notes does not send them to a model.
+- **Attachments and deliveries:** explicitly send supported text, static images or PDFs on compatible adapters. Export confirmed replies or use the desktop delivery card to download and reveal an authorized project file.
+- **Inspection:** view branches, first-parent history and staged or working-tree differences in separately approved repositories. Inspect recorded desktop tasks, preview a schedule in an explicit time zone, and pause an active record after confirmation. The server does not run a task scheduler.
+
+The [optional server-side human-operated browser](apps/browser-worker/README.md) remains experimental: full handoff has not passed acceptance. The base workbench does not depend on it. See the [desktop parity inventory](docs/development/web-workbench/README.md) for pending work.
 
 ## Build from Source
 
