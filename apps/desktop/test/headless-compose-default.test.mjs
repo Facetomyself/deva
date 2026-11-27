@@ -1,8 +1,10 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
+import { readFileSync } from 'node:fs'
 import test from 'node:test'
 import { fileURLToPath } from 'node:url'
+import { checkSourceCreationControl, sourceCreationControl } from './compose-acceptance-evidence.mjs'
 
 // Render only the named manifests without reading a deployment's .env or connecting to an engine.
 const base = fileURLToPath(new URL('../../../compose.yaml', import.meta.url))
@@ -10,10 +12,10 @@ const overlay = fileURLToPath(new URL('../../../compose.project-docs.yaml', impo
 const source = '/unused-deva-test/selected.json', digest = 'a'.repeat(64)
 const env = { PATH: process.env.PATH, DOCKER_HOST: 'unix:///dev/null', COMPOSE_DISABLE_ENV_FILE: '1',
   DEVA_WEB_TOKEN: randomBytes(32).toString('hex'), DEVA_MODEL: 'fixture', DEVA_MODEL_BASE_URL: 'https://example.invalid/v1' }
-function render(files, extra) {
+function render(files, extra, input) {
   return JSON.parse(execFileSync('docker', ['compose', '--env-file', '/dev/null', ...files.flatMap(file => ['-f', file]),
     '-p', 'deva-default-check', 'config', '--format', 'json'], {
-    encoding: 'utf8', timeout: 10000, env: { ...env, ...extra }, stdio: ['ignore', 'pipe', 'pipe']
+    encoding: 'utf8', input, timeout: 10000, env: { ...env, ...extra }, stdio: ['pipe', 'pipe', 'pipe']
   }))
 }
 
@@ -43,8 +45,12 @@ test('only the explicit overlay passes a digest and one read-only leaf bind', ()
   }
   const plain = render([base], both), enabled = render(files, both)
   const service = enabled.services.deva
-  assert.deepEqual(service.volumes, [...plain.services.deva.volumes, { type: 'bind', source,
-    target: '/run/deva-project-docs/snapshot.json', read_only: true, bind: { create_host_path: false, propagation: 'rprivate' } }])
+  const leaf = { type: 'bind', source, target: '/run/deva-project-docs/snapshot.json', read_only: true }
+  // Verify the effect of changing the actual declaration, even on a CLI that omits one boolean default.
+  const control = render([base, '-'], both, sourceCreationControl(readFileSync(overlay, 'utf8')))
+  checkSourceCreationControl(enabled, control)
+  const normalized = service.volumes.map(v => v.type === 'bind' ? { ...v, bind: { create_host_path: false, ...v.bind } } : v)
+  assert.deepEqual(normalized, [...plain.services.deva.volumes, { ...leaf, bind: { create_host_path: false, propagation: 'rprivate' } }])
   assert.deepEqual(service.environment, { ...plain.services.deva.environment, DEVA_PROJECT_DOCS_SHA256: digest })
   // The optional grant must not otherwise widen the runtime configuration.
   assert.deepEqual({ ...service, volumes: plain.services.deva.volumes, environment: plain.services.deva.environment }, plain.services.deva)
