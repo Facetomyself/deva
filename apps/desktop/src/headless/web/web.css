@@ -12,9 +12,31 @@ button:disabled { opacity: .55; cursor: default; }
 .web-secondary { width: fit-content; padding: var(--space-1) var(--space-2); border-radius: var(--radius); border: 1px solid var(--border); color: var(--fg); background: var(--bg-elevated); cursor: pointer; }
 .web-secondary:hover:not(:disabled) { background: var(--bg-hover); }
 .web-chat { grid-template-columns: clamp(192px, 23vw, 264px) minmax(0, 1fr); line-height: 1.5; }
-.web-chat .cf-rail__top, .web-chat .cf-conv__head { min-height: 56px; justify-content: space-between; padding: var(--space-2) var(--space-4); }
+.web-chat .cf-rail__top, .web-chat .cf-conv__head { min-height: 56px; padding: var(--space-2) var(--space-4); }
+.web-chat .cf-rail__top { flex-wrap: wrap; justify-content: space-between; gap: var(--space-2); }
+.web-chat .cf-conv__head { flex-direction: column; align-items: stretch; gap: var(--space-2); }
+.web-header-actions { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-2); }
+.web-conv-top { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-2) var(--space-4); }
+.web-chat h1 { flex: 1 1 8ch; min-width: 0; margin: 0; font-size: 16px; overflow-wrap: anywhere; text-wrap: balance; }
 .web-chat .cf-thread { display: block; white-space: nowrap; text-overflow: ellipsis; overflow: hidden; }
-.web-chat h1 { flex: 1; min-width: 0; margin: 0; font-size: 16px; white-space: nowrap; text-overflow: ellipsis; overflow: hidden; }
+.web-chat .cf-thread:focus-visible { outline-offset: -2px; }
+.web-archive-toggle[aria-pressed='true'] { background: var(--bg-selected); }
+.web-list-state { margin: 0; padding: var(--space-2) var(--space-3); }
+.web-title-editor { display: grid; gap: var(--space-1); }
+.web-title-editor__row { display: flex; flex-wrap: wrap; gap: var(--space-2); }
+.web-title-editor input {
+  flex: 1 1 20ch; min-width: 0; padding: var(--space-1) var(--space-2);
+  border: 1px solid var(--border-strong); border-radius: var(--radius); background: var(--bg-elevated); color: var(--fg);
+}
+.web-title-editor p { margin: 0; }
+.web-title-issue { color: var(--fg); overflow-wrap: anywhere; }
+.web-spinner {
+  display: inline-block; width: 12px; height: 12px; margin-inline-end: var(--space-1); vertical-align: -1px;
+  border: 1px solid currentColor; border-inline-end-color: transparent; border-radius: 50%;
+  animation: web-spin .7s linear infinite;
+}
+@keyframes web-spin { to { transform: rotate(1turn); } }
+@media (prefers-reduced-motion: reduce) { .web-spinner { animation: none; } }
 .web-chat .cf-msg { display: flex; }
 .web-chat .cf-msg.is-user { justify-content: flex-end; }
 .web-chat .cf-box { box-shadow: none; }
