@@ -23,6 +23,7 @@ import type {
   ResolveAutotaskResult,
   TakenInserts
 } from '../../shared/chat-protocol'
+import { normalizeSessionTitle } from '../../shared/session-title'
 import { ipcMain, type BrowserWindow } from 'electron'
 import { onChatEvent, onSessionsChanged, publishRemoteChange, publishSessionsChanged } from './chat-bus'
 import { forgetRead } from './read-sync'
@@ -136,9 +137,6 @@ export type {
   PlanResponse,
   ResolveAutotaskResult
 }
-
-/** 用户自定的对话标题上限（列表里单行省略显示，再长也看不全）。 */
-const TITLE_MAX = 100
 
 /**
  * 按「轮」删除对话（同步删除模型上下文）。turnIndices 为 0 基轮下标集合（越界者忽略）。
@@ -603,7 +601,7 @@ export function registerChatIpc(getWin: () => BrowserWindow | null): void {
     (_e, payload: ChatRenameSessionRequest): { title: string } | null => {
       const session = getSession(payload.sessionId)
       if (!session) return null
-      let title = String(payload.title ?? '').replace(/\s+/g, ' ').trim().slice(0, TITLE_MAX)
+      let title = normalizeSessionTitle(String(payload.title ?? ''))
       if (!title) {
         const first = displayOf(session).find((m) => m.role === 'user' && !m.notify)
         if (first?.role === 'user')
