@@ -1,5 +1,3 @@
-import { describeNetError } from '../http'
-import { fetchModel } from './request'
 import { iterateSSE, STREAM_IDLE_MS } from './sse'
 import {
   httpError,
@@ -7,6 +5,7 @@ import {
   parseToolArgs,
   settleBrokenCalls,
   type AdapterConfig,
+  type AdapterTransport,
   type ContentPart,
   type GenerateRequest,
   type ImagePart,
@@ -129,10 +128,28 @@ function mapStopReason(raw: string | null | undefined): StopReason {
   }
 }
 
+type WireObject = Record<string, unknown>
+
+function wireObject(value: unknown): WireObject | undefined {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value as WireObject : undefined
+}
+
+/** 仅检查可承载输出的块，不把兼容端点的 message 元数据当作完整 Anthropic schema 校验。 */
+function textOnlyBlock(block: WireObject | undefined): 'text' | 'thinking' | 'redacted_thinking' | undefined {
+  if (!block) return
+  // Read only the field belonging to this block. Extra provider metadata is never projected.
+  if (block.type === 'text' && typeof block.text === 'string') return 'text'
+  if (block.type === 'thinking' && typeof block.thinking === 'string') return 'thinking'
+  if (block.type === 'redacted_thinking' && typeof block.data === 'string') return 'redacted_thinking'
+  return undefined
+}
+
 export async function* streamAnthropic(
   cfg: AdapterConfig,
-  req: GenerateRequest
+  req: GenerateRequest,
+  transport: AdapterTransport
 ): AsyncGenerator<StreamEvent> {
+  const { fetchModel, describeNetError, textOnly } = transport
   const url = `${cfg.baseURL.replace(/\/$/, '')}/v1/messages`
   const messages = mapMessages(req.messages)
   if (req.cache) markCacheTail(messages)
@@ -146,7 +163,7 @@ export async function* streamAnthropic(
     model: req.model,
     system,
     messages,
-    tools: req.tools?.map((t) => ({
+    tools: textOnly ? undefined : req.tools?.map((t) => ({
       name: t.name,
       description: t.description,
       input_schema: t.inputSchema
@@ -180,21 +197,29 @@ export async function* streamAnthropic(
       yield { type: 'done', stopReason: 'aborted' }
       return
     }
-    yield { type: 'error', error: { kind: 'network', retryable: true, message: describeNetError(e) } }
+    if (!textOnly)
+      yield { type: 'error', error: { kind: 'network', retryable: true, message: describeNetError(e) } }
     yield { type: 'done', stopReason: 'error' }
     return
   }
 
   if (!res.ok) {
-    const text = await res.text().catch(() => '')
-    yield {
-      type: 'error',
-      error: httpError(res.status, text, res.headers.get('retry-after'), Boolean(req.effort))
+    if (textOnly) void res.body?.cancel().catch(() => {})
+    else {
+      const text = await res.text().catch(() => '')
+      yield {
+        type: 'error',
+        error: httpError(res.status, text, res.headers.get('retry-after'), Boolean(req.effort))
+      }
     }
     yield { type: 'done', stopReason: 'error' }
     return
   }
 
+  yield* readAnthropic(res, transport)
+}
+
+async function* readAnthropic(res: Response, { textOnly, describeNetError }: AdapterTransport): AsyncGenerator<StreamEvent> {
   // index -> 正在累积的 tool_use 块
   const toolBlocks = new Map<number, { id: string; name: string; json: string }>()
   /** 参数 JSON 解析失败的工具块，流结束后按 stop_reason 定性（见 settleBrokenCalls）。 */
@@ -205,6 +230,12 @@ export async function* streamAnthropic(
   let cacheRead = 0
   let outputTokens = 0
   let stopReason: StopReason = 'end_turn'
+  // Headless: only a complete, ordered Messages stream can establish a terminal stop reason.
+  let phase: 'start' | 'content' | 'tail' = 'start'
+  let activeBlock: ReturnType<typeof textOnlyBlock>
+  let blockIndex = 0
+  let reportedStop: StopReason | undefined
+  let terminalStop: StopReason | undefined
 
   // 用量分散在 message_start（输入侧）与 message_delta（输出侧）两处，且各版本带的字段互有出入，
   // 统一用同一个取值器：谁带哪段就取哪段，不覆盖没带的。
@@ -217,26 +248,61 @@ export async function* streamAnthropic(
   }
 
   try {
-    for await (const { data } of iterateSSE(res, STREAM_IDLE_MS)) {
+    for await (const { event, data } of iterateSSE(res, textOnly ? 0 : STREAM_IDLE_MS)) {
       if (data === '[DONE]') break
-      let evt: Record<string, unknown>
+      let evt: WireObject
       try {
         evt = JSON.parse(data)
       } catch {
+        if (textOnly) break
         continue
       }
+      if (textOnly && (!wireObject(evt) || evt.error != null || (event !== undefined && event !== 'message' && event !== evt.type))) break
       const type = evt.type as string
 
       if (type === 'message_start') {
-        takeUsage((evt.message as { usage?: AnthropicUsage })?.usage)
+        if (textOnly) {
+          const message = wireObject(evt.message)
+          if (phase !== 'start' || !Array.isArray(message?.content) ||
+              (message.type !== undefined && message.type !== 'message') ||
+              (message.role !== undefined && message.role !== 'assistant') ||
+              message.stop_reason != null || message.stop_sequence != null) break
+          const blocks = message.content.map(wireObject)
+          if (blocks.some((block) => !textOnlyBlock(block))) break
+          for (const block of blocks)
+            if (block?.type === 'text' && typeof block.text === 'string' && block.text)
+              yield { type: 'text_delta', text: block.text }
+          blockIndex = blocks.length
+          phase = 'content'
+        } else takeUsage((evt.message as { usage?: AnthropicUsage })?.usage)
       } else if (type === 'content_block_start') {
         const index = evt.index as number
+        if (textOnly) {
+          const block = wireObject(evt.content_block)
+          const kind = textOnlyBlock(block)
+          if (phase !== 'content' || activeBlock || index !== blockIndex || !kind) break
+          activeBlock = kind
+          if (kind === 'text' && typeof block?.text === 'string' && block.text)
+            yield { type: 'text_delta', text: block.text }
+          continue
+        }
         const block = evt.content_block as { type: string; id?: string; name?: string }
         if (block?.type === 'tool_use') {
           toolBlocks.set(index, { id: block.id ?? '', name: block.name ?? '', json: '' })
         }
       } else if (type === 'content_block_delta') {
         const index = evt.index as number
+        if (textOnly) {
+          const delta = wireObject(evt.delta)
+          if (index !== blockIndex || !delta) break
+          if (activeBlock === 'text' && delta.type === 'text_delta' && typeof delta.text === 'string') {
+            if (delta.text) yield { type: 'text_delta', text: delta.text }
+          } else {
+            const field = delta.type === 'thinking_delta' ? 'thinking' : delta.type === 'signature_delta' ? 'signature' : undefined
+            if (activeBlock !== 'thinking' || !field || typeof delta[field] !== 'string') break
+          }
+          continue
+        }
         const delta = evt.delta as {
           type: string
           text?: string
@@ -253,6 +319,12 @@ export async function* streamAnthropic(
         }
       } else if (type === 'content_block_stop') {
         const index = evt.index as number
+        if (textOnly) {
+          if (!activeBlock || index !== blockIndex) break
+          activeBlock = undefined
+          blockIndex++
+          continue
+        }
         const blk = toolBlocks.get(index)
         if (blk) {
           toolBlocks.delete(index)
@@ -262,10 +334,23 @@ export async function* streamAnthropic(
           else yield { type: 'tool_call', id: blk.id, name: blk.name, args }
         }
       } else if (type === 'message_delta') {
+        if (textOnly) {
+          const delta = wireObject(evt.delta)
+          if (phase === 'start' || activeBlock || !delta ||
+              (delta.stop_sequence != null && typeof delta.stop_sequence !== 'string')) break
+          phase = 'tail'
+          const raw = delta.stop_reason
+          if (raw == null) continue
+          if (reportedStop || (raw !== 'end_turn' && raw !== 'stop_sequence' &&
+              raw !== 'max_tokens' && raw !== 'refusal')) break
+          reportedStop = raw === 'stop_sequence' ? 'end_turn' : raw
+          continue
+        }
         const delta = evt.delta as { stop_reason?: string }
         takeUsage(evt.usage as AnthropicUsage | undefined)
         if (delta?.stop_reason) stopReason = mapStopReason(delta.stop_reason)
       } else if (type === 'error') {
+        if (textOnly) break
         const err = evt.error as { message?: string; type?: string }
         const message = err?.message ?? (isEn() ? 'Stream error' : '流式错误')
         // 上下文超限等按正文归类（见 inbandError），其余（overloaded 等）照旧按可重试的服务端错误。
@@ -275,6 +360,11 @@ export async function* streamAnthropic(
         }
         yield { type: 'done', stopReason: 'error' }
         return
+      } else if (textOnly) {
+        if (type === 'ping') continue
+        if (type === 'message_stop') terminalStop = reportedStop
+        // Closing iterateSSE cancels even a body that remains open after message_stop.
+        break
       }
     }
   } catch (e) {
@@ -282,8 +372,14 @@ export async function* streamAnthropic(
       yield { type: 'done', stopReason: 'aborted' }
       return
     }
-    yield { type: 'error', error: { kind: 'network', retryable: true, message: describeNetError(e) } }
+    if (!textOnly)
+      yield { type: 'error', error: { kind: 'network', retryable: true, message: describeNetError(e) } }
     yield { type: 'done', stopReason: 'error' }
+    return
+  }
+
+  if (textOnly) {
+    yield { type: 'done', stopReason: terminalStop ?? 'error' }
     return
   }
 

@@ -186,6 +186,13 @@ export type StreamEvent =
   | { type: 'error'; error: NormalizedError }
   | { type: 'done'; stopReason: StopReason }
 
+/** 网络和错误显示由宿主注入；纯文字宿主只接受可确认终止的文字流。 */
+export interface AdapterTransport {
+  fetchModel: (url: string, init: RequestInit) => Promise<Response>
+  describeNetError: (error: unknown) => string
+  textOnly?: boolean
+}
+
 /** 单个适配器的连接配置（密钥已解密，仅在主进程内传递）。 */
 export interface AdapterConfig {
   baseURL: string
