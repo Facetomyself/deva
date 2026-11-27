@@ -1,10 +1,9 @@
 import { createHash } from 'node:crypto'
 import { isSharedArrayBuffer, isUint8Array } from 'node:util/types'
 import { textAttachmentProblem } from './text-file'
+import { isProjectDocsLabel, MAX_PROJECT_DOCUMENTS, MAX_PROJECT_TEXT_BYTES } from './project-docs-format'
 
 export const MAX_SNAPSHOT_BYTES = 2 * 1024 * 1024
-const MAX_DOCUMENTS = 32, MAX_TOTAL_TEXT_BYTES = 256 * 1024
-const badProjectChar = /[/:\\\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u2028-\u202e\u2066-\u2069\uD800-\uDFFF]/u
 export const isSnapshotDigest = (v: unknown): v is string => typeof v === 'string' && v.length === 64 && !/[^a-f0-9]/u.test(v)
 type ErrorCode = 'invalid_digest' | 'digest_mismatch' | 'invalid_snapshot' | 'snapshot_limit'
 export class SnapshotError extends Error {
@@ -56,13 +55,12 @@ function parseV1(source: string): ProjectSnapshot {
     if (key === 'version') { expect('1'); return }
     if (key === 'project') {
       project = string()
-      if (!project || project !== project.trim() || project === '.' || project === '..' ||
-          badProjectChar.test(project) || Buffer.byteLength(project) > 80) invalid()
+      if (!isProjectDocsLabel(project)) invalid()
       return
     }
     expect('[')
     do {
-      if (documents.length >= MAX_DOCUMENTS) limit()
+      if (documents.length >= MAX_PROJECT_DOCUMENTS) limit()
       let name = '', text = ''
       object(['name', 'text'], field => { if (field === 'name') name = string(); else text = string() })
       const issue = textAttachmentProblem({ name, text })
@@ -73,7 +71,7 @@ function parseV1(source: string): ProjectSnapshot {
       names.add(canonical)
       const bytes = Buffer.byteLength(text)
       totalTextBytes += bytes
-      if (totalTextBytes > MAX_TOTAL_TEXT_BYTES) limit()
+      if (totalTextBytes > MAX_PROJECT_TEXT_BYTES) limit()
       documents.push(Object.freeze({ name, text, bytes }))
     } while (take(','))
     expect(']')
