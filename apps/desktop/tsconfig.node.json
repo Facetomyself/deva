@@ -3,6 +3,7 @@
   "include": [
     "electron.vite.config.*",
     "vite.headless.config.ts",
+    "vite.snapshot-check.config.ts",
     "src/headless/*.ts",
     "src/main/**/*",
     "src/preload/**/*",

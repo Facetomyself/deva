@@ -36,6 +36,9 @@ jobs:
 
       - run: node --test apps/desktop/test/node-session-storage.test.mjs apps/desktop/test/desktop-model-protocols.test.mjs apps/desktop/test/local-text-file.test.mjs
 
+      - name: Check operator-reviewed snapshot bytes offline
+        run: pnpm --filter @deva/desktop build:snapshot-check && node --test apps/desktop/test/{project-snapshot,snapshot-check-cli}.test.mjs
+
       - run: pnpm build
 
       - run: pnpm --filter @deva/desktop build:headless && node --test apps/desktop/test/headless-chat.test.mjs
