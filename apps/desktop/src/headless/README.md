@@ -68,7 +68,33 @@ printf '%s\n' '{"version":1,"project":"发布手册","documents":[{"name":"入�
 
 成功输出 `{"ok":true,"version":1,"documents":1,"textBytes":40,"sourceBytes":125}`。实际使用时，把**审核时独立记录**的 64 位小写 SHA-256 传给 `--sha256`，由 shell 用 `< "$SNAPSHOT_FILE"` 把待核对文件接到标准输入；直接用待核对文件当场算出的摘要只能自检格式，不能证明它是先前审核的版本。格式、摘要、输入或限额有误时退出码为 `1`，参数用法有误为 `2`；均不输出文档名或正文。超过 2 MiB 的管道输入在收到超额字节时即失败，无需等发送端关闭。
 
-该工具不读取项目目录、登录令牌或环境变量中的摘要，也不连接模型、发布快照或授予访问权限。它独立于 Web 镜像构建。[只读项目资料提案](./project-docs-design.md)中的只读挂载、登录后列表与预览、撤销流程仍待实现；默认 Compose 和现有网页保持原样。
+该工具不读取项目目录、登录令牌或环境变量中的摘要，也不连接模型、发布快照或授予访问权限。它独立于 Web 镜像构建。校验通过后，仍须由部署者执行下面的步骤，网页才能查看资料。
+
+## 发布、查看和撤销只读项目资料（可选）
+
+默认启动方式没有「项目资料」入口，也没有宿主文件挂载。要发布，先在**仓库、构建上下文和聊天卷以外**的部署者专用目录准备一份 v1 JSON 快照，逐条审核文件名和正文，并独立保存其原始字节的 SHA-256。只发布一份普通、单硬链接文件，不发布目录、符号链接或其他系统文件。容器以 UID 1000 读取这一个文件；准备权限时兼顾容器可读、宿主上其他用户不可遍历其专用目录。首次使用前构建上面的离线工具。
+
+在仓库根目录执行，沿用基础版的模型、登录令牌和 Compose 项目名。下面两个变量来自部署者，而非聊天请求：
+
+```bash
+export DEVA_PROJECT_DOCS_FILE=/absolute/private/staging/reviewed.json
+export DEVA_PROJECT_DOCS_SHA256="${REVIEWED_SHA256:?设置先前独立记下的 64 位小写摘要}"
+node apps/desktop/out/snapshot-check/check.mjs --sha256 "$DEVA_PROJECT_DOCS_SHA256" < "$DEVA_PROJECT_DOCS_FILE" &&
+  docker compose -f compose.yaml -f compose.project-docs.yaml up --build -d --force-recreate --wait
+```
+
+[可选 Compose 配置](../../../../compose.project-docs.yaml)只挂载该文件。服务只接受固定位置的独立只读文件挂载，核对 Linux 内核挂载标识、实际读取字节、摘要和快照格式；给一个普通文件改成 `0444` 并不满足条件。显式要求启用但验证失败会退出，不会进入健康状态，也不会自动降级去读取源目录。它需要可读取的真实 procfs 及每个文件描述符的挂载标识。默认关闭时不要求这些资料验证条件。
+
+重新登录，点击「项目资料」才会读取清单，点击一行才读取该份正文。网页按纯文字显示 Markdown/HTML，打开资料不自动建立附件、不请求模型，也不把内容写入聊天卷。不同有效登录共享同一份发布物。关闭、退出、标签页隐藏或在其他同源标签页切换登录会清掉当前预览；这不是对已交付副本的远程擦除。反向代理需保留 Host，禁止缓存 `/api/project-docs` 及其子路径，并隐藏这些请求的文档 ID。
+
+**撤销**：保留同一个 Compose 项目和聊天卷，先停掉旧服务（包括其他仍可访问的副本）并确认已退出，再只用基础配置重建。无需删除源文件或数据卷：
+
+```bash
+docker compose -f compose.yaml -f compose.project-docs.yaml stop deva &&
+  (unset DEVA_PROJECT_DOCS_FILE DEVA_PROJECT_DOCS_SHA256; docker compose -f compose.yaml up -d --force-recreate --wait)
+```
+
+换版亦先停旧服务，用新文件、新的已审核摘要重新发布。仅替换或删除宿主原文件不会改变正在运行的快照。重新登录后旧文档 ID 失效，关闭资料时原有聊天仍可续聊。更多授权边界与验收条件见[只读资料设计](./project-docs-design.md)。
 
 ## 从源码验证
 

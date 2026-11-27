@@ -341,7 +341,7 @@ When memory is full, the next write by the model first consolidates the existing
 
 ## Headless text chat (experimental)
 
-On Linux, [run the basic Web chat with Docker Compose](apps/desktop/src/headless/README.md). Sign in, create a conversation, stream or stop a reply, and continue it after recreating the container. Small text attachments can be previewed locally and are shared only when you send. The service publishes to loopback by default and uses a dedicated data volume and one operator-configured model using OpenAI Chat Completions, OpenAI Responses, or Anthropic Messages. It does not run desktop tools.
+On Linux, [run the basic Web chat with Docker Compose](apps/desktop/src/headless/README.md). Sign in, create a conversation, stream or stop a reply, and continue it after recreating the container. Small text attachments can be previewed locally and are shared only when you send. The service publishes to loopback by default and uses a dedicated data volume and one operator-configured model using OpenAI Chat Completions, OpenAI Responses, or Anthropic Messages. It does not run desktop tools. An operator can optionally [publish a read-only snapshot of selected project documents](apps/desktop/src/headless/README.md#发布查看和撤销只读项目资料可选). Browsing it does not call a model; the default deployment mounts no project directory.
 
 ## Build from Source
 

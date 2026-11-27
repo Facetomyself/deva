@@ -2,8 +2,11 @@ import { readFileSync, readdirSync } from 'node:fs'
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { lockHome, options, sessions } from './access'
+import { lockHome, options, sessions, type OwnerSession } from './access'
 import { ChatError, createTextChat } from './chat'
+import { loadMountedProjectSnapshot, SnapshotMountError } from './project-mount'
+import { SnapshotError } from './project-snapshot'
+import { PROJECT_DOCS, projectDocumentResponses, type ProjectResponse } from './project-documents'
 
 class HttpError extends Error {
   constructor(readonly status: number, readonly code: string) { super(code) }
@@ -12,6 +15,23 @@ const fail = (status: number, code: string): never => { throw new HttpError(stat
 const json = (res: ServerResponse, status: number, data: unknown) => {
   res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' }); res.end(JSON.stringify(data))
 }
+function sendDocument(res: ServerResponse, session: OwnerSession, payload: ProjectResponse): void {
+  const ttl = session.expires - Date.now()
+  if (ttl <= 0) fail(401, 'auth')
+  const stop = () => { res.destroy() }
+  const timer = setTimeout(stop, Math.min(ttl, 10_000)).unref()
+  const cleanup = () => {
+    clearTimeout(timer); session.aborts.delete(stop)
+    res.off('close', cleanup); res.off('finish', cleanup)
+  }
+  session.aborts.add(stop); res.once('close', cleanup); res.once('finish', cleanup)
+  try {
+    res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Content-Length': payload.bytes,
+      'Referrer-Policy': 'no-referrer', 'X-Deva-Session-Ttl-Ms': Math.min(ttl, 8 * 3600_000) })
+    res.end(payload.json)
+  } catch (error) { cleanup(); throw error }
+}
+
 async function body(req: IncomingMessage, keys: string[], limit = 52 * 1024, optional: string[] = []): Promise<Record<string, unknown>> {
   if (!/^application\/json(?:\s*;\s*charset=utf-8)?$/i.test(req.headers['content-type'] ?? '') || (req.headers['content-encoding'] ?? 'identity') !== 'identity') fail(415, 'json_required')
   if (Number(req.headers['content-length'] ?? 0) > limit) fail(413, 'limit')
@@ -44,6 +64,8 @@ function assets() {
 
 function start() {
   const { host, port, site, owner, provider } = options()
+  // Validate the explicit grant before creating state or listening; default startup does no snapshot I/O.
+  const documents = projectDocumentResponses(loadMountedProjectSnapshot(process.env.DEVA_PROJECT_DOCS_SHA256))
   const pages = assets(); lockHome() // FD remains open for the lifetime of this dedicated CLI process.
   const auth = sessions(owner, site.protocol === 'https:'), chat = createTextChat(provider)
   let closing = false
@@ -62,14 +84,20 @@ function start() {
         res.writeHead(200, { 'Content-Type': page.type, 'Content-Length': page.bytes.length }); res.end(method === 'HEAD' ? undefined : page.bytes); return
       }
       if (!path.startsWith('/api/') || path.includes('?')) fail(404, 'missing')
-      if (method !== 'GET' && method !== 'POST') fail(405, 'method')
-      if (method === 'POST' && req.headers.origin !== site.origin) fail(403, 'origin')
+      const docRoute = path === PROJECT_DOCS || path.startsWith(`${PROJECT_DOCS}/`)
+      if (!docRoute && method !== 'GET' && method !== 'POST') fail(405, 'method')
+      if ((method === 'POST' || (docRoute && method !== 'GET' && method !== 'HEAD')) && req.headers.origin !== site.origin) fail(403, 'origin')
       if (method === 'POST' && path === '/api/login') {
         const { token } = await body(req, ['token'], 1024)
         const cookie = auth.login(token) ?? fail(401, 'auth')
         res.setHeader('Set-Cookie', cookie); return json(res, 200, { ok: true })
       }
       const session = auth.current(req) ?? fail(401, 'auth')
+      if (docRoute) {
+        const payload = documents?.(path) ?? fail(404, 'missing')
+        if (method !== 'GET') { res.setHeader('Allow', 'GET'); return fail(405, 'method') }
+        return sendDocument(res, session, payload)
+      }
       // A slow request body may outlive this login, a closed connection or shutdown.
       const input = async (keys: string[], limit?: number, optional?: string[]) => {
         const data = await body(req, keys, limit, optional)
@@ -82,7 +110,8 @@ function start() {
       }
       if (path === '/api/sessions' || path === '/api/sessions/archived') {
         const archived = path.endsWith('/archived')
-        if (method === 'GET') return json(res, 200, { model: provider.model, sessions: chat.list(archived) })
+        if (method === 'GET') return json(res, 200, { model: provider.model, sessions: chat.list(archived),
+          ...(!archived && documents ? { projectDocs: true } : {}) })
         if (archived) fail(405, 'method')
         await input([]); return json(res, 201, chat.create())
       }
@@ -143,6 +172,7 @@ function start() {
 try { start() } catch (err) {
   const message = err instanceof Error ? err.message : ''
   // Only our setting/directory diagnostics are safe for deployment logs; never print URLs, prompts or secrets.
-  console.error(/^(Invalid DEVA_|Invalid model configuration|Web data directory is busy|An empty or previously initialized)/u.test(message) ? message : 'Deva Web startup failed: check the settings, data directory and web build')
+  if (err instanceof SnapshotError || err instanceof SnapshotMountError) console.error(`Deva Web project documents: ${err.code}`)
+  else console.error(/^(Invalid DEVA_|Invalid model configuration|Web data directory is busy|An empty or previously initialized)/u.test(message) ? message : 'Deva Web startup failed: check the settings, data directory and web build')
   process.exitCode = 1
 }

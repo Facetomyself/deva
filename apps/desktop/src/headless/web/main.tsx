@@ -3,6 +3,7 @@ import { createRoot } from 'react-dom/client'
 import { ComposerAction } from '../../renderer/src/redesign/ComposerAction'
 import { normalizeSessionTitle } from '../../shared/session-title'
 import type { TextAttachment } from '../text-file'
+import { notifyProjectDocsAuthChange, ProjectDocs } from './project-docs'
 import { SessionButton, TitleEditor, type TitleEdit } from './session-organizer'
 import { attachmentIssue, TextAttachmentCard } from './text-attachment'
 import { readTextAttachment } from './read-text-file'
@@ -13,7 +14,7 @@ import './web.css'
 type Row = { id: string; title: string; archived?: true }
 type Message = { role: 'user'; text: string; attachment?: TextAttachment } | { role: 'assistant'; text: string }
 type View = Row & { messages: Message[]; revision: number; active: string | null }
-type Index = { sessions: Row[]; model: string }
+type Index = { sessions: Row[]; model: string; projectDocs?: true }
 type Mutation = 'title' | 'archive' | 'restore'
 type DraftFile = { key: number; name: string; size: number; attachment?: TextAttachment }
 type Scope = {
@@ -110,6 +111,7 @@ function App() {
     try {
       if (token !== undefined) {
         await request('/api/login', { token })
+        notifyProjectDocsAuthChange()
         token = undefined
         setIndex(undefined)
       }
@@ -312,8 +314,11 @@ function Chat({ initial, signOut }: { initial: Index; signOut: (didExpire: boole
     const s = scope.current
     setNotice('')
     try {
-      if (kind === 'logout') { await get('/api/logout', {}); leave(false) }
-      else {
+      if (kind === 'logout') {
+        await get('/api/logout', {})
+        notifyProjectDocsAuthChange()
+        leave(false)
+      } else {
         const next = await get<View>(sessionsPath, {})
         if (current(s)) { saved(select(), next); void library.reload() }
       }
@@ -491,6 +496,7 @@ function Chat({ initial, signOut }: { initial: Index; signOut: (didExpire: boole
         <div className="web-conv-top">
           <h1>{view?.title || t('Chat', '对话')}</h1>
           <div className="web-header-actions">
+            {initial.projectDocs === true && <ProjectDocs t={t} session={life.signal} disabled={navigation === 'logout'} onExpire={() => leave(true)} />}
             {view && !readOnly && !edit && <button type="button" ref={rename} className="web-secondary" data-testid="rename-session"
               disabled={metadataDisabled} onClick={startTitle}>{t('Rename', '重命名')}</button>}
             {view && !archived && !view.archived && <SessionButton data-testid="archive-session" pending={writing === 'archive'}
