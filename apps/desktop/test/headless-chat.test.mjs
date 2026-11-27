@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
 import { randomBytes, randomUUID } from 'node:crypto'
 import { once } from 'node:events'
-import { lstat, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises'
+import { lstat, mkdtemp, readdir, readFile, realpath, rm, writeFile } from 'node:fs/promises'
 import { createServer, request as httpRequest } from 'node:http'
 import { tmpdir } from 'node:os'
 import { basename, dirname, isAbsolute, join } from 'node:path'
@@ -10,6 +10,7 @@ import { json as readJson } from 'node:stream/consumers'
 import test from 'node:test'
 import { setTimeout as delay } from 'node:timers/promises'
 import { fileURLToPath } from 'node:url'
+import { assertCall, gateway, modelStream, protocols, route } from './headless-model-wire.mjs'
 
 // pnpm --filter @deva/desktop build:headless && node --test apps/desktop/test/headless-chat.test.mjs
 const bundle = process.env.DEVA_TEST_SERVER ?? fileURLToPath(new URL('../out/headless/server.mjs', import.meta.url))
@@ -31,49 +32,70 @@ async function* ndjson(response) {
   }
   assert.equal(tail, '', 'last NDJSON frame ends with a newline')
 }
-async function finish(frames, text, reason) {
+async function finish(frames, text, terminal) {
   const events = []
   for await (const event of frames) events.push(event)
-  assert.deepEqual(events.pop(), { type: 'done', reason })
+  assert.deepEqual(events.pop(), typeof terminal === 'string' ? { type: 'done', reason: terminal } : terminal)
   for (const event of events) assert.deepEqual(event, { type: 'delta', text: event.text })
   assert.equal(events.map(event => event.text).join(''), text)
 }
 
-test('compiled headless chat authenticates, streams, stops and resumes stored history', { timeout: 45000 }, async t => {
+const operatorEnv = (home, origin, port, token, upstream, key, protocol) => ({
+  HOME: home, USERPROFILE: home, DEVA_HOME: home, DEVA_HOST: host, DEVA_PORT: String(port), DEVA_ORIGIN: origin,
+  DEVA_WEB_TOKEN: token, DEVA_MODEL_BASE_URL: upstream, DEVA_MODEL: model, DEVA_MODEL_API_KEY: key,
+  ...(protocol === undefined ? {} : { DEVA_MODEL_PROTOCOL: protocol })
+})
+function launch(env, guard) {
+  const preloader = `data:text/javascript,${encodeURIComponent(guard)}`
+  const child = spawn(process.execPath, ['--import', preloader, basename(bundle)], { cwd: dirname(bundle), env, stdio: ['ignore', 'pipe', 'pipe'] })
+  let log = '', spawnError
+  child.on('error', e => { spawnError = e })
+  for (const pipe of [child.stdout, child.stderr]) pipe.on('data', chunk => { log += chunk })
+  return { child, log: () => log, failure: () => spawnError }
+}
+async function halt(child) {
+  if (!child?.pid || child.exitCode !== null || child.signalCode !== null) return
+  const exited = once(child, 'exit'), force = setTimeout(() => child.kill('SIGKILL'), 2000)
+  child.kill('SIGTERM')
+  try { await exited } finally { clearTimeout(force) }
+}
+
+for (const protocol of Object.keys(protocols)) test(`compiled headless ${protocol} authenticates, streams, stops and resumes stored history`, { timeout: 45000 }, async t => {
   assert.ok(isAbsolute(bundle))
   const home = await mkdtemp(join(await realpath(tmpdir()), 'deva-headless-chat-')), inode = await lstat(home)
   const token = randomBytes(32).toString('base64url'), key = randomBytes(24).toString('base64url')
   const calls = [], first = [user('first question'), assistant('complete answer')]
   const stopped = [...first, user('second question'), assistant('visible partial')], third = [...stopped, user('follow-up')]
-  let completeFirst, completeThird, held, child, cookie, port, origin
+  const modern = protocol !== 'openai', resumedText = modern ? 'resumed answer 🙂' : 'resumed answer'
+  const runs = []
+  let completeFirst, completeThird, held, ending, edge, child, cookie, port, origin
   const fixture = createServer(async (req, res) => {
-    const call = { method: req.method, path: req.url, auth: req.headers.authorization }
+    const call = { method: req.method, path: req.url, headers: req.headers }
     const n = calls.push(call)
-    if (req.method !== 'POST' || req.url !== '/v1/chat/completions') return res.writeHead(404).end()
+    if (req.method !== 'POST' || req.url !== route(protocol)) return res.writeHead(404).end()
     try {
-      let input = ''
-      for await (const chunk of req) input += chunk
-      call.body = JSON.parse(input)
+      call.body = await readJson(req)
       res.writeHead(200, { 'content-type': 'text/event-stream' })
-      const sse = (delta, finish_reason = null) => res.write(`data: ${JSON.stringify({
-        id: 'chatcmpl-fixture', object: 'chat.completion.chunk', created: 1, model, choices: [{ index: 0, delta, finish_reason }]
-      })}\n\n`)
-      sse({ role: 'assistant', content: ['complete ', stopped[3].text, 'resumed answer'][n - 1] })
-      const done = () => { sse({}, 'stop'); res.end('data: [DONE]\n\n') }
-      if (n === 1) { completeFirst = () => { sse({ content: 'answer' }); done() }; return }
-      if (n === 2) { held = res; return } // Leave the actual provider response open until the server aborts it.
-      if (n === 3) { completeThird = done; return }
-      done()
+      const wire = modelStream(res, protocol, model)
+      if (n === 1) {
+        completeFirst = async () => { await wire.delta('answer'); wire.terminal(); res.end() }
+        return await wire.delta('complete ')
+      }
+      if (n === 2) { held = res; return await wire.delta(stopped[3].text) } // Held until Stop aborts it.
+      if (n === 3) {
+        ending = res
+        completeThird = () => { wire.terminal(); if (!modern) res.end() }
+        return await wire.delta(resumedText, modern)
+      }
+      if (!edge) return res.end()
+      const { write, text } = edge
+      edge.release = async () => { await write(wire, res); res.end() }
+      if (text) await wire.delta(text)
+      else await edge.release()
     } catch (error) { res.destroy(error) }
   })
-  async function halt() {
-    if (!child?.pid || child.exitCode !== null || child.signalCode !== null) return
-    const exited = once(child, 'exit'), force = setTimeout(() => child.kill('SIGKILL'), 2000)
-    child.kill('SIGTERM')
-    try { await exited } finally { clearTimeout(force) }
-  }
   t.after(async () => {
-    try { await halt() } finally {
+    try { await halt(child) } finally {
       fixture.closeAllConnections()
       if (fixture.listening) await close(fixture)
       const current = await lstat(home)
@@ -83,7 +105,12 @@ test('compiled headless chat authenticates, streams, stops and resumes stored hi
     }
   })
   assert.equal(inode.mode & 0o777, 0o700)
-  const upstream = `http://${host}:${await listen(fixture)}/v1`
+  const upstreamOrigin = `http://${host}:${await listen(fixture)}`, upstream = upstreamOrigin + gateway(protocol)
+  // Native fetch and the real loopback socket are used for every fixture request. Block unrelated fetches before network I/O.
+  const guard = `const nativeFetch = globalThis.fetch; globalThis.fetch = (input, init) => {
+    if (new URL(input instanceof Request ? input.url : input).origin === ${JSON.stringify(upstreamOrigin)}) return nativeFetch(input, init);
+    console.error('unexpected non-fixture fetch'); throw Error('fixture only');
+  }`
   const request = (path, { body, headers, postOrigin = origin } = {}) => fetch(origin + path, {
     redirect: 'manual', signal: deadline(), method: body === undefined ? 'GET' : 'POST', body: JSON.stringify(body),
     headers: { ...(cookie ? { Cookie: cookie } : {}), ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
@@ -96,22 +123,20 @@ test('compiled headless chat authenticates, streams, stops and resumes stored hi
     return [JSON.parse(text), res.headers]
   }
   const error = async (path, status, code, options) => assert.deepEqual((await json(path, status, options))[0], { error: code })
-  async function boot(retries = 2) {
+  async function boot(restart = false, retries = 2) {
     if (!port) {
       const reservation = createServer()
       port = await listen(reservation); await close(reservation)
     }
     origin = `http://${host}:${port}`
-    const env = { HOME: home, USERPROFILE: home, DEVA_HOME: home, DEVA_HOST: host, DEVA_PORT: String(port),
-      DEVA_ORIGIN: origin, DEVA_WEB_TOKEN: token, DEVA_MODEL_BASE_URL: upstream, DEVA_MODEL: model, DEVA_MODEL_API_KEY: key }
-    child = spawn(process.execPath, [basename(bundle)], { cwd: dirname(bundle), env, stdio: ['ignore', 'pipe', 'pipe'] })
-    let log = '', spawnError
-    child.on('error', e => { spawnError = e })
-    for (const pipe of [child.stdout, child.stderr]) pipe.on('data', chunk => { log += chunk })
+    const base = upstream + (protocol === 'anthropic' ? (restart ? '/v1/' : '/') : '/v1')
+    const env = operatorEnv(home, origin, port, token, base, key, modern || restart ? protocol : undefined)
+    const run = launch(env, guard)
+    child = run.child; runs.push(run)
     const signal = deadline()
-    while (!log.includes(`Deva Web listening on ${origin}\n`)) {
-      if (child.exitCode === 1 && retries && log.includes('could not listen on the configured address')) { port = 0; return boot(retries - 1) }
-      if (spawnError || child.exitCode !== null || child.signalCode !== null || signal.aborted) throw new Error(`headless CLI startup failed: ${spawnError ?? log}`)
+    while (!run.log().includes(`Deva Web listening on ${origin}\n`)) {
+      if (child.exitCode === 1 && retries && run.log().includes('could not listen on the configured address')) { port = 0; return boot(restart, retries - 1) }
+      if (run.failure() || child.exitCode !== null || child.signalCode !== null || signal.aborted) throw new Error(`headless CLI startup failed: ${run.failure() ?? run.log()}`)
       await delay(25)
     }
     assert.deepEqual((await json('/healthz'))[0], { ok: true })
@@ -170,13 +195,20 @@ test('compiled headless chat authenticates, streams, stops and resumes stored hi
   const fullTitle = `${cap}界`, pinned = await post(rename, { title: fullTitle, revision: empty.revision })
   assert.deepEqual(pinned, { ...renamed, title: fullTitle, revision: 3 }); assert.equal(calls.length, 0)
 
-  const opening = input(first[0].text, pinned.revision), openingFrames = await send(opening)
+  const opening = input(first[0].text, pinned.revision)
+  await error(turn, 401, 'auth', { body: opening, headers: { Cookie: '' } })
+  for (const override of [{ protocol: 'responses' }, { endpoint: upstream + '/browser-endpoint' },
+    { baseURL: upstream + '/browser-base' }, { model: 'browser-model' }]) {
+    await error(turn, 400, 'invalid_request', { body: { ...opening, ...override } })
+  }
+  assert.deepEqual(await state(), pinned); assert.equal(calls.length, 0)
+  const openingFrames = await send(opening)
   assert.deepEqual((await openingFrames.next()).value, { type: 'delta', text: 'complete ' })
   const live = (await json(session, 200, other))[0], liveTitle = '流式中的标题'
   assert.deepEqual(live, { ...pinned, active: opening.turnId, messages: first.slice(0, 1), revision: pinned.revision + 1 })
   const liveRename = await post(rename, { title: liveTitle, revision: live.revision }, other)
   assert.deepEqual(liveRename, { ...live, title: liveTitle, revision: live.revision + 1 })
-  completeFirst()
+  await completeFirst()
   await finish(openingFrames, 'answer', 'complete')
   const completed = await state()
   assert.deepEqual(completed, { ...liveRename, messages: first, revision: liveRename.revision + 1, active: null })
@@ -226,32 +258,112 @@ test('compiled headless chat authenticates, streams, stops and resumes stored hi
 
   const oldCookie = cookie, legacyId = 'web_00000000-0000-4000-8000-000000000087', legacyRow = { id: legacyId, title: 'Legacy prompt' }
   const legacyFile = join(home, 'data', 'chats', `${legacyId}.json`), legacyMessages = [user(legacyRow.title), assistant('Legacy answer')]
-  await halt()
+  await halt(child)
   await writeFile(legacyFile, JSON.stringify({ ...legacyRow, createdAt: 1, updatedAt: 2, webText: true,
     messages: legacyMessages.map(({ role, text }) => ({ role, content: [{ type: 'text', text }] })) }), { flag: 'wx', mode: 0o600 })
   const legacyDisk = await snapshot(legacyFile)
-  await boot(); await error(sessions, 401, 'auth'); cookie = await login()
+  await boot(true); await error(sessions, 401, 'auth')
+  await error(session, 401, 'auth', { headers: { Cookie: oldCookie } }); cookie = await login()
   assert.notEqual(cookie, oldCookie); assert.deepEqual(await state(), archived)
   await lists([legacyRow], [archivedRow])
   const legacy = { ...legacyRow, messages: legacyMessages, revision: 2, active: null }, legacyPath = `${sessions}/${legacyId}`
   assert.deepEqual((await json(legacyPath))[0], legacy)
   assert.deepEqual(await snapshot(legacyFile), legacyDisk); assert.deepEqual(await snapshot(file), onDisk)
   const resume = input(third[4].text, archived.revision), resumed = await send(resume), finalRow = { id, title: cleared.title }
-  assert.deepEqual((await resumed.next()).value, { type: 'delta', text: 'resumed answer' })
+  assert.deepEqual((await resumed.next()).value, { type: 'delta', text: resumedText })
   assert.deepEqual(await state(), { ...finalRow, messages: third, revision: archived.revision + 1, active: resume.turnId })
-  await lists([finalRow, legacyRow]); completeThird(); await finish(resumed, '', 'complete')
+  await lists([finalRow, legacyRow])
+  if (modern) {
+    const providerClosed = once(ending, 'close')
+    completeThird()
+    await Promise.race([Promise.all([finish(resumed, '', 'complete'), providerClosed]),
+      delay(2000, undefined, { ref: false }).then(() => assert.fail('native terminal waited for upstream HTTP EOF'))])
+    assert.equal(ending.writableEnded, false, 'fixture never ended the native terminal response')
+  } else {
+    completeThird(); await finish(resumed, '', 'complete')
+  }
   const final = await state()
-  assert.deepEqual(final, { ...finalRow, messages: [...third, assistant('resumed answer')], revision: archived.revision + 2, active: null })
+  assert.deepEqual(final, { ...finalRow, messages: [...third, assistant(resumedText)], revision: archived.revision + 2, active: null })
   assert.deepEqual(await post(`${legacyPath}/title`, { title: '', revision: legacy.revision }), legacy)
   assert.deepEqual(await snapshot(legacyFile), legacyDisk); await lists([finalRow, legacyRow])
   const again = await post(archive, { archived: true, revision: final.revision })
   assert.deepEqual(await post(archive, { archived: false, revision: again.revision }), { ...final, revision: final.revision + 2 })
-  await lists([finalRow, legacyRow])
-  await halt(); assert.equal(calls.length, 3)
-  for (const [i, { method, path, auth, body }] of calls.entries()) {
-    assert.deepEqual({ method, path, auth }, { method: 'POST', path: '/v1/chat/completions', auth: `Bearer ${key}` })
-    assert.equal(body.model, model); assert.equal(body.stream, true)
-    assert.deepEqual(body.stream_options, { include_usage: true }); assert.equal(Object.hasOwn(body, 'tools'), false)
-    assert.deepEqual(body.messages, [first.slice(0, 1), stopped.slice(0, 3), third][i].map(({ role, text }) => ({ role, content: text })))
+  await lists([finalRow, legacyRow]); assert.equal(calls.length, 3)
+  const expected = [first.slice(0, 1), stopped.slice(0, 3), third]
+  if (modern) {
+    const privateText = ['fixture-private-marker', token, key, upstream, home, cookie].join(' ')
+    const otherProtocol = protocol === 'responses' ? 'anthropic' : 'responses'
+    const cases = [
+      ['EOF after text', 'upstream', () => {}],
+      ['bare [DONE] after text', 'upstream', wire => wire.done()],
+      ['native output token limit', 'limit', wire => wire.terminal(true)],
+      ['native tool item', 'upstream', wire => wire.tool()],
+      ['mismatched named terminal', 'upstream', wire => wire.mismatchedTerminal()],
+      ['incomplete native result presented as complete', 'upstream', wire => wire.inconsistent()],
+      ...(protocol === 'responses' ? [['unsolicited item only in the final response', 'upstream', wire => wire.finalAction()]] : []),
+      ['in-band provider error stays opaque', 'upstream', wire => wire.error(privateText)],
+      ['foreign event family', 'upstream', async (_, res) => {
+        const foreign = modelStream(res, otherProtocol, model)
+        await foreign.delta('foreign text'); foreign.terminal()
+      }],
+      ['SSE wire budget before native terminal', 'upstream', (wire, res) => {
+        const comment = `: ${'a'.repeat(8192)}\r\n\r\n`
+        for (let i = 0; i < 129; i++) res.write(comment)
+        wire.terminal()
+      }],
+      ['private thinking without visible text', 'upstream', wire => wire.thought(privateText), ''],
+      ['only whitespace before native completion', 'upstream', wire => wire.terminal(), ' \t ']
+    ]
+    let previous = await state()
+    for (const [name, code, write, text = 'safe partial'] of cases) await t.test(name, async () => {
+      const body = input(name, previous.revision)
+      edge = { text, write }
+      const history = [...previous.messages, user(name)]
+      expected.push(history)
+      const frames = await send(body)
+      if (text) {
+        assert.deepEqual((await frames.next()).value, { type: 'delta', text })
+        await edge.release()
+      }
+      await finish(frames, '', { type: 'error', error: code })
+      edge = undefined
+      const messages = text.trim() ? [...history, assistant(text)] : history
+      const saved = await state()
+      assert.deepEqual(saved, { ...previous, messages, active: null, revision: previous.revision + (text.trim() ? 2 : 1) })
+      assert.deepEqual(JSON.parse(await readFile(file, 'utf8')).messages,
+        messages.map(({ role, text }) => ({ role, content: [{ type: 'text', text }] })))
+      assert.equal(calls.length, expected.length, 'one provider POST and no automatic retries')
+      previous = saved
+    })
+  }
+  await halt(child)
+  assert.equal(calls.length, expected.length, 'only generation requests reached the fixture')
+  for (const [i, call] of calls.entries()) assertCall(call, protocol, model, key, expected[i])
+  const outgoing = JSON.stringify(calls)
+  for (const secret of [token, ...[cookie, oldCookie, other.headers.Cookie].map(value => value.split('=')[1])])
+    assert.ok(!outgoing.includes(secret), 'owner credential reached the provider')
+  assert.ok(runs.every(run => !run.log().includes('unexpected non-fixture fetch')), 'extra traffic outside the fixture')
+})
+
+test('invalid headless protocol exits before binding or creating a volume', { timeout: 45000 }, async t => {
+  const home = await mkdtemp(join(await realpath(tmpdir()), 'deva-headless-config-')), inode = await lstat(home)
+  t.after(async () => {
+    const current = await lstat(home)
+    assert.equal(await realpath(home), home)
+    assert.ok(current.isDirectory() && current.dev === inode.dev && current.ino === inode.ino)
+    await rm(home, { recursive: true })
+  })
+  const volume = join(home, 'new-volume'), port = 8787, origin = `http://${host}:${port}`, key = randomBytes(24).toString('base64url')
+  const token = randomBytes(32).toString('base64url'), upstream = 'http://127.0.0.1:9/gw/config/v1'
+  const guard = `import { Server } from 'node:net'; Server.prototype.listen = () => {
+    console.error('unexpected listener'); throw Error('fixture only');
+  }; globalThis.fetch = () => { console.error('unexpected fetch'); throw Error('fixture only'); };`
+  for (const invalid of ['Responses', 'constructor', '', `bogus-${key}`]) {
+    const run = launch(operatorEnv(volume, origin, port, token, upstream, key, invalid), guard)
+    let result
+    try { result = await once(run.child, 'close', { signal: deadline() }) } finally { await halt(run.child) }
+    assert.deepEqual(result, [1, null])
+    assert.match(run.log(), /^Invalid DEVA_MODEL_PROTOCOL(?: \(openai, responses, or anthropic\))?\n$/)
+    assert.deepEqual(await readdir(home), [])
   }
 })
