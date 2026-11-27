@@ -82,6 +82,22 @@ test('init-key validates existing raw key permissions and preserves a populated 
   }
 })
 
+test('new document grant needs explicit workspace writes and an absolute project root before startup', async t => {
+  const p=await fixture(t)
+  const args=['serve','--home',p.dataDir,'--master-key-file',p.keyFile]
+  for (const [flags, settings, expected] of [
+    [[], { DEVA_WORKSPACE_CREATE:'yes' }, 'DEVA_WORKSPACE_CREATE must be 0 or 1'],
+    [['--workspace-root',p.root,'--workspace-create'], {}, 'Document creation requires an explicit writable workspace root'],
+    [['--workspace-create','--workspace-write'], {}, 'Document creation requires an explicit writable workspace root'],
+    [['--workspace-create','--workspace-write','--workspace-root','relative'], {}, 'Document creation requires an explicit writable workspace root'],
+    [[], { DEVA_WORKSPACE_CREATE:'1',DEVA_WORKSPACE_WRITE:'0',DEVA_WORKSPACE_ROOT:p.root }, 'Document creation requires an explicit writable workspace root'],
+  ]) {
+    await assert.rejects(exec(process.execPath,[cli,...args,...flags],{env:{...p.env,...settings},timeout:5000}),err=>err.code===1 && err.stderr.trim()===expected)
+  }
+  await assert.rejects(p.run('status','--workspace-create'),err=>err.code===1 && err.stderr.includes('Invalid status options'))
+  await assert.rejects(fs.lstat(p.dataDir),{code:'ENOENT'})
+})
+
 test('production serve accepts flag-over-env settings, claim is terminal-only, and SIGTERM releases socket and lock', { timeout: 25_000 }, async t => {
   const paths = await fixture(t)
   const ttyAvailable = await fs.access(script).then(() => true, () => false)

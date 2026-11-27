@@ -1,0 +1,6 @@
+# Optional third file, after compose.yaml and compose.workspace-edit.yaml.
+# This grant is separate from updating existing text; by itself it provides no project mount.
+services:
+  workbench:
+    environment:
+      DEVA_WORKSPACE_CREATE: "1"

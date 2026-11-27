@@ -46,6 +46,13 @@ function options(opts) {
   if (inside(webDir, keyFile) || [dataDir, runDir].some(dir => inside(dir, webDir) || inside(webDir, dir))) {
     throw Error('Web directory must be separate from private runtime paths')
   }
+  const { workspaceCreate=false, workspaceWritable=false, workspaceRoot } = opts.businessOptions ?? {}
+  if (typeof workspaceCreate !== 'boolean' || workspaceCreate &&
+      (workspaceWritable !== true || typeof workspaceRoot !== 'string' || !isAbsolute(workspaceRoot) || workspaceRoot.includes('\0') || resolve(workspaceRoot) !== workspaceRoot || workspaceRoot === '/' ||
+       [dataDir, keyFile, runDir, webDir, opts.businessOptions?.browserRunDir, opts.businessOptions?.terminalRunDir].filter(Boolean)
+         .some(privatePath => inside(workspaceRoot,privatePath) || inside(privatePath,workspaceRoot)))) {
+    throw Error('Document creation requires an explicit writable workspace root')
+  }
   const ttyDir = opts.businessOptions?.terminalRunDir
   if (ttyDir !== undefined) {
     const otherRoots = [dataDir,keyFile,runDir,webDir,opts.businessOptions?.workspaceRoot,opts.businessOptions?.browserRunDir,'/proc','/sys','/dev','/etc','/root'].filter(Boolean)
