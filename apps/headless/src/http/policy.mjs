@@ -56,8 +56,24 @@ export function json(res, status, payload, headers = {}) {
   res.end(bytes)
 }
 
+// Called only on successfully parsed JSON. Count outer object members without
+// interpreting colons in strings or in nested objects. JSON.parse alone silently
+// chooses the last value of a duplicated key, including differently escaped spellings.
+function outerMemberCount(raw) {
+  let members=0, depth=0, quoted=false
+  for (let i=0;i<raw.length;i++) {
+    const ch=raw.charCodeAt(i)
+    if (quoted) { if (ch===92) i++; else if (ch===34) quoted=false; continue }
+    if (ch===34) quoted=true
+    else if (ch===123 || ch===91) depth++
+    else if (ch===125 || ch===93) depth--
+    else if (ch===58 && depth===1) members++
+  }
+  return members
+}
+
 /** Read only an uncompressed, bounded JSON object; enforce the cap for chunked bodies as well. */
-export async function readJson(req, limit = 16 * 1024) {
+export async function readJson(req, limit = 16 * 1024, { uniqueMembers=false } = {}) {
   if (!/^application\/json(?:\s*;\s*charset=utf-8)?$/i.test(req.headers['content-type'] ?? '') ||
       (req.headers['content-encoding'] ?? 'identity') !== 'identity') throw new HttpError(415, 'json_required')
   const declared = req.headers['content-length']
@@ -69,9 +85,11 @@ export async function readJson(req, limit = 16 * 1024) {
     if (size > limit) throw new HttpError(413, 'too_large')
     chunks.push(chunk)
   }
-  let body
-  try { body = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks))) }
+  let body,raw
+  try { raw=new TextDecoder('utf-8', {fatal:true}).decode(Buffer.concat(chunks));body=JSON.parse(raw) }
   catch { throw new HttpError(400, 'invalid_json') }
-  if (!body || Array.isArray(body) || typeof body !== 'object') throw new HttpError(400, 'invalid_json')
+  if (!body || Array.isArray(body) || typeof body !== 'object' || (uniqueMembers && outerMemberCount(raw)!==Object.keys(body).length)) {
+    throw new HttpError(400,'invalid_json')
+  }
   return body
 }

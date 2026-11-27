@@ -230,6 +230,15 @@ test('Unix claim, HTTP sessions, vault, and business API all use the same instan
   assert.equal((await http(svc, '/api/v1/bootstrap', { headers: { cookie } })).status, 401)
 })
 
+test('document creation rejects private or unconfigured project roots before touching the data volume', async t => {
+  const paths=await fixture(t)
+  for (const workspaceRoot of [undefined,'relative','/',paths.root,paths.dataDir,join(paths.dataDir,'projects'),paths.keyFile,paths.webDir,paths.runDir]) {
+    await assert.rejects(paths.start({businessOptions:{workspaceCreate:true,workspaceWritable:true,workspaceRoot}}),/explicit writable workspace root/)
+  }
+  await assert.rejects(paths.start({businessOptions:{workspaceCreate:'1',workspaceWritable:true,workspaceRoot:join(paths.root,'projects')}}),/explicit writable workspace root/)
+  await assert.rejects(fs.lstat(paths.dataDir),{code:'ENOENT'})
+})
+
 test('the optional terminal control mount is distinct from data, web, project and owner-control paths', async t => {
   const paths = await fixture(t)
   const workspaceRoot = join(paths.root, 'approved'), browserRunDir = join(paths.root, 'browser')

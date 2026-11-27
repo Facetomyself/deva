@@ -70,6 +70,33 @@
 
 保存使用服务器读回的版本。另一个标签页或宿主上的编辑改了文件，会收到冲突；网页保留草稿，显式重新读取后对照磁盘版本，再由用户决定是否保存。不会自动重放陈旧内容。此机制保证本服务处理的同版本竞争只会有一个成功；它不是针对其他未协作文件写入者的操作系统级写锁。此阶段的冲突预览也不等于 Agent 检查点/历史回退。
 
+### 在目录树中定位，以及单独启用新建文档
+
+打开文件后点击 **定位所在文件夹**，工作台会重新核对项目、逐层展开目录、把键盘焦点移到实际的文件夹行；已打开的文件和编辑草稿保持原状。从对话标题的已关联项目入口同样可定位项目根目录。此操作在只读挂载下就能使用，也不会在服务器上启动文件管理器。
+
+浏览、编辑已有文件、创建新文档是不同的部署权限。现有只读和仅编辑的部署维持原样。要新增**人工创建**权限，在编辑配置之后追加第三份文件：
+
+```sh
+export DEVA_WORKSPACE_PARENT=/absolute/path/to/approved-projects
+docker compose -f compose.yaml -f compose.workspace-edit.yaml -f compose.workspace-create.yaml up -d --build
+```
+
+1. 在 **工作区文件** 中打开所需项目与现有文件夹，点 **新建文档**，选择文件夹、输入 `.md` 或 `.txt` 文件名和正文；空文档也可创建。此时是当前页面的草稿，没有写盘。
+2. 点 **核对目标**。服务检查实际目录权限及该名字仍为空，并将核对记录绑定到当前登录、项目和目录。记录有效期 2 分钟。再点 **创建文档** 才会发布；新文件是当前服务 UID 拥有的普通文件，权限 `0600`。如果另一窗口先创建同名文件，原文件保持原样，失败窗口保留草稿。
+3. 如果创建响应中途断开，点 **核实创建结果**。页面只检查原记录并重新读取目录与文件版本；不会再次创建。关闭表单或取消仅释放核对记录，不删除已写入的文件。容器重建后仍可从项目中重新打开已落盘的文件；旧核对记录和登录身份失效。
+
+文件名最多 200 个 UTF-8 字节，正文最多 2 MiB。只在已授权的现有目录中创建文档；隐藏或含路径分隔符的名字、控制文件、明显凭据内容和执行脚本不在范围内。服务用同目录临时文件、同步写盘及不覆盖目标的硬链接发布，随后从原生文件读回。底层文件系统须支持这些操作；若发布后仍无法确认，保留磁盘现状并报告未确认，不回滚他人文件。不会创建目录、删除文件或把工作区文档交给对话模型。
+
+**独立验证这三种部署权限。** 以下是验收命令，不是启动常驻服务的命令。在专用的原生 Linux/amd64 测试机上，以有本地 Docker 操作权限的普通用户执行；需要 Node 22+、Python 3、Docker Engine 28+、Compose v2，以及 `/tmp` 支持普通用户设置 POSIX ACL。
+
+```sh
+docker build --platform linux/amd64 --target runtime -t deva-workbench:project-documents-verify .
+image_id=$(docker image inspect --format '{{.Id}}' deva-workbench:project-documents-verify)
+node scripts/workbench/container-project-documents.mjs --disposable-image "$image_id"
+```
+
+命令先核对镜像 ID，再使用临时项目和回环端口实测默认、仅编辑、允许新建三种配置，并重建工作台检查数据。测试不使用已有工作区、数据卷和密钥，也不需要 `sudo`。只想在本机检查测试目录与 ACL 能否建立时，可用 `node scripts/workbench/container-project-documents.mjs --fixture-only`；该命令没有运行 Docker，结果不计入容器部署验收。
+
 ### 在真实 PTY 中查看已保存的文本
 
 需要终端式分页时，可给已授权的工作区增加[只读 TTY 查看器](../terminal-worker/README.md)。在 `compose.yaml` 与 `compose.workspaces.yaml` 之后再加入 `-f compose.terminal.yaml`，然后从已打开的文件选择 **打开 TTY 查看器**。只有这一点击才会把经版本核对的文本快照送入隔离工作器。在窗口内可以翻页、调整行列和退出；它不会启动宿主 shell 或把输入发送给模型。工作器离线只影响这个可选入口。

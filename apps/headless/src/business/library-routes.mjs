@@ -10,6 +10,7 @@ import { gitGrants, gitProjectNames } from '../git/access.mjs'
 import { openWorkspaceFiles } from '../files/workspace-files.mjs'
 import { workspaceFileRoutes } from '../files/workspace-routes.mjs'
 import { openTerminalSource } from '../terminal/source.mjs'
+import { openProjectDocumentTarget } from '../files/project-document-target.mjs'
 import { openDeliveryFiles } from '../files/delivery-files.mjs'
 
 const rolePath = /^\/api\/v1\/personas\/([A-Za-z0-9][A-Za-z0-9_.-]{0,63})(?:\/(enabled|avatar-image))?$/
@@ -49,7 +50,8 @@ function snapshotOf(memory, scope) {
   return { snapshot, revision }
 }
 
-export async function openLibrary({ dataDir, workspaceRoot, workspaceWritable = false, privateRoots = [], gitProjects }) {
+export async function openLibrary({ dataDir, workspaceRoot, workspaceWritable = false, workspaceCreate = false, privateRoots = [], gitProjects }) {
+  if (typeof workspaceCreate !== 'boolean' || (workspaceCreate && (!workspaceRoot || workspaceWritable !== true))) throw new TypeError('Document creation requires a writable project root')
   if (typeof workspaceWritable !== 'boolean' || (workspaceWritable && !workspaceRoot)) throw new TypeError('Workspace writes require an explicit project root')
   const gitNames = gitProjectNames(gitProjects)
   if (gitNames.length && !workspaceRoot) throw new TypeError('Git inspection requires an explicit workspace root')
@@ -99,6 +101,8 @@ export async function openLibrary({ dataDir, workspaceRoot, workspaceWritable = 
   }
   return {
     workspaceFilesEnabled: Boolean(fileCommands),
+    // Distinct authority from update-in-place: only an explicit deployment grant can mint a new-file intent.
+    createDocumentTarget: workspaceCreate ? (id,fields) => openProjectDocumentTarget(catalog,id,fields) : undefined,
     terminalSource: workspaceRoot ? (id, path, revision) => openTerminalSource(catalog,id,path,revision) : undefined,
     gitGrants: approvedGit,
     deliveryFiles: workspaceRoot ? openDeliveryFiles({ catalog }) : undefined,

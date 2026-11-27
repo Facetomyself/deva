@@ -380,7 +380,7 @@ const i18n = { useI18n: () => ({ locale }) }
 const panel = await load('terminal-view-panel.tsx', { '../renderer/src/i18n/i18n': i18n, './terminal-view-controller': controller,
   './terminal-view-transport': wire, './terminal-view.css': {} })
 const workspace = await load('workspace-dialog.tsx', { '../renderer/src/i18n/i18n': i18n, './terminal-view-controller': controller,
-  './terminal-view-panel': panel, './git-view-controller': {}, './git-view-panel': {}, './workspace-files': {},
+  './terminal-view-panel': panel, './git-view-controller': {}, './git-view-panel': {}, './workspace-files': {}, './project-document-ui': {},
   './workspace-line-endings': await load('workspace-line-endings.ts'), './workspace-dialog.css': {} })
 function render(files, terminal, open = true) {
   const original = console.error
