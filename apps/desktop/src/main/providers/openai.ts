@@ -6,6 +6,7 @@ import {
   settleBrokenCalls,
   toolImagesNote,
   type AdapterConfig,
+  type AdapterTransport,
   type ContentPart,
   type GenerateRequest,
   type ImagePart,
@@ -199,11 +200,7 @@ interface PendingCall {
 export async function* streamOpenAI(
   cfg: AdapterConfig,
   req: GenerateRequest,
-  { fetchModel, describeNetError, textOnly }: {
-    fetchModel: (url: string, init: RequestInit) => Promise<Response>
-    describeNetError: (error: unknown) => string
-    textOnly?: boolean
-  }
+  { fetchModel, describeNetError, textOnly }: AdapterTransport
 ): AsyncGenerator<StreamEvent> {
   const url = `${cfg.baseURL.replace(/\/$/, '')}/chat/completions`
   const messages = mapMessages(req.system, req.messages, isGemini(cfg.baseURL, req.model))
@@ -214,7 +211,7 @@ export async function* streamOpenAI(
   const body = {
     model: req.model,
     messages,
-    tools: req.tools?.map((t) => ({
+    tools: textOnly ? undefined : req.tools?.map((t) => ({
       type: 'function' as const,
       function: { name: t.name, description: t.description, parameters: t.inputSchema }
     })),

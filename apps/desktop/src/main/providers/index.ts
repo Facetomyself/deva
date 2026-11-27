@@ -1,14 +1,12 @@
 import { describeNetError } from '../http'
 import { getSecret } from '../services/secrets'
-import { streamAnthropic } from './anthropic'
+import { isAdapterKind, modelAdapters, type AdapterKind } from './adapters'
 import { recoverDsmlCalls } from './dsml'
-import { streamOpenAI } from './openai'
 import { providerHeaders } from './opencode'
-import { streamResponses } from './openai-responses'
 import { fetchModel } from './request'
 import type { ContentPart, GenerateRequest, Message, StreamEvent } from './types'
 
-export type AdapterKind = 'anthropic' | 'openai' | 'responses'
+export type { AdapterKind } from './adapters'
 
 export interface StreamChatConfig {
   adapter: AdapterKind
@@ -59,12 +57,9 @@ export async function* streamChat(
   }
   // 发送前消弭连续同角色（压缩产生的「摘要+近期」连续 user 等），对严格网关稳健。
   const normReq: GenerateRequest = { ...req, messages: normalizeMessages(req.messages) }
-  const events =
-    cfg.adapter === 'anthropic'
-      ? streamAnthropic(adapterCfg, normReq)
-      : cfg.adapter === 'responses'
-        ? streamResponses(adapterCfg, normReq)
-        : streamOpenAI(adapterCfg, normReq, { fetchModel, describeNetError })
+  // Preserve the desktop fallback for incomplete legacy settings.
+  const stream = modelAdapters[isAdapterKind(cfg.adapter) ? cfg.adapter : 'openai']
+  const events = stream(adapterCfg, normReq, { fetchModel, describeNetError })
   // 带工具的请求：DeepSeek 偶尔把工具调用写成 DSML 标记混进正文，在这里恢复成工具调用（见 dsml.ts）。
   // 不带工具的一次性调用（压缩摘要、提交信息等）原样透传。
   yield* req.tools?.length ? recoverDsmlCalls(events) : events

@@ -1,5 +1,3 @@
-import { describeNetError } from '../http'
-import { fetchModel } from './request'
 import { iterateSSE, STREAM_IDLE_MS } from './sse'
 import {
   httpError,
@@ -8,6 +6,7 @@ import {
   settleBrokenCalls,
   toolImagesNote,
   type AdapterConfig,
+  type AdapterTransport,
   type ContentPart,
   type GenerateRequest,
   type Message,
@@ -49,13 +48,13 @@ type ResponsesInputItem =
   | { type: 'function_call_output'; call_id: string; output: string }
 
 /** 把归一化消息展开成 Responses 的 input 序列（工具调用/结果各自成独立顶层项）。 */
-function mapInput(messages: Message[]): ResponsesInputItem[] {
+function mapInput(messages: Message[], textOnly?: boolean): ResponsesInputItem[] {
   const out: ResponsesInputItem[] = []
 
   for (const m of messages) {
     if (typeof m.content === 'string') {
       if (m.content)
-        out.push({ role: m.role, content: [{ type: 'input_text', text: m.content }] })
+        out.push({ role: m.role, content: [{ type: textOnly && m.role === 'assistant' ? 'output_text' : 'input_text', text: m.content }] })
       continue
     }
 
@@ -65,6 +64,7 @@ function mapInput(messages: Message[]): ResponsesInputItem[] {
         .map((p) => p.text)
         .join('')
       if (text) out.push({ role: 'assistant', content: [{ type: 'output_text', text }] })
+      if (textOnly) continue
       for (const p of m.content) {
         if (p.type === 'tool_use')
           out.push({
@@ -80,7 +80,9 @@ function mapInput(messages: Message[]): ResponsesInputItem[] {
     // user 消息：先落工具结果（独立项），再把文本/图片/PDF 并成一条 user 消息。
     const parts: ResponsesContentPart[] = []
     for (const p of m.content) {
-      if (p.type === 'tool_result') {
+      if (p.type === 'text') parts.push({ type: 'input_text', text: p.text })
+      else if (textOnly) continue
+      else if (p.type === 'tool_result') {
         out.push({ type: 'function_call_output', call_id: p.toolUseId, output: p.content })
         // output 按字符串发（块数组形式并非所有网关都认）；工具返回的图片与 Chat 适配器同样挪进随后的 user 消息。
         if (p.images?.length) {
@@ -88,8 +90,7 @@ function mapInput(messages: Message[]): ResponsesInputItem[] {
           for (const img of p.images)
             parts.push({ type: 'input_image', image_url: `data:${img.mediaType};base64,${img.data}` })
         }
-      } else if (p.type === 'text') parts.push({ type: 'input_text', text: p.text })
-      else if (p.type === 'image')
+      } else if (p.type === 'image')
         parts.push({ type: 'input_image', image_url: `data:${p.mediaType};base64,${p.data}` })
       else if (p.type === 'document')
         parts.push({
@@ -113,14 +114,16 @@ interface PendingCall {
 
 export async function* streamResponses(
   cfg: AdapterConfig,
-  req: GenerateRequest
+  req: GenerateRequest,
+  transport: AdapterTransport
 ): AsyncGenerator<StreamEvent> {
+  const { fetchModel, describeNetError, textOnly } = transport
   const url = `${cfg.baseURL.replace(/\/$/, '')}/responses`
   const body = {
     model: req.model,
     instructions: req.system,
-    input: mapInput(req.messages),
-    tools: req.tools?.map((t) => ({
+    input: mapInput(req.messages, textOnly),
+    tools: textOnly ? undefined : req.tools?.map((t) => ({
       type: 'function' as const,
       name: t.name,
       description: t.description,
@@ -152,12 +155,19 @@ export async function* streamResponses(
       signal: req.signal
     })
   } catch (e) {
-    if ((e as Error)?.name === 'AbortError') {
+    if ((e as Error)?.name === 'AbortError' || (textOnly && req.signal?.aborted)) {
       yield { type: 'done', stopReason: 'aborted' }
       return
     }
-    yield { type: 'error', error: { kind: 'network', retryable: true, message: describeNetError(e) } }
+    if (!textOnly)
+      yield { type: 'error', error: { kind: 'network', retryable: true, message: describeNetError(e) } }
     yield { type: 'done', stopReason: 'error' }
+    return
+  }
+
+  if (textOnly && (!res.ok || req.signal?.aborted)) {
+    void res.body?.cancel().catch(() => {})
+    yield { type: 'done', stopReason: req.signal?.aborted ? 'aborted' : 'error' }
     return
   }
 
@@ -171,11 +181,73 @@ export async function* streamResponses(
     return
   }
 
+  yield* readResponses(res, req.signal, transport)
+}
+
+function isTextOutputPart(value: unknown): boolean {
+  const part = value as { type?: unknown; text?: unknown; refusal?: unknown } | null | undefined
+  return (part?.type === 'output_text' && typeof part.text === 'string') ||
+    (part?.type === 'refusal' && typeof part.refusal === 'string')
+}
+
+function isTextOutputItem(value: unknown): boolean {
+  const item = value as { type?: unknown; role?: unknown; content?: unknown } | null | undefined
+  if (item?.type === 'reasoning') return true // Private reasoning is ignored, not surfaced.
+  return item?.type === 'message' &&
+    (item.role === undefined || item.role === 'assistant') &&
+    (item.content === undefined || (Array.isArray(item.content) && item.content.every(isTextOutputPart)))
+}
+
+function rejectsTextEvent(type: unknown): boolean {
+  return typeof type === 'string' && (
+    type === 'error' || type === 'response.error' || type === 'response.failed' ||
+    type === 'response.cancelled' ||
+    // Argument and hosted-tool events may arrive without a corresponding output item.
+    /^response\.(?:[^.]*_call(?:[._]|$)|mcp_|(?:output_)?audio[._])/.test(type)
+  )
+}
+
+function textOnlyTerminal(evt: Record<string, unknown>): 'end_turn' | 'max_tokens' | 'error' | undefined {
+  const { type } = evt
+  const response = evt.response as {
+    status?: unknown
+    error?: unknown
+    output?: unknown
+    incomplete_details?: { reason?: unknown } | null
+  } | null | undefined
+
+  if (rejectsTextEvent(type) || evt.error != null || response?.error != null) return 'error'
+  if ((type === 'response.output_item.added' || type === 'response.output_item.done') &&
+      !isTextOutputItem(evt.item)) return 'error'
+  if ((type === 'response.content_part.added' || type === 'response.content_part.done') &&
+      !isTextOutputPart(evt.part)) return 'error'
+  // A terminal snapshot can be the first place an unsolicited output item appears.
+  if (response?.output !== undefined &&
+      (!Array.isArray(response.output) || !response.output.every(isTextOutputItem))) return 'error'
+
+  if (type === 'response.completed') {
+    if (response?.status !== 'completed' || response.incomplete_details != null) return 'error'
+    const unfinished = Array.isArray(response.output) && response.output.some(item =>
+      item?.type === 'message' && item.status !== undefined && item.status !== 'completed')
+    return unfinished ? 'error' : 'end_turn'
+  }
+  if (type === 'response.incomplete')
+    return response?.status === 'incomplete' && response.incomplete_details?.reason === 'max_output_tokens'
+      ? 'max_tokens' : 'error'
+  return undefined
+}
+
+async function* readResponses(
+  res: Response,
+  signal: AbortSignal | undefined,
+  { describeNetError, textOnly }: AdapterTransport
+): AsyncGenerator<StreamEvent> {
   // output item id -> 累积中的函数调用
   const calls = new Map<string, PendingCall>()
   /** 参数 JSON 解析失败的调用，流结束后按截断与否定性（见 settleBrokenCalls）。 */
   const broken: { id: string; name: string; raw: string }[] = []
-  let stopReason: StopReason = 'end_turn'
+  // Without an authoritative terminal, EOF and the [DONE] sentinel are failures in text-only mode.
+  let stopReason: StopReason = textOnly ? 'error' : 'end_turn'
   let sawTool = false
   let inputTokens = 0
   let outputTokens = 0
@@ -191,27 +263,50 @@ export async function* streamResponses(
         }
       }
     )?.usage
-    if (usage?.input_tokens) inputTokens = usage.input_tokens
-    if (usage?.output_tokens) outputTokens = usage.output_tokens
+    if (usage?.input_tokens && (!textOnly || typeof usage.input_tokens === 'number'))
+      inputTokens = usage.input_tokens
+    if (usage?.output_tokens && (!textOnly || typeof usage.output_tokens === 'number'))
+      outputTokens = usage.output_tokens
     // Responses API 的 input_tokens 已是含缓存命中的总量，cached_tokens 只是其中命中的那部分。
     const hit = usage?.input_tokens_details?.cached_tokens
-    if (hit) cacheRead = hit
+    if (hit && (!textOnly || typeof hit === 'number')) cacheRead = hit
   }
 
   try {
-    for await (const { data } of iterateSSE(res, STREAM_IDLE_MS)) {
-      if (data === '[DONE]') break
+    // The text-only host supplies its own deadline via the fetch signal.
+    for await (const { data, event } of iterateSSE(res, textOnly ? 0 : STREAM_IDLE_MS)) {
+      if (data === '[DONE]' || (textOnly && signal?.aborted)) break
       let evt: Record<string, unknown>
       try {
         evt = JSON.parse(data)
       } catch {
+        if (textOnly) break
         continue
+      }
+      if (textOnly) {
+        // A named SSE frame must agree with the payload. A different protocol's native events
+        // cannot confirm completion, even on an HTTP 200 from the configured host.
+        const kind = evt?.type
+        if (typeof kind !== 'string' || (event !== undefined && event !== 'message' && event !== kind)) break
+        if (kind === 'ping' && evt.error == null) continue
+        if (!kind.startsWith('response.') && kind !== 'error') break
+        const terminal = textOnlyTerminal(evt)
+        if (terminal) {
+          stopReason = terminal
+          if (terminal !== 'error') takeUsage(evt)
+          break // Cancel the SSE reader before emitting the terminal to the caller.
+        }
       }
       const type = evt.type as string
 
-      if (type === 'response.output_text.delta') {
+      if (type === 'response.output_text.delta' || type === 'response.refusal.delta') {
+        // 结构化拒绝文本（同 Chat Completions 的 delta.refusal）：作为正文展示，别丢。
         const delta = evt.delta
+        if (textOnly && typeof delta !== 'string') break
         if (typeof delta === 'string' && delta) yield { type: 'text_delta', text: delta }
+      } else if (textOnly) {
+        // Ignore private reasoning and keep rich desktop tool handling entirely out of this path.
+        continue
       } else if (
         type === 'response.reasoning_summary_text.delta' ||
         type === 'response.reasoning_text.delta'
@@ -219,10 +314,6 @@ export async function* streamResponses(
         // 推理模型的思维摘要（仅在服务端产出时到达）——作为思考展示，本应用不持久化。
         const delta = evt.delta
         if (typeof delta === 'string' && delta) yield { type: 'thinking_delta', text: delta }
-      } else if (type === 'response.refusal.delta') {
-        // 结构化拒绝文本（同 Chat Completions 的 delta.refusal）：作为正文展示，别丢。
-        const delta = evt.delta
-        if (typeof delta === 'string' && delta) yield { type: 'text_delta', text: delta }
       } else if (type === 'response.output_item.added') {
         const item = evt.item as { id?: string; type?: string; call_id?: string; name?: string }
         if (item?.type === 'function_call' && item.id)
@@ -282,12 +373,18 @@ export async function* streamResponses(
       }
     }
   } catch (e) {
-    if ((e as Error)?.name === 'AbortError') {
+    if ((e as Error)?.name === 'AbortError' || (textOnly && signal?.aborted)) {
       yield { type: 'done', stopReason: 'aborted' }
       return
     }
-    yield { type: 'error', error: { kind: 'network', retryable: true, message: describeNetError(e) } }
+    if (!textOnly)
+      yield { type: 'error', error: { kind: 'network', retryable: true, message: describeNetError(e) } }
     yield { type: 'done', stopReason: 'error' }
+    return
+  }
+
+  if (textOnly && signal?.aborted) {
+    yield { type: 'done', stopReason: 'aborted' }
     return
   }
 

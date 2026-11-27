@@ -5,6 +5,7 @@ import { isIP } from 'node:net'
 import { homedir } from 'node:os'
 import { isAbsolute, join, resolve } from 'node:path'
 import type { IncomingMessage } from 'node:http'
+import { isAdapterKind } from '../main/providers/adapters'
 
 const loopback = (host: string) => ['127.0.0.1', 'localhost', '[::1]'].includes(host)
 const digest = (s: string) => createHash('sha256').update(s).digest()
@@ -20,13 +21,20 @@ export function options(env = process.env) {
   if (site.href !== `${site.origin}/` || !(site.protocol === 'https:' || site.protocol === 'http:' && loopback(site.hostname))) setting('DEVA_ORIGIN')
   const key = env.DEVA_WEB_TOKEN ?? ''
   if (key.trim() !== key || !/^[A-Za-z0-9_-]{32,128}$/u.test(key)) setting('DEVA_WEB_TOKEN (32–128 base64url characters)')
+  const protocol = env.DEVA_MODEL_PROTOCOL ?? 'openai'
+  if (!isAdapterKind(protocol)) return setting('DEVA_MODEL_PROTOCOL (openai, responses, or anthropic)')
   const model = env.DEVA_MODEL ?? '', apiKey = env.DEVA_MODEL_API_KEY ?? ''
   if (!model.trim() || model !== model.trim() || model.length > 256 || apiKey.length > 8192 || /[\x00-\x1f\x7f]/u.test(model + apiKey)) setting('model configuration')
   const base = address(env.DEVA_MODEL_BASE_URL ?? '', 'DEVA_MODEL_BASE_URL')
   const privateIPv4 = isIP(base.hostname) === 4 && /^(?:10\.|192\.168\.|172\.(?:1[6-9]|2\d|3[01])\.)/u.test(base.hostname)
   const privateHost = /^[a-z\d-]+$/iu.test(base.hostname) || privateIPv4 || /^\[f[cd][\da-f]{2}:/iu.test(base.hostname)
-  if (base.username || base.password || base.search || base.hash || !(base.protocol === 'https:' || base.protocol === 'http:' && (loopback(base.hostname) || (!apiKey && privateHost)))) setting('DEVA_MODEL_BASE_URL')
-  return { host, port, site, owner: digest(key), provider: { baseURL: base.href, model, apiKey } }
+  if (base.username || base.password || /[?#]/u.test(base.href) || !(base.protocol === 'https:' || base.protocol === 'http:' && (loopback(base.hostname) || (!apiKey && privateHost)))) setting('DEVA_MODEL_BASE_URL')
+  const prefix = base.pathname.replace(/\/+$/u, '')
+  if ((protocol === 'anthropic' && prefix.endsWith('/v1/messages')) || (protocol === 'responses' && prefix.endsWith('/responses'))) setting('DEVA_MODEL_BASE_URL (use the API base, not the request endpoint)')
+  // The Anthropic adapter appends /v1/messages itself. Preserve gateway prefixes and accept /v1 once.
+  if (protocol === 'anthropic') base.pathname = prefix.replace(/\/v1$/u, '') || '/'
+  else if (protocol === 'responses') base.pathname = prefix || '/'
+  return { host, port, site, owner: digest(key), provider: { protocol, baseURL: base.href, model, apiKey } }
 }
 
 // Only one Linux writer may own this dedicated native data directory. An existing desktop

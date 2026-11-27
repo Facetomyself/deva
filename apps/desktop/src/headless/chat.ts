@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { normalizeSessionTitle, SESSION_TITLE_MAX } from '../shared/session-title'
-import { streamOpenAI } from '../main/providers/openai'
+import { modelAdapters, type AdapterKind } from '../main/providers/adapters'
+import type { AdapterTransport } from '../main/providers/types'
 import { deriveTitle, listPlainSessionIds, PlainSessionSyncError, readPlainSession, savePlainSession } from '../main/services/chat-store'
 
 const UUID = '[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}'
@@ -72,7 +73,7 @@ function load(id: string): Session | undefined {
   return s
 }
 
-const transport = {
+const transport: AdapterTransport = {
   textOnly: true,
   describeNetError: () => 'Model transport failed',
   async fetchModel(url: string, init: RequestInit): Promise<Response> {
@@ -114,7 +115,11 @@ async function emit(onDelta: Sink, text: string, signal: AbortSignal): Promise<v
   }
 }
 
-export function createTextChat({ baseURL, model, apiKey }: { baseURL: string; model: string; apiKey: string }) {
+export function createTextChat({ protocol, baseURL, model, apiKey }: {
+  protocol: AdapterKind; baseURL: string; model: string; apiKey: string
+}) {
+  // The operator selects a single adapter at boot, never from the browser or provider response.
+  const stream = modelAdapters[protocol]
   // Private single-writer home: load the bounded native file set once; publish only after a strict write.
   let slots: Map<string, Session | undefined> | undefined
   const active = new Map<string, { turnId: string; abort: () => void }>()
@@ -227,7 +232,7 @@ export function createTextChat({ baseURL, model, apiKey }: { baseURL: string; mo
         let output = '', size = 0
         try {
           controller.signal.throwIfAborted()
-          for await (const event of streamOpenAI({ baseURL, apiKey }, {
+          for await (const event of stream({ baseURL, apiKey }, {
             model, maxTokens: 4096, messages: next.messages, signal: controller.signal
           }, transport)) {
             controller.signal.throwIfAborted()
@@ -243,7 +248,7 @@ export function createTextChat({ baseURL, model, apiKey }: { baseURL: string; mo
             }
           }
           controller.signal.throwIfAborted()
-          if (!output) throw new ChatError('upstream')
+          if (!output.trim()) throw new ChatError('upstream')
           return 'complete'
         } catch (e) {
           if (stopped) return 'stopped'
@@ -251,7 +256,7 @@ export function createTextChat({ baseURL, model, apiKey }: { baseURL: string; mo
         } finally {
           controller.abort()
           try {
-            if (output) {
+            if (output.trim()) {
               const latest = get(id) // A second owner window may have renamed the conversation during streaming.
               commit({ ...latest, updatedAt: Date.now(), messages: [...latest.messages, message('assistant', output)] })
             }

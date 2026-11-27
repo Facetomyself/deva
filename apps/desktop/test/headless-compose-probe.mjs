@@ -9,17 +9,38 @@ const { DEVA_ORIGIN: origin, DEVA_WEB_TOKEN: token, DEVA_SMOKE_SESSION: existing
 assert.equal(process.env.DEVA_MODEL, 'deva-compose-fixture')
 assert.equal(process.env.DEVA_MODEL_BASE_URL, 'http://127.0.0.1:18795/v1')
 assert.ok(/^http:\/\/127\.0\.0\.1:\d+$/u.test(origin) && !process.env.DEVA_MODEL_API_KEY)
+const protocol = process.env.DEVA_MODEL_PROTOCOL ?? 'openai'
+assert.equal(protocol, process.env.DEVA_SMOKE_EXPECT_PROTOCOL ?? 'openai')
+assert.ok(['openai', 'responses', 'anthropic'].includes(protocol))
 const prompt = existing ? 'continue after restart' : 'hello from compose'
 const first = [{ role: 'user', text: 'hello from compose' }, { role: 'assistant', text: 'fixture reply' }]
 let cookie, calls = 0
 const fixture = createServer(async (req, res) => {
   try {
-    assert.equal(req.url, '/v1/chat/completions'); assert.equal(req.method, 'POST'); calls++
+    assert.equal(req.method, 'POST'); calls++
+    assert.equal(req.url, { openai: '/v1/chat/completions', responses: '/v1/responses', anthropic: '/v1/messages' }[protocol])
     const chunks = []; for await (const chunk of req) chunks.push(chunk)
-    const body = JSON.parse(Buffer.concat(chunks)); assert.equal(body.model, process.env.DEVA_MODEL); assert.ok(!body.tools)
-    assert.deepEqual(body.messages, [...(existing ? first : []), { role: 'user', text: prompt }].map(m => ({ role: m.role, content: m.text })))
+    const body = JSON.parse(Buffer.concat(chunks)), history = [...(existing ? first : []), { role: 'user', text: prompt }]
+    assert.equal(body.model, process.env.DEVA_MODEL); assert.equal(body.stream, true); assert.ok(!body.tools)
     res.writeHead(200, { 'Content-Type': 'text/event-stream' })
-    res.end('data: {"choices":[{"delta":{"content":"fixture reply"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n')
+    const frame = (type, fields = {}) => res.write(`event: ${type}\ndata: ${JSON.stringify({ type, ...fields })}\n\n`)
+    if (protocol === 'responses') {
+      assert.equal(body.store, false); assert.ok(!body.previous_response_id)
+      assert.deepEqual(body.input, history.map(({ role, text }) => ({ role, content: [{ type: role === 'assistant' ? 'output_text' : 'input_text', text }] })))
+      frame('response.output_text.delta', { delta: 'fixture reply' })
+      frame('response.completed', { response: { id: 'resp_probe', status: 'completed' } })
+    } else if (protocol === 'anthropic') {
+      assert.equal(req.headers['anthropic-version'], '2023-06-01')
+      assert.deepEqual(body.messages, history.map(({ role, text }) => ({ role, content: [{ type: 'text', text }] })))
+      frame('message_start', { message: { id: 'msg_probe', role: 'assistant', content: [] } })
+      frame('content_block_start', { index: 0, content_block: { type: 'text', text: '' } })
+      frame('content_block_delta', { index: 0, delta: { type: 'text_delta', text: 'fixture reply' } })
+      frame('content_block_stop', { index: 0 }); frame('message_delta', { delta: { stop_reason: 'end_turn' } }); frame('message_stop')
+    } else {
+      assert.deepEqual(body.messages, history.map(({ role, text }) => ({ role, content: text })))
+      res.write('data: {"choices":[{"delta":{"content":"fixture reply"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n')
+    }
+    res.end()
   } catch (err) { console.error(err.message); res.destroy() }
 })
 async function api(path, body) {
