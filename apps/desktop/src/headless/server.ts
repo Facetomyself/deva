@@ -12,8 +12,9 @@ const fail = (status: number, code: string): never => { throw new HttpError(stat
 const json = (res: ServerResponse, status: number, data: unknown) => {
   res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' }); res.end(JSON.stringify(data))
 }
-async function body(req: IncomingMessage, keys: string[], limit = 52 * 1024): Promise<Record<string, unknown>> {
+async function body(req: IncomingMessage, keys: string[], limit = 52 * 1024, optional: string[] = []): Promise<Record<string, unknown>> {
   if (!/^application\/json(?:\s*;\s*charset=utf-8)?$/i.test(req.headers['content-type'] ?? '') || (req.headers['content-encoding'] ?? 'identity') !== 'identity') fail(415, 'json_required')
+  if (Number(req.headers['content-length'] ?? 0) > limit) fail(413, 'limit')
   const chunks: Buffer[] = []; let size = 0
   for await (const chunk of req.iterator({ destroyOnReturn: false })) {
     size += chunk.length
@@ -23,7 +24,8 @@ async function body(req: IncomingMessage, keys: string[], limit = 52 * 1024): Pr
   let obj
   try { obj = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks))) }
   catch { fail(400, 'invalid_request') }
-  if (!obj || Array.isArray(obj) || typeof obj !== 'object' || Object.keys(obj).length !== keys.length || !keys.every(k => Object.hasOwn(obj, k))) fail(400, 'invalid_request')
+  if (!obj || Array.isArray(obj) || typeof obj !== 'object' || !keys.every(k => Object.hasOwn(obj, k)) ||
+      Object.keys(obj).some(k => !keys.includes(k) && !optional.includes(k))) fail(400, 'invalid_request')
   return obj
 }
 
@@ -69,8 +71,8 @@ function start() {
       }
       const session = auth.current(req) ?? fail(401, 'auth')
       // A slow request body may outlive this login, a closed connection or shutdown.
-      const input = async (keys: string[]) => {
-        const data = await body(req, keys)
+      const input = async (keys: string[], limit?: number, optional?: string[]) => {
+        const data = await body(req, keys, limit, optional)
         if (auth.current(req) !== session) fail(401, 'auth')
         if (closing || res.destroyed) fail(503, 'closing')
         return data
@@ -103,9 +105,10 @@ function start() {
         const { turnId } = await input(['turnId']); if (typeof turnId !== 'string') return fail(400, 'invalid_request')
         chat.stop(sid, turnId); return json(res, 200, { ok: true })
       }
-      const { text, revision, turnId } = await input(['text', 'revision', 'turnId'])
+      // JSON escapes can use six bytes per byte of decoded text. The domain enforces the smaller decoded caps.
+      const { text, revision, turnId, attachment } = await input(['text', 'revision', 'turnId'], 256 * 1024, ['attachment'])
       if (typeof text !== 'string' || typeof revision !== 'number' || typeof turnId !== 'string') return fail(400, 'invalid_request')
-      const turn = chat.begin(sid, { text, revision, turnId })
+      const turn = chat.begin(sid, { text, revision, turnId, attachment })
       session.aborts.add(turn.abort); res.once('close', turn.abort)
       const expiry = setTimeout(turn.abort, Math.max(0, session.expires - Date.now()))
       try {

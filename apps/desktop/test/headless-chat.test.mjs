@@ -15,7 +15,14 @@ import { assertCall, gateway, modelStream, protocols, route } from './headless-m
 // pnpm --filter @deva/desktop build:headless && node --test apps/desktop/test/headless-chat.test.mjs
 const bundle = process.env.DEVA_TEST_SERVER ?? fileURLToPath(new URL('../out/headless/server.mjs', import.meta.url))
 const host = '127.0.0.1', model = 'fixture-chat', deadline = () => AbortSignal.timeout(8000)
-const user = text => ({ role: 'user', text }), assistant = text => ({ role: 'assistant', text })
+const user = (text, attachment) => ({ role: 'user', text, ...(attachment === undefined ? {} : { attachment }) })
+const assistant = text => ({ role: 'assistant', text })
+const fallback = '请理解并处理上述附件。'
+const textPart = text => ({ type: 'text', text })
+const attachmentFrame = ({ name, text }) => `[附件文件] ${name}\n\`\`\`\n${text}\n\`\`\``
+const nativeMessages = messages => messages.map(({ role, text, attachment }) => ({ role, content: attachment
+  ? [textPart(attachmentFrame(attachment)), text ? textPart(text) : { ...textPart(fallback), display: '' }]
+  : [textPart(text)] }))
 const close = server => new Promise((resolve, reject) => server.close(e => e ? reject(e) : resolve()))
 async function listen(server) {
   await once(server.listen(0, host), 'listening', { signal: deadline() })
@@ -64,10 +71,12 @@ for (const protocol of Object.keys(protocols)) test(`compiled headless ${protoco
   assert.ok(isAbsolute(bundle))
   const home = await mkdtemp(join(await realpath(tmpdir()), 'deva-headless-chat-')), inode = await lstat(home)
   const token = randomBytes(32).toString('base64url'), key = randomBytes(24).toString('base64url')
-  const calls = [], first = [user('first question'), assistant('complete answer')]
-  const stopped = [...first, user('second question'), assistant('visible partial')], third = [...stopped, user('follow-up')]
+  const attachment = { name: '会议笔记.MD', text: '\ufeff# 午后 🙂\r\n\t```text\r\n[附件文件] 嵌套.txt\r\n```\r\n保留结尾 \r\n' }
+  const literal = attachmentFrame({ name: 'literal.txt', text: 'A typed question that looks like a file.' })
+  const calls = [], first = [user('first question', attachment), assistant('complete answer')]
+  const stopped = [...first, user(literal), assistant('visible partial')], third = [...stopped, user('follow-up')]
   const modern = protocol !== 'openai', resumedText = modern ? 'resumed answer 🙂' : 'resumed answer'
-  const runs = []
+  const runs = [], cookies = []
   let completeFirst, completeThird, held, ending, edge, child, cookie, port, origin
   const fixture = createServer(async (req, res) => {
     const call = { method: req.method, path: req.url, headers: req.headers }
@@ -106,13 +115,26 @@ for (const protocol of Object.keys(protocols)) test(`compiled headless ${protoco
   })
   assert.equal(inode.mode & 0o777, 0o700)
   const upstreamOrigin = `http://${host}:${await listen(fixture)}`, upstream = upstreamOrigin + gateway(protocol)
-  // Native fetch and the real loopback socket are used for every fixture request. Block unrelated fetches before network I/O.
-  const guard = `const nativeFetch = globalThis.fetch; globalThis.fetch = (input, init) => {
+  // Keep real loopback traffic and native storage; flag any attempt to resolve the bogus attachment sources.
+  const bait = join(home, 'fixture-unexpected-read.txt')
+  const guard = `import fs from 'node:fs';
+  import { syncBuiltinESMExports } from 'node:module';
+  for (const [api, names] of [[fs, ['readFile', 'readFileSync', 'open', 'openSync', 'createReadStream']], [fs.promises, ['readFile', 'open']]]) {
+    for (const name of names) { const original = api[name]; api[name] = function(path, ...args) {
+      if (path === 0 || String(path).includes('fixture-unexpected-read.txt') || String(path).endsWith('/dev/stdin')) {
+        console.error('unexpected attachment read'); throw Error('fixture only');
+      }
+      return original.call(this, path, ...args);
+    }; }
+  }
+  syncBuiltinESMExports();
+  const nativeFetch = globalThis.fetch; globalThis.fetch = (input, init) => {
     if (new URL(input instanceof Request ? input.url : input).origin === ${JSON.stringify(upstreamOrigin)}) return nativeFetch(input, init);
     console.error('unexpected non-fixture fetch'); throw Error('fixture only');
   }`
   const request = (path, { body, headers, postOrigin = origin } = {}) => fetch(origin + path, {
-    redirect: 'manual', signal: deadline(), method: body === undefined ? 'GET' : 'POST', body: JSON.stringify(body),
+    redirect: 'manual', signal: deadline(), method: body === undefined ? 'GET' : 'POST',
+    body: Buffer.isBuffer(body) ? body : JSON.stringify(body),
     headers: { ...(cookie ? { Cookie: cookie } : {}), ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
       ...(body !== undefined && postOrigin ? { Origin: postOrigin } : {}), ...headers }
   })
@@ -147,6 +169,7 @@ for (const protocol of Object.keys(protocols)) test(`compiled headless ${protoco
     assert.match(value, /;\s*HttpOnly(?:;|$)/i); assert.match(value, /;\s*SameSite=Strict(?:;|$)/i)
     const signed = value.split(';')[0]
     assert.match(signed, /^[^=;]+=[^=;]+$/)
+    cookies.push(signed)
     return signed
   }
   const sessions = '/api/sessions', archivedList = `${sessions}/archived`
@@ -166,8 +189,9 @@ for (const protocol of Object.keys(protocols)) test(`compiled headless ${protoco
   assert.match(id, /^web_[0-9a-f-]{36}$/); assert.ok(typeof title === 'string' && title)
   assert.deepEqual(created, { id, title, messages: [], revision: 0, active: null })
   const session = `${sessions}/${id}`, turn = `${session}/turns`, stop = `${session}/stop`
-  const state = async () => (await json(session))[0], input = (text, revision) => ({ text, revision, turnId: randomUUID() })
-  const send = async body => ndjson(await request(turn, { body }))
+  const state = async () => (await json(session))[0]
+  const input = (text, revision, attachment) => ({ text, revision, turnId: randomUUID(), ...(attachment === undefined ? {} : { attachment }) })
+  const send = async (body, path = turn) => ndjson(await request(path, { body }))
   const rename = `${session}/title`, archive = `${session}/archive`
   const post = async (path, body, options) => (await json(path, 200, { body, ...options }))[0]
   const lists = async (active, archived = []) => {
@@ -195,13 +219,23 @@ for (const protocol of Object.keys(protocols)) test(`compiled headless ${protoco
   const fullTitle = `${cap}界`, pinned = await post(rename, { title: fullTitle, revision: empty.revision })
   assert.deepEqual(pinned, { ...renamed, title: fullTitle, revision: 3 }); assert.equal(calls.length, 0)
 
-  const opening = input(first[0].text, pinned.revision)
-  await error(turn, 401, 'auth', { body: opening, headers: { Cookie: '' } })
-  for (const override of [{ protocol: 'responses' }, { endpoint: upstream + '/browser-endpoint' },
-    { baseURL: upstream + '/browser-base' }, { model: 'browser-model' }]) {
-    await error(turn, 400, 'invalid_request', { body: { ...opening, ...override } })
+  const opening = input(`\t ${first[0].text}\r\n`, pinned.revision, attachment)
+  const file = join(home, 'data', 'chats', `${id}.json`)
+  const snapshot = async path => {
+    const { dev, ino, birthtimeNs, mtimeNs, ctimeNs } = await lstat(path, { bigint: true })
+    return { dev, ino, birthtimeNs, mtimeNs, ctimeNs, text: await readFile(path, 'utf8') }
   }
-  assert.deepEqual(await state(), pinned); assert.equal(calls.length, 0)
+  const pinnedDisk = await snapshot(file)
+  await error(turn, 401, 'auth', { body: opening, headers: { Cookie: '' } })
+  for (const options of [{ postOrigin: `http://localhost:${port}` }, { postOrigin: null }, { headers: { 'Sec-Fetch-Site': 'cross-site' } }])
+    await error(turn, 403, 'origin', { body: opening, ...options })
+  for (const body of [input(first[0].text, pinned.revision), opening]) {
+    for (const override of [{ protocol: 'responses' }, { endpoint: upstream + '/browser-endpoint' },
+      { baseURL: upstream + '/browser-base' }, { model: 'browser-model' }]) {
+      await error(turn, 400, 'invalid_request', { body: { ...body, ...override } })
+    }
+  }
+  assert.deepEqual(await state(), pinned); assert.deepEqual(await snapshot(file), pinnedDisk); assert.equal(calls.length, 0)
   const openingFrames = await send(opening)
   assert.deepEqual((await openingFrames.next()).value, { type: 'delta', text: 'complete ' })
   const live = (await json(session, 200, other))[0], liveTitle = '流式中的标题'
@@ -235,13 +269,11 @@ for (const protocol of Object.keys(protocols)) test(`compiled headless ${protoco
   await finish(frames, '', 'stopped')
   const saved = await state()
   assert.deepEqual(saved, { ...completed, messages: stopped, revision: completed.revision + 2 })
-  await error(turn, 409, 'stale', { body: input('stale send', completed.revision) }); assert.equal(calls.length, 2)
-  const file = join(home, 'data', 'chats', `${id}.json`)
-  const snapshot = async path => {
-    const { dev, ino, birthtimeNs, mtimeNs, ctimeNs } = await lstat(path, { bigint: true })
-    return { dev, ino, birthtimeNs, mtimeNs, ctimeNs, text: await readFile(path, 'utf8') }
-  }
-  const before = JSON.parse((await snapshot(file)).text)
+  const savedDisk = await snapshot(file), before = JSON.parse(savedDisk.text)
+  assert.deepEqual(before.messages, nativeMessages(stopped))
+  await error(turn, 409, 'stale', { body: input('stale send', completed.revision) })
+  await error(turn, 409, 'stale', { body: input('stale attachment', completed.revision, attachment) })
+  assert.deepEqual(await state(), saved); assert.deepEqual(await snapshot(file), savedDisk); assert.equal(calls.length, 2)
   const cleared = await post(rename, { title: ' \t\n ', revision: saved.revision })
   assert.deepEqual(cleared, { ...saved, title: first[0].text, revision: saved.revision + 1 })
   const archived = await post(archive, { archived: true, revision: cleared.revision })
@@ -252,6 +284,7 @@ for (const protocol of Object.keys(protocols)) test(`compiled headless ${protoco
   assert.equal(native.archived, true)
   for (const key of ['createdAt', 'updatedAt', 'messages']) assert.deepEqual(native[key], before[key])
   await error(turn, 409, 'stale', { ...other, body: input('stale archived send', cleared.revision) })
+  await error(turn, 409, 'stale', { ...other, body: input('', cleared.revision, attachment) })
   await error(archive, 409, 'stale', { ...other, body: { archived: true, revision: cleared.revision } })
   assert.deepEqual(await post(archive, { archived: true, revision: archived.revision }), archived)
   assert.deepEqual(await snapshot(file), onDisk); assert.equal(calls.length, 2)
@@ -330,19 +363,87 @@ for (const protocol of Object.keys(protocols)) test(`compiled headless ${protoco
       const messages = text.trim() ? [...history, assistant(text)] : history
       const saved = await state()
       assert.deepEqual(saved, { ...previous, messages, active: null, revision: previous.revision + (text.trim() ? 2 : 1) })
-      assert.deepEqual(JSON.parse(await readFile(file, 'utf8')).messages,
-        messages.map(({ role, text }) => ({ role, content: [{ type: 'text', text }] })))
+      assert.deepEqual(JSON.parse(await readFile(file, 'utf8')).messages, nativeMessages(messages))
       assert.equal(calls.length, expected.length, 'one provider POST and no automatic retries')
       previous = saved
     })
   }
+  if (!modern) await t.test('file-only title, exact input bounds and inert attachment sources', async () => {
+    let [previous] = await json(sessions, 201, { body: {} })
+    const fileSession = `${sessions}/${previous.id}`, fileTurn = `${fileSession}/turns`
+    const storage = join(home, 'data', 'chats', `${previous.id}.json`)
+    const full = { name: '资料.txt', text: '记\t\r\n'.repeat(5461) + 'ab' }
+    const draft = input('', previous.revision, full)
+    assert.equal(Buffer.byteLength(full.text), 32768)
+    const pristine = await snapshot(storage), beforeCalls = calls.length
+    for (const invalid of [null, [], {}, { name: full.name }, { name: full.name, text: 1 },
+      { ...attachment, path: bait }, { path: bait }, { path: '/dev/stdin' },
+      { url: `${upstream}/unexpected`, text: 'inline text' }, { ...attachment, endpoint: `${upstream}/unexpected` }]) {
+      await error(fileTurn, 400, 'invalid_request', { body: { ...draft, attachment: invalid } })
+    }
+    for (const name of [bait, '/dev/stdin', '../notes.txt', 'a/b.md', 'a\\b.md', '.notes.md', ' notes.md', 'notes.md ',
+      'a:notes.md', 'bad\tname.txt', 'bidi\u202e.md', '\ud800.md', 'notes.json', `${'界'.repeat(42)}.md`]) {
+      await error(fileTurn, 400, 'invalid_request', { body: { ...draft, attachment: { name, text: 'note' } } })
+    }
+    for (const text of ['', 'a\0b', 'a\u000bb', 'a\u001bb', 'bad\ud800', 'bad\udfff']) {
+      await error(fileTurn, 400, 'invalid_request', { body: { ...draft, attachment: { name: full.name, text } } })
+    }
+    const badUtf8 = JSON.stringify({ ...draft, attachment: { name: 'notes.txt', text: '\xff' } })
+    await error(fileTurn, 400, 'invalid_request', { body: Buffer.from(badUtf8, 'latin1') })
+    await error(fileTurn, 400, 'invalid_request', { body: input(' \t\r\n ', previous.revision) })
+    await error(fileTurn, 413, 'limit', { body: { ...draft, attachment: { ...full, text: full.text + 'x' } } })
+    const maxQuestion = '界'.repeat(2730) + 'ab'
+    for (const item of [undefined, attachment]) {
+      await error(fileTurn, 413, 'limit', { body: input(maxQuestion + 'x', previous.revision, item) })
+    }
+    assert.deepEqual((await json(fileSession))[0], previous)
+    assert.deepEqual(await snapshot(storage), pristine); assert.equal(calls.length, beforeCalls)
+
+    const row = { id: previous.id, title: full.name }
+    async function accept(text, item, display = text) {
+      const body = input(text, previous.revision, item)
+      const history = [...previous.messages, user(display, item)]
+      expected.push(history)
+      edge = { text: 'ok', write: wire => wire.terminal() }
+      const frames = await send(body, fileTurn)
+      assert.deepEqual((await frames.next()).value, { type: 'delta', text: 'ok' })
+      const live = { ...row, messages: history, revision: previous.revision + 1, active: body.turnId }
+      assert.deepEqual((await json(fileSession))[0], live)
+      await edge.release()
+      await finish(frames, '', 'complete')
+      edge = undefined
+      previous = { ...live, messages: [...history, assistant('ok')], revision: live.revision + 1, active: null }
+      assert.deepEqual((await json(fileSession))[0], previous)
+      assert.deepEqual(JSON.parse(await readFile(storage, 'utf8')).messages, nativeMessages(previous.messages))
+      assert.equal(calls.length, expected.length)
+    }
+    await accept(' \t\r\n ', full, '')
+    await lists([row, finalRow, legacyRow])
+    await accept(fallback, { ...full, name: `${'界'.repeat(41)}a.txt` }) // The name is exactly 128 UTF-8 bytes.
+    // Escaped JSON is over 64 KiB even though both decoded fields fit their byte caps.
+    await accept(maxQuestion, { ...full, text: '\t'.repeat(32767) + 'x' })
+    for (let i = 0; i < 2; i++) await accept('next note', full)
+
+    const used = nativeMessages(previous.messages).flatMap(m => m.content).reduce((sum, part) => sum + Buffer.byteLength(part.text), 0)
+    const question = 'at the budget', remaining = (256 - 64) * 1024 - used - Buffer.byteLength(attachmentFrame({ ...full, text: '' }) + question)
+    assert.ok(remaining > 0 && remaining < 32768)
+    const text = 'x'.repeat(remaining), atBudget = await snapshot(storage)
+    await halt(child); await boot(true); cookie = await login()
+    assert.deepEqual((await json(fileSession))[0], previous); assert.deepEqual(await snapshot(storage), atBudget)
+    await lists([row, finalRow, legacyRow])
+    await error(fileTurn, 413, 'limit', { body: input(question, previous.revision, { ...full, text: text + 'x' }) })
+    assert.deepEqual((await json(fileSession))[0], previous)
+    assert.deepEqual(await snapshot(storage), atBudget); assert.equal(calls.length, expected.length)
+    await accept(question, { ...full, text })
+  })
   await halt(child)
   assert.equal(calls.length, expected.length, 'only generation requests reached the fixture')
-  for (const [i, call] of calls.entries()) assertCall(call, protocol, model, key, expected[i])
+  for (const [i, call] of calls.entries()) assertCall(call, protocol, model, key, nativeMessages(expected[i]))
   const outgoing = JSON.stringify(calls)
-  for (const secret of [token, ...[cookie, oldCookie, other.headers.Cookie].map(value => value.split('=')[1])])
+  for (const secret of [token, ...cookies.map(value => value.split('=')[1])])
     assert.ok(!outgoing.includes(secret), 'owner credential reached the provider')
-  assert.ok(runs.every(run => !run.log().includes('unexpected non-fixture fetch')), 'extra traffic outside the fixture')
+  assert.ok(!outgoing.includes(home) && !outgoing.includes('/dev/stdin'), 'local file path reached the provider')
+  assert.ok(runs.every(run => !/unexpected (?:non-fixture fetch|attachment read)/.test(run.log())), 'unexpected I/O')
 })
 
 test('invalid headless protocol exits before binding or creating a volume', { timeout: 45000 }, async t => {
