@@ -332,7 +332,7 @@ IM 机器人支持 `/new [角色名]`、`/list`、`/stop`、`/status`、`/help`�
 
 ## 无 GUI 的服务器文字聊天（实验版）
 
-Linux 服务器可用 [Docker Compose 启动基础 Web 聊天](apps/desktop/src/headless/README.md)：用浏览器认证、新建会话、流式收发和停止，重建容器后继续原对话。默认只发布到回环地址；服务使用专用数据卷和一个部署时配置的模型。这个入口不执行桌面工具。
+Linux 服务器可用 [Docker Compose 启动基础 Web 聊天](apps/desktop/src/headless/README.md)：用浏览器认证、新建会话、流式收发和停止，重建容器后继续原对话。默认只发布到回环地址；服务使用专用数据卷和一个部署时配置的模型，支持 OpenAI Chat Completions、OpenAI Responses 或 Anthropic Messages。这个入口不执行桌面工具。
 
 ## 从源码构建
 

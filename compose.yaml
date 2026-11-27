@@ -6,7 +6,8 @@ services:
       DEVA_PORT: ${DEVA_PORT:-8787}
       DEVA_ORIGIN: ${DEVA_ORIGIN:-http://127.0.0.1:${DEVA_PORT:-8787}}
       DEVA_WEB_TOKEN: ${DEVA_WEB_TOKEN:?Set a random Web access token}
-      DEVA_MODEL_BASE_URL: ${DEVA_MODEL_BASE_URL:?Set the OpenAI-compatible API base URL including /v1}
+      DEVA_MODEL_PROTOCOL: ${DEVA_MODEL_PROTOCOL-openai}
+      DEVA_MODEL_BASE_URL: ${DEVA_MODEL_BASE_URL:?Set the base URL for the selected model API}
       DEVA_MODEL: ${DEVA_MODEL:?Set a model ID}
       DEVA_MODEL_API_KEY: ${DEVA_MODEL_API_KEY:-}
     ports:

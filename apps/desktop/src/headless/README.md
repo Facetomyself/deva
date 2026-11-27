@@ -1,6 +1,6 @@
 # Headless Web · 基础文字对话
 
-在没有桌面的 Linux 主机上运行一个单所有者文字聊天服务。浏览器可新建会话、接收流式回复、停止生成并重开历史。使用桌面同源的样式、发送/停止控件和 OpenAI Chat Completions 适配器。运行镜像只有 Node 22 和编译产物，无 Electron、X11、VNC 或手机中转。此入口不加载桌面 Agent、工具或扩展。
+在没有桌面的 Linux 主机上运行一个单所有者文字聊天服务。浏览器可新建会话、接收流式回复、停止生成并重开历史。使用桌面同源的样式、发送/停止控件和模型协议适配器。每个部署只启用一个模型。运行镜像只有 Node 22 和编译产物，无 Electron、X11、VNC 或手机中转。此入口不加载桌面 Agent、工具或扩展。
 
 ## 用 Compose 运行
 
@@ -20,6 +20,20 @@ printf '浏览器登录令牌：%s\n' "$DEVA_WEB_TOKEN"
 在同一套部署环境中运行 `docker compose up -d --force-recreate --wait`，重新登录，再点之前的会话继续聊。命名卷 `deva-data` 保留历史；`docker compose down` 保留卷，`down -v` 会删除它。普通服务进程重启会使旧登录失效。停止后保留已经生成的文字，刷新或重启不会自行重发上一条消息。
 
 [查看真实浏览器截图：服务重启并重新登录后，完整回复与已停止的回复都保留在原会话中。](../../../../docs/headless-chat.png) 图中均为本地测试对话。
+
+## 选择模型协议
+
+`DEVA_MODEL_PROTOCOL` 是部署变量，网页没有协议切换按钮。未设置时沿用 `openai`；填写时必须是下表中的小写值。服务在启动时检查配置，不探测供应商，也不在出错后换协议重发。
+
+| 值 | 协议 | `DEVA_MODEL_BASE_URL` 示例 | 请求路径（示例） |
+| --- | --- | --- | --- |
+| `openai`（默认） | OpenAI Chat Completions | `https://api.openai.com/v1` | `/v1/chat/completions` |
+| `responses` | OpenAI Responses | `https://api.openai.com/v1` | `/v1/responses` |
+| `anthropic` | Anthropic Messages | `https://api.anthropic.com` | `/v1/messages` |
+
+兼容网关可保留自己的路径前缀。Anthropic 基地址可带一个末尾 `/v1`；填写基地址，不要填到 `/messages` 或 `/responses` 请求端点。选择 `responses` 或 `anthropic` 时，同时把 `DEVA_MODEL`、基地址和模型密钥设为该供应商对应的值，然后用 `docker compose up -d --force-recreate --wait` 应用变更。
+
+更改协议不需要迁移会话文件。仅打开或整理历史时不会联系模型；**下一次主动发送时，会把该会话的文字历史一并发给新配置的模型服务**。Responses 使用 `store: false`，续聊依赖本地历史而非远端响应 ID。两种新增协议都以自身的终止事件判断完成；上游中断时保留已经显示的部分文字，并提示中断。
 
 ## 整理会话
 
@@ -42,4 +56,4 @@ pnpm --filter @deva/desktop build:headless
 node --test apps/desktop/test/headless-chat.test.mjs
 ```
 
-该测试以本地合成模型的真实 HTTP/SSE 回应验证登录、流式回复、停止、服务进程重启和继续对话，还覆盖两个登录同时改名、进行中归档被拒以及旧格式会话原样读回；无需生产密钥。运行已构建的 Linux 服务：沿用上面的部署变量，执行 `node apps/desktop/out/headless/server.mjs`。原生入口默认监听 `127.0.0.1`，可用 `DEVA_HOST` 配置，专用数据目录默认 `~/.deva-web`。
+该测试通过本地 HTTP/SSE 模拟三种模型协议，逐一检查请求地址、鉴权头、发送的历史、流式回复、停止和重启续聊，也覆盖会话整理、协议结束前断线和不受支持的输出；无需生产密钥。运行已构建的 Linux 服务：沿用上面的部署变量，执行 `node apps/desktop/out/headless/server.mjs`。原生入口默认监听 `127.0.0.1`，可用 `DEVA_HOST` 配置，专用数据目录默认 `~/.deva-web`。
