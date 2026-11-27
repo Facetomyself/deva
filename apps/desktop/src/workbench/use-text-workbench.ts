@@ -22,7 +22,7 @@ function remember(id: string | null): void {
 }
 
 export function useTextWorkbench(api: ChatTransport, beforeWrite: () => Promise<void>, onExpired: () => void, uploadsEnabled: boolean,
-  preferenceApi?: ReturnType<typeof createPreferenceTransport>, sessionWorkspaces = false) {
+  preferenceApi?: ReturnType<typeof createPreferenceTransport>, sessionWorkspaces = false, conversationStatus = false) {
   const [sessions, setSessions] = useState<ChatSummary[]>([])
   const [selected, setSelected] = useState<string | null>(null)
   const selectedRef = useRef<string | null>(null)
@@ -30,6 +30,7 @@ export function useTextWorkbench(api: ChatTransport, beforeWrite: () => Promise<
   const [listIssue, setListIssue] = useState<ListIssue>()
   const [listLoading, setListLoading] = useState(true)
   const list = useRef<ReturnType<typeof createListRefresh<ChatSummary[]>>>()
+  const listAuthority = useRef<{ invalidated: number; applied: number; rows?: ChatSummary[] }>({ invalidated: 0, applied: -1 })
   const creating = useRef<string>()
   const [createPending, setCreatePending] = useState(false)
   const retryCreate = useRef(new Map<string, string>()).current
@@ -74,7 +75,12 @@ export function useTextWorkbench(api: ChatTransport, beforeWrite: () => Promise<
     }
   }), [preferenceApi, beforeWrite, onExpired, refreshList])
   useEffect(() => {
-    const refresh = createListRefresh(api.list, (next) => {
+    const refresh = createListRefresh(async () => {
+      const stamp = listAuthority.current.invalidated
+      return { stamp, rows: await api.list() }
+    }, ({ stamp, rows: next }) => {
+      listAuthority.current.applied = stamp
+      listAuthority.current.rows = next
       setSessions(next)
       setListIssue((current) => current === 'createFailure' ? current : undefined)
       select(sessionAfterRefresh(next, selectedRef.current, lastSession(), managed))
@@ -84,14 +90,19 @@ export function useTextWorkbench(api: ChatTransport, beforeWrite: () => Promise<
       else setListIssue('listFailure')
       setListLoading(false)
     })
-    list.current = refresh
-    const link = managed || sessionWorkspaces ? createSessionsStream({ origin: window.location.origin,
-      invalidate: refresh.request, expired: onExpired }) : undefined
-    if (!managed) refresh.request()
-    const timer = window.setInterval(() => { if (document.visibilityState === 'visible') refresh.request() }, 20000)
-    window.addEventListener('focus', refresh.request)
-    return () => { link?.close(); refresh.close(); list.current = undefined; window.clearInterval(timer); window.removeEventListener('focus', refresh.request) }
-  }, [api, managed, onExpired, select, sessionWorkspaces])
+    const invalidate = (request: () => void): void => {
+      if (conversationStatus) ++listAuthority.current.invalidated
+      request()
+    }
+    const request = () => invalidate(refresh.request)
+    list.current = { request, afterWrite: () => invalidate(refresh.afterWrite), close: refresh.close }
+    const link = managed || sessionWorkspaces || conversationStatus ? createSessionsStream({ origin: window.location.origin,
+      invalidate: request, expired: onExpired }) : undefined
+    if (!managed) request()
+    const timer = window.setInterval(() => { if (document.visibilityState === 'visible') request() }, 20000)
+    window.addEventListener('focus', request)
+    return () => { link?.close(); refresh.close(); list.current = undefined; window.clearInterval(timer); window.removeEventListener('focus', request) }
+  }, [api, managed, onExpired, select, sessionWorkspaces, conversationStatus])
   useEffect(() => {
     if (!selected) return
     const sid = selected
@@ -224,7 +235,12 @@ export function useTextWorkbench(api: ChatTransport, beforeWrite: () => Promise<
       end(sid)
     }
   }
-  return { sessions, selected, select, projection: view?.sid === selected ? view?.projection : undefined, listIssue, listLoading,
+  // A GET started before the latest owner invalidation cannot authorize a read mark.
+  const currentReadProjection = (sid: string): ChatProjection | undefined =>
+    isSelected(sid) && listAuthority.current.rows === sessions && listAuthority.current.applied === listAuthority.current.invalidated
+      ? current(sid)?.current() : undefined
+  const refreshProjection = (sid: string): void => { if (isSelected(sid)) void current(sid)?.refresh() }
+  return { sessions, selected, select, projection: view?.sid === selected ? view?.projection : undefined, currentReadProjection, refreshProjection, listIssue, listLoading,
     refreshList, preferences, create, createPending, pending: selected ? pending[selected] : undefined, drafts, setDraftQuote, selectionStamp,
     attachments, addAttachments, send, stop,
     turnIssue: selected ? turnIssues[selected] : undefined }

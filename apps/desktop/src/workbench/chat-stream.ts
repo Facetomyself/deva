@@ -11,9 +11,12 @@ export function applyChatFrame(current: ChatSnapshot | undefined, frame: ChatFra
   if (next.seq !== cursor.seq + 1) return null
   const { turnId, event } = frame
   if (['turn_start', 'done', 'error', 'stream_reset'].includes(event.type)) return null
-  if (event.type !== 'text_delta') return { state, cursor: next } // No desktop-only features are projected into the text view.
+  if (event.type === 'context_changed' && state.active?.turnId === turnId) {
+    return { ...current, cursor: next, contextVersion: next.seq }
+  }
+  if (event.type !== 'text_delta') return { ...current, cursor: next } // Desktop-only payloads stay outside this projection.
   if (!state.active || state.active.turnId !== turnId || event.text === undefined) return null
-  return { cursor: next, state: { ...state, active: { ...state.active, text: state.active.text + event.text } } }
+  return { ...current, cursor: next, state: { ...state, active: { ...state.active, text: state.active.text + event.text } } }
 }
 
 export type ChatLink = 'loading' | 'ready' | 'reconnecting' | 'missing' | 'expired'

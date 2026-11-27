@@ -18,7 +18,11 @@ import { createManualBrowserPanel, type ManualBrowserPanel } from './browser-man
 import { ManualBrowserDialog } from './browser-panel'
 import { createBrowserTransport, type BrowserTransport } from './browser-transport'
 import { chatCopy, turnLabel, type ChatCopy } from './chat-copy'
-import { createChatTransport, type ChatState } from './chat-transport'
+import { createChatTransport, type ChatState, type ChatSummary } from './chat-transport'
+import { contextTarget, WorkbenchContextMeter } from './conversation-status-context'
+import { eligibleReadRow, matchingReadEntry } from './conversation-status-reads'
+import { createConversationStatusTransport, type ConversationStatusTransport } from './conversation-status-transport'
+import { DisplayedReadStatus, ReadThreadRow, useConversationReadMap } from './conversation-status-ui'
 import { ConversationSelectionStatus, useConversationSelection } from './conversation-selection-ui'
 import { eligibleDeliveryReplies } from './deliveries-controller'
 import { createDeliveriesTransport, type DeliveriesTransport, type DeliveryGroup, type DeliveryLocation } from './deliveries-transport'
@@ -57,6 +61,7 @@ type TextWorkbenchProps = {
 }
 type Workspace = ReturnType<typeof useTextWorkbench>
 const EMPTY: NonNullable<ChatState['messages']> = []
+const EMPTY_ROWS: ChatSummary[] = []
 const PAGE = 80
 const WORKSPACE_OPEN = 'workbench-workspace-open'
 const emptyVersion = () => 0
@@ -70,7 +75,9 @@ export default function TextWorkbench({ transport, bootstrap, beforeWrite, onExp
   const preferenceApi = useMemo(() => preferenceEnabled ? createPreferenceTransport(transport, bootstrap.csrf) : undefined,
     [preferenceEnabled, transport, bootstrap.csrf])
   const workspacesEnabled = bootstrap.capabilities?.sessionWorkspaces === true
-  const wk = useTextWorkbench(api, beforeWrite, onExpired, bootstrap.capabilities?.attachments === true, preferenceApi, workspacesEnabled)
+  const statusApi = useMemo(() => createConversationStatusTransport(transport, bootstrap), [transport, bootstrap])
+  const wk = useTextWorkbench(api, beforeWrite, onExpired, bootstrap.capabilities?.attachments === true, preferenceApi, workspacesEnabled, !!statusApi)
+  const reads = useConversationReadMap(statusApi, locked ? EMPTY_ROWS : wk.sessions, locked ? null : wk.selected, onExpired)
   const preferences = wk.preferences
   const preferenceVersion = useSyncExternalStore(preferences?.subscribe ?? emptySubscribe, preferences?.version ?? emptyVersion)
   const [archivedView, setArchivedView] = useState(false)
@@ -232,6 +239,9 @@ export default function TextWorkbench({ transport, bootstrap, beforeWrite, onExp
     shortcutActive: !locked && !tasksVisible && !settingsOpen && !panel && !(renameSid && renameSid === sid) &&
       !browserVisible && !filesOpen && !(sid && locatedFilesSid === sid) && !approvedProject,
     onToggleSidebar: () => setCompact(value => !value) })
+  const statusBlocked = locked || tasksVisible || settingsOpen || !!panel || (!!renameSid && renameSid === sid) ||
+    !!browserVisible || filesOpen || (!!sid && locatedFilesSid === sid) || !!approvedProject || !!clientShell.fullscreen?.view.busy ||
+    clientShell.fullscreen?.view.state === 'foreign'
   const surface = <CodeClipboardProvider writeText={writeClientText} locked={locked}><ChatSurface className={`wb-chat${preferences ? ' wb-chat--session-prefs' : ''}`} data-testid="workbench-chat">
     <div ref={shortcutScope} className={`cf-body${tasksVisible ? ' wb-chat__body--tasks' : ''}`} style={{ '--cf-side': `${compact ? 0 : sidebar}px` } as React.CSSProperties}>
       <IconRail tab={tasksVisible ? 'tasks' : 'chats'} onTab={selectRailTab} listCollapsed={compact}
@@ -273,12 +283,16 @@ export default function TextWorkbench({ transport, bootstrap, beforeWrite, onExp
               {wk.listIssue && <p className="cf-empty" role="alert">{c[wk.listIssue]}{' '}
                 {wk.listIssue === 'listFailure' && <button className="cf-empty__action" type="button" onClick={() => void wk.refreshList()}>{c.reloadList}</button>}
               </p>}
-              {visibleRows.length ? visibleRows.map((s) => <ThreadRow key={s.id} session={s} active={s.id === wk.selected}
-                appearance={appearance(s.personaId)} memberFaces={[]} membersWorking={[]} browserPages={0} tasks={[]}
-                subtitle={s.compatibility === 'legacy_text' ? c.readOnly : s.compatibility === 'unsupported' ? c.unavailable : (s.personaId ? appearance(s.personaId).name : s.model ?? t('cf.assistant'))}
-                state={s.id === wk.selected && state?.active ? { streaming: true, unread: false, attention: false } : undefined}
-                onClick={() => { wk.select(s.id); if (viewport.w < 780) setCompact(true) }} />)
-                : !wk.listLoading && !wk.listIssue && <div className="cf-empty">{query && !archivedView ? t('cf.searchNoResults') : t('chat.noSessions')}</div>}
+              {visibleRows.length ? visibleRows.map((s) => {
+                const entry = !statusApi || archivedView || (state?.id === s.id && !eligibleReadRow(state))
+                  ? undefined : matchingReadEntry(reads.readView, s)
+                const streaming = s.id === sid && !!state?.active
+                return <ReadThreadRow key={s.id} id={s.id} enabled={!!statusApi && !archivedView} entry={entry}><ThreadRow session={s} active={s.id === sid}
+                  appearance={appearance(s.personaId)} memberFaces={[]} membersWorking={[]} browserPages={0} tasks={[]}
+                  subtitle={s.compatibility === 'legacy_text' ? c.readOnly : s.compatibility === 'unsupported' ? c.unavailable : (s.personaId ? appearance(s.personaId).name : s.model ?? t('cf.assistant'))}
+                  state={streaming || entry?.unread ? { streaming, unread: !!entry?.unread, attention: false } : undefined}
+                  onClick={() => { wk.select(s.id); if (viewport.w < 780) setCompact(true) }} /></ReadThreadRow>
+              }) : !wk.listLoading && !wk.listIssue && <div className="cf-empty">{query && !archivedView ? t('cf.searchNoResults') : t('chat.noSessions')}</div>}
             </div>
           </>}
         </aside>
@@ -313,11 +327,15 @@ export default function TextWorkbench({ transport, bootstrap, beforeWrite, onExp
             managedModel={preferences ? {
               pinned: preferenceEntry?.pending?.model !== undefined ? preferenceEntry.pending.model : confirmedModel,
               disabled: preferenceControlsDisabled || selectedEntry?.model !== confirmedModel,
+              contextReady: !!preferenceEntry?.confirmed && selectedEntry?.model === confirmedModel &&
+                !(preferenceEntry.pending || preferenceEntry.reading || preferenceEntry.needsRead),
               choose: (model) => {
                 if (!preferenceControlsDisabled && model !== preferenceEntry?.confirmed?.preferences.model) void preferences.write(sid, { model })
               }
             } : undefined}
             openSettings={openSettings} openFiles={openFiles} workspaceLabel={workspaceLabel}
+            conversationStatus={statusApi ? { api: statusApi, reads, row: selectedEntry, contextBlocked: statusBlocked,
+              readBlocked: statusBlocked || archivedView || !!projectedEntry?.archived || !!wk.pending || !!wk.listIssue } : undefined}
              deliveryApi={deliveryApi} locale={locale} beforeWrite={beforeWrite} onExpired={onExpired}
              openInWorkspace={files ? openInWorkspace : undefined} />
             : <div className="wb-chat__empty cf-empty">
@@ -351,12 +369,17 @@ export default function TextWorkbench({ transport, bootstrap, beforeWrite, onExp
     }}>{surface}</LibraryWorkspace> : surface
 }
 
-type ManagedModel = { pinned: string | null | undefined; disabled: boolean; choose: (model: string | null) => void }
+type ManagedModel = { pinned: string | null | undefined; disabled: boolean; contextReady: boolean; choose: (model: string | null) => void }
+type StatusOptions = {
+  api: ConversationStatusTransport; reads: ReturnType<typeof useConversationReadMap>; row?: ChatSummary
+  contextBlocked: boolean; readBlocked: boolean
+}
 
 function TextThread({ sid, wk, c, locked, preferred, onPick, managedModel, openSettings, openFiles, workspaceLabel,
-  deliveryApi, locale, beforeWrite, onExpired, openInWorkspace }: {
+  deliveryApi, locale, beforeWrite, onExpired, openInWorkspace, conversationStatus }: {
   sid: string; wk: Workspace; c: ChatCopy; locked: boolean; preferred: string | null; onPick: (id: string) => void; openSettings: () => void
   openFiles?: () => void; workspaceLabel: string; managedModel?: ManagedModel; deliveryApi?: DeliveriesTransport; locale: string
+  conversationStatus?: StatusOptions
   beforeWrite: () => Promise<void>; onExpired: () => void; openInWorkspace?: (where: DeliveryLocation, signal: AbortSignal) => Promise<boolean>
 }): React.JSX.Element {
   const state = wk.projection?.snapshot?.state
@@ -445,6 +468,10 @@ function TextThread({ sid, wk, c, locked, preferred, onPick, managedModel, openS
     : state?.writeBlockReason === 'role_unavailable' ? c.roleUnavailable
       : state?.writeBlockReason === 'session_turn_limit' ? c.limit : state && !state.writable ? c.locked : undefined
   return <>
+    {conversationStatus && <DisplayedReadStatus {...conversationStatus.reads} locale={locale} row={conversationStatus.row}
+      projection={wk.projection} current={() => wk.currentReadProjection(sid)} blocked={conversationStatus.readBlocked} atBottom={atBottom}
+      hasContent={visibleMessages.some(({ message, cards }) => !!message.content.trim() || !!cards?.length)} scroller={scroll}
+      refresh={() => { wk.refreshProjection(sid); wk.refreshList() }} />}
     <div className="cf-convmid">
       <ConversationScroller scrollRef={scroll} onContextMenu={selection.onContextMenu} onKeyDown={selection.onKeyDown} onScroll={(event) => {
         const el = event.currentTarget
@@ -491,17 +518,19 @@ function TextThread({ sid, wk, c, locked, preferred, onPick, managedModel, openS
       writeLocked={!canQuote || !!wk.pending}
       stopping={link !== 'ready' || !!wk.pending} active={active} send={wk.send} stop={wk.stop} c={c}
       jump={!atBottom ? jump : undefined} openFiles={openFiles} workspaceLabel={workspaceLabel}
+      context={conversationStatus ? { api: conversationStatus.api, projection: wk.projection, blocked: conversationStatus.contextBlocked, onExpired } : undefined}
       attachmentDraft={attachmentDraft} add={add} remove={remove} />}
     {state?.turnLimit && state.writable && <p className="wb-chat__limits">{c.limits.replace('{turns}', String(state.turnLimit))}</p>}
   </>
 }
 
 function TextComposer({ sid, drafts, focusComposer, clipboardLocked, model, onPick, managedModel, openSettings, writeLocked, stopping, active, send, stop, c, jump, openFiles, workspaceLabel,
-  attachmentDraft, add, remove }: {
+  attachmentDraft, add, remove, context }: {
   sid: string; drafts: Workspace['drafts']; focusComposer: React.MutableRefObject<(() => void) | undefined>; clipboardLocked: boolean
   model: string; onPick: (id: string) => void; managedModel?: ManagedModel; openSettings: () => void
   writeLocked: boolean; stopping: boolean; active: ChatState['active'] | undefined; send: Workspace['send']; stop: Workspace['stop']; c: ChatCopy; jump?: () => void
   openFiles?: () => void; workspaceLabel: string; attachmentDraft: AttachmentDraft; add?: (files: BrowserFiles) => void; remove?: (key: string) => void
+  context?: Pick<Parameters<typeof WorkbenchContextMeter>[0], 'api' | 'projection' | 'blocked' | 'onExpired'>
 }): React.JSX.Element {
   const { t } = useI18n()
   const { ready, providers, activeModelId } = useModels()
@@ -584,6 +613,8 @@ function TextComposer({ sid, drafts, focusComposer, clipboardLocked, model, onPi
             onClick={openFiles} testId={openFiles ? WORKSPACE_OPEN : undefined} />
           <div className="cf-mp">
             {open && <div className="model-pick__backdrop" onClick={() => setOpen(false)} />}
+            {context && <WorkbenchContextMeter {...context} sid={sid} modelReady={ready && (!managedModel || managedModel.contextReady)}
+              target={contextTarget(managedModel ? managedModel.pinned : model || null, groups, activeModelId)} />}
             <div className="model-pick">{managedModel ? <SessionModelPicker active={picked} groups={groups} open={open}
               disabled={managedModel.disabled || !ready} pinned={managedModel.pinned} onToggle={() => setOpen((value) => !value)}
               onPick={(pid, mid) => { managedModel.choose(`${pid}:${mid}`); setOpen(false) }} follow={() => { managedModel.choose(null); setOpen(false) }} />

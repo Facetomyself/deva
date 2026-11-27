@@ -53,7 +53,7 @@ export interface ChatState extends Omit<ChatSummary, 'updatedAt'> {
   lastTurn: ChatTurn | null
 }
 export interface ChatCursor { epoch: string; scope: string; seq: number; generation: string }
-export interface ChatSnapshot { cursor: ChatCursor; state: ChatState }
+export interface ChatSnapshot { cursor: ChatCursor; state: ChatState; contextVersion?: number }
 export type ChatFrame = ({ t: 'snapshot' } & ChatSnapshot) | {
   t: 'event'; cursor: ChatCursor; sessionId: string; turnId: string; type: 'chat'; event: { type: string; text?: string }
 }
@@ -123,7 +123,7 @@ export function parseChatFrame(data: unknown, sid: string): ChatFrame | null {
       const { type, text } = value.event
       if (type === 'text_delta' && typeof text !== 'string') return null
       return { t: 'event', type: 'chat', cursor: value.cursor, sessionId: sid, turnId: value.turnId,
-        event: { type, ...(typeof text === 'string' ? { text } : {}) } }
+        event: { type, ...(type !== 'context_changed' && typeof text === 'string' ? { text } : {}) } }
     }
   } catch { /* The next authoritative snapshot replaces a malformed stream. */ }
   return null
