@@ -1,0 +1,13 @@
+# Optional: the host path is used by Compose only. The service accepts one fixed, read-only file.
+services:
+  deva:
+    environment:
+      DEVA_PROJECT_DOCS_SHA256: ${DEVA_PROJECT_DOCS_SHA256:?Set the independently reviewed snapshot digest}
+    volumes:
+      - type: bind
+        source: ${DEVA_PROJECT_DOCS_FILE:?Set the absolute path to the reviewed snapshot outside the checkout}
+        target: /run/deva-project-docs/snapshot.json
+        read_only: true
+        bind:
+          create_host_path: false
+          propagation: rprivate

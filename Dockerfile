@@ -11,7 +11,8 @@ RUN pnpm --filter @deva/desktop build:headless
 FROM node:22-bookworm-slim AS runtime
 WORKDIR /opt/deva
 ENV NODE_ENV=production DEVA_HOME=/data DEVA_HOST=127.0.0.1 DEVA_PORT=8787
-RUN test -x /usr/bin/flock && install -d -m 0700 -o node -g node /data
+RUN test -x /usr/bin/flock && install -d -m 0700 -o node -g node /data \
+ && install -d -m 0755 /run/deva-project-docs && install -m 0444 /dev/null /run/deva-project-docs/snapshot.json
 COPY --from=build /src/apps/desktop/out/headless/ ./
 RUN chmod -R u=rwX,go=rX /opt/deva
 USER node:node

@@ -37,13 +37,13 @@ jobs:
       - run: node --test apps/desktop/test/node-session-storage.test.mjs apps/desktop/test/desktop-model-protocols.test.mjs apps/desktop/test/local-text-file.test.mjs
 
       - name: Check operator-reviewed snapshot bytes offline
-        run: pnpm --filter @deva/desktop build:snapshot-check && node --test apps/desktop/test/{project-snapshot,snapshot-check-cli}.test.mjs
+        run: pnpm --filter @deva/desktop build:snapshot-check && node --test apps/desktop/test/{project-snapshot,project-documents,snapshot-check-cli}.test.mjs
 
       - run: pnpm build
 
-      - run: pnpm --filter @deva/desktop build:headless && node --test apps/desktop/test/headless-chat.test.mjs
+      - run: pnpm --filter @deva/desktop build:headless && node --test apps/desktop/test/{headless-chat,project-docs-mount}.test.mjs
 
-      - name: Continue a Responses conversation using Anthropic after native amd64 Compose recreation
+      - name: Verify native amd64 Compose chat continuity and optional document grant then revocation
         timeout-minutes: 12
         env:
           DEVA_PORT: '18794'
@@ -57,13 +57,36 @@ jobs:
           node --test apps/desktop/test/headless-compose-default.test.mjs
           export COMPOSE_PROJECT_NAME="deva-test-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           DEVA_WEB_TOKEN=$(openssl rand -hex 32); export DEVA_WEB_TOKEN
-          trap 'docker compose down --volumes' EXIT
+          # Private synthetic input stays outside the checkout/build context. The digest is fixed separately.
+          stage=$(mktemp -d "${RUNNER_TEMP:?}/deva-docs-XXXXXXXX")
+          export DEVA_PROJECT_DOCS_FILE="$stage/reviewed.json"
+          cleanup() {
+            docker compose -f compose.yaml down --volumes
+            test "$(realpath "$stage")" = "$stage" && test "$(dirname "$stage")" = "$RUNNER_TEMP"
+            if test -f "$stage/reviewed.json"; then test "$(realpath "$stage/reviewed.json")" = "$stage/reviewed.json" && unlink "$stage/reviewed.json"; fi
+            rmdir "$stage"
+          }
+          trap cleanup EXIT
+          printf '%s\n' '{"version":1,"project":"发布手册","documents":[{"name":"入门.md","text":"首次使用：先阅读版本说明。\n"}]}' > "$DEVA_PROJECT_DOCS_FILE"
+          chmod 0444 "$DEVA_PROJECT_DOCS_FILE"
+          export DEVA_PROJECT_DOCS_SHA256=17abef945c4669dcd7d6162cd1dd65084490d4249b1b6c6b9b8bf477ba0879f5
+          with_docs() { docker compose -f compose.yaml -f compose.project-docs.yaml "$@"; }
           docker compose up --build --wait --wait-timeout 90
           curl -fsS "$DEVA_ORIGIN/healthz"
           first=$(docker compose ps -q deva)
           sid=$(docker compose exec -T -e DEVA_SMOKE_EXPECT_PROTOCOL=responses deva node --input-type=module < apps/desktop/test/headless-compose-probe.mjs)
           export DEVA_MODEL_PROTOCOL=anthropic
-          docker compose up --force-recreate --wait --wait-timeout 90
-          second=$(docker compose ps -q deva)
+          with_docs up --no-build --force-recreate --wait --wait-timeout 90
+          second=$(with_docs ps -q deva)
           test -n "$first" && test -n "$second" && test "$first" != "$second"
-          docker compose exec -T -e DEVA_SMOKE_EXPECT_PROTOCOL=anthropic -e DEVA_SMOKE_SESSION="$sid" deva node --input-type=module < apps/desktop/test/headless-compose-probe.mjs
+          test "$(docker inspect -f '{{range .Mounts}}{{if eq .Destination "/run/deva-project-docs/snapshot.json"}}{{.Type}}:{{.RW}}{{end}}{{end}}' "$second")" = bind:false
+          test "$(with_docs exec -T deva id -u)" = 1000
+          doc=$(with_docs exec -T -e DEVA_SMOKE_SESSION="$sid" deva node --input-type=module < apps/desktop/test/headless-compose-docs-probe.mjs)
+          with_docs exec -T -e DEVA_SMOKE_EXPECT_PROTOCOL=anthropic -e DEVA_SMOKE_SESSION="$sid" deva node --input-type=module < apps/desktop/test/headless-compose-probe.mjs
+          with_docs stop deva
+          test "$(docker inspect -f '{{.State.Running}}' "$second")" = false
+          unset DEVA_PROJECT_DOCS_FILE DEVA_PROJECT_DOCS_SHA256
+          docker compose -f compose.yaml up --no-build --force-recreate --wait --wait-timeout 90
+          third=$(docker compose ps -q deva)
+          test -n "$third" && test "$third" != "$second"
+          docker compose exec -T -e DEVA_SMOKE_SESSION="$sid" -e DEVA_REVOKED_DOC="$doc" deva node --input-type=module < apps/desktop/test/headless-compose-docs-probe.mjs
