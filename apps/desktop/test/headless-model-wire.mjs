@@ -4,22 +4,24 @@ import { setTimeout as delay } from 'node:timers/promises'
 const textBlock = text => ({ type: 'text', text })
 function anthropicHistory(history) {
   const messages = []
-  for (const { role, text } of history) {
-    if (messages.at(-1)?.role === role) messages.at(-1).content.push(textBlock(text))
-    else messages.push({ role, content: [textBlock(text)] })
+  for (const { role, content } of history) {
+    const blocks = content.map(({ text }) => textBlock(text))
+    if (messages.at(-1)?.role === role) messages.at(-1).content.push(...blocks)
+    else messages.push({ role, content: blocks })
   }
   return messages
 }
 export const protocols = {
   openai: {
     route: 'chat/completions',
-    body: history => ({ messages: history.map(({ role, text }) => ({ role, content: text })),
+    body: history => ({ messages: history.map(({ role, content }) => ({ role, content: content.map(part => part.text).join('\n') })),
       max_tokens: 4096, stream_options: { include_usage: true } })
   },
   responses: {
     route: 'responses',
-    body: history => ({ input: history.map(({ role, text }) => ({ role,
-      content: [{ type: role === 'assistant' ? 'output_text' : 'input_text', text }] })), max_output_tokens: 4096, store: false })
+    body: history => ({ input: history.map(({ role, content }) => ({ role,
+      content: content.map(({ text }) => ({ type: role === 'assistant' ? 'output_text' : 'input_text', text })) })),
+      max_output_tokens: 4096, store: false })
   },
   anthropic: {
     route: 'messages',

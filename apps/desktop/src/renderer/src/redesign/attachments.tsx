@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
+import { FileCardLabel } from './FileCardLabel'
 import {
   AppWindow,
   ChevronLeft,
@@ -301,13 +302,7 @@ export function FileCard({
       title={title ?? name}
       style={{ '--tc': CATEGORY_COLOR[category] } as React.CSSProperties}
     >
-      <span className="cf-fcard__ico">
-        <Icon size={19} strokeWidth={1.8} />
-      </span>
-      <span className="cf-fcard__txt">
-        <span className="cf-fcard__name">{name}</span>
-        {meta && <span className="cf-fcard__meta">{meta}</span>}
-      </span>
+      <FileCardLabel icon={<Icon size={19} strokeWidth={1.8} />} name={name} meta={meta} />
       {onRemove && <RemoveButton name={name} onRemove={onRemove} />}
     </span>
   )

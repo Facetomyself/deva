@@ -2,19 +2,23 @@ import { useEffect, useLayoutEffect, useRef, useState, type FormEvent } from 're
 import { createRoot } from 'react-dom/client'
 import { ComposerAction } from '../../renderer/src/redesign/ComposerAction'
 import { normalizeSessionTitle } from '../../shared/session-title'
+import type { TextAttachment } from '../text-file'
 import { SessionButton, TitleEditor, type TitleEdit } from './session-organizer'
+import { attachmentIssue, TextAttachmentCard } from './text-attachment'
+import { readTextAttachment } from './read-text-file'
 import '../../renderer/src/styles/tokens.css'
 import '../../renderer/src/redesign/redesign.css'
 import './web.css'
 
 type Row = { id: string; title: string; archived?: true }
-type Message = { role: 'user' | 'assistant'; text: string }
+type Message = { role: 'user'; text: string; attachment?: TextAttachment } | { role: 'assistant'; text: string }
 type View = Row & { messages: Message[]; revision: number; active: string | null }
 type Index = { sessions: Row[]; model: string }
 type Mutation = 'title' | 'archive' | 'restore'
+type DraftFile = { key: number; name: string; size: number; attachment?: TextAttachment }
 type Scope = {
   id?: string; read: number; reading?: boolean; observed?: View; ready?: boolean
-  sending?: boolean; stopping?: boolean; writing?: Mutation
+  sending?: boolean; stopping?: boolean; writing?: Mutation; file?: DraftFile
 }
 type Preview = { id: string; messages: Message[]; reply: string }
 type Get = <T>(url: string, body?: object) => Promise<T>
@@ -50,6 +54,8 @@ async function request(url: string, body?: object, signal?: AbortSignal) {
 }
 const expired = (error: unknown) => error instanceof HttpError && error.status === 401
 const missing = (error: unknown) => error instanceof HttpError && error.status === 404
+// These endpoint responses reject the turn before streaming; timeouts and other delivery errors are ambiguous.
+const rejectedTurn = (error: unknown) => error instanceof HttpError && [400, 403, 404, 409, 413].includes(error.status)
 const conflict = (error: unknown, code: 'stale' | 'busy') => error instanceof HttpError && error.status === 409 && error.message === code
 function reason(error: unknown) {
   if (missing(error)) return t('This session is no longer available.', '此会话已不可用。')
@@ -186,6 +192,8 @@ function useLibrary(initial: Index, get: Get, signal: AbortSignal, expire: () =>
 function Chat({ initial, signOut }: { initial: Index; signOut: (didExpire: boolean) => void }) {
   const [view, setView] = useState<View | null>(null)
   const [draft, setDraft] = useState('')
+  const [file, setFile] = useState<DraftFile>()
+  const [fileError, setFileError] = useState('')
   const [notice, setNotice] = useState('')
   const [readError, setReadError] = useState('')
   const [preview, setPreview] = useState<Preview | null>(null)
@@ -201,6 +209,9 @@ function Chat({ initial, signOut }: { initial: Index; signOut: (didExpire: boole
   const scope = useRef<Scope>({ read: 0 })
   const [life] = useState(() => new AbortController())
   const scroll = useRef<HTMLDivElement>(null)
+  const fileInput = useRef<HTMLInputElement>(null)
+  const attachButton = useRef<HTMLButtonElement>(null)
+  const fileKey = useRef(0)
   const scopeToggle = useRef<HTMLButtonElement>(null)
   const rename = useRef<HTMLButtonElement>(null)
   const returnTitleFocus = useRef(false)
@@ -216,7 +227,16 @@ function Chat({ initial, signOut }: { initial: Index; signOut: (didExpire: boole
   const library = useLibrary(initial, get, life.signal, () => leave(true))
   const { index, archived } = library
 
+  function setDraftFile(s: Scope, next?: DraftFile) {
+    s.file = next
+    setFile(next); setFileError('')
+  }
+  function clearComposer(s: Scope) {
+    setDraft('')
+    setDraftFile(s)
+  }
   function saved(s: Scope, next: View) {
+    if (next.archived && !s.observed?.archived) clearComposer(s)
     s.id = next.id
     s.observed = next
     s.ready = true
@@ -243,6 +263,7 @@ function Chat({ initial, signOut }: { initial: Index; signOut: (didExpire: boole
         s.ready = false
         setReadError(reason(error))
         if (missing(error)) {
+          clearComposer(s)
           setView(null); s.observed = undefined; selection(null); library.observe(id)
         }
       }
@@ -261,7 +282,8 @@ function Chat({ initial, signOut }: { initial: Index; signOut: (didExpire: boole
     selection(archived ? null : id ?? null)
     follow.current = true
     returnTitleFocus.current = false
-    setView(null); setDraft(''); setNotice(''); setReadError(''); setPreview(null)
+    clearComposer(s)
+    setView(null); setNotice(''); setReadError(''); setPreview(null)
     setWorking(false); setReading(false); setStopping(false); setWriting(undefined); setReviewing(false)
     setEdit(id && !archived ? edits.current.get(id) : undefined)
     if (id) void sync(s)
@@ -369,20 +391,37 @@ function Chat({ initial, signOut }: { initial: Index; signOut: (didExpire: boole
     }
   }
 
+  async function chooseFile(s: Scope, chosen: File) {
+    if (!current(s) || !s.ready || !s.observed || s.observed.archived || s.sending || s.writing || nav.current) return
+    const pending = { key: ++fileKey.current, name: chosen.name, size: chosen.size }
+    setDraftFile(s, pending)
+    const result = await readTextAttachment(chosen)
+    if (!current(s) || s.file !== pending) return
+    if (typeof result === 'string') {
+      setDraftFile(s)
+      setFileError(attachmentIssue(result, t))
+    } else setDraftFile(s, { ...pending, attachment: result })
+  }
+
   const text = draft.trim(), overLimit = encoder.encode(text).length > maxMessageBytes
-  async function send() {
-    const s = scope.current, before = s.observed
-    if (!before || before.archived || archived || !s.ready || s.sending || s.stopping || s.reading || s.writing || nav.current || before.active || !text || overLimit || !index.model) return
+  async function send(s: Scope) {
+    const before = s.observed, selected = s.file, attachment = selected?.attachment
+    // Scope and file identity are updated synchronously, before React can repaint the composer.
+    if (!current(s) || !before || before.archived || archived || !s.ready || s.sending || s.stopping || s.reading || s.writing || nav.current || before.active ||
+        (selected && !attachment) || (!text && !attachment) || overLimit || !index.model) return
     s.sending = true
-    setWorking(true); setNotice(''); setDraft('')
+    clearComposer(s)
+    setWorking(true); setNotice('')
     follow.current = true
-    let note = '', accepted = false
+    let note = '', accepted = false, restoreDraft = false
     try {
       const turnId = uuid()
-      const res = await request(`${path(before.id)}/turns`, { text, revision: before.revision, turnId }, life.signal)
+      const payload = attachment ? { text, revision: before.revision, turnId, attachment } : { text, revision: before.revision, turnId }
+      const res = await request(`${path(before.id)}/turns`, payload, life.signal)
       accepted = true
       if (current(s)) {
-        setPreview({ id: turnId, messages: [...before.messages, { role: 'user', text }], reply: '' })
+        const message: Message = attachment ? { role: 'user', text, attachment } : { role: 'user', text }
+        setPreview({ id: turnId, messages: [...before.messages, message], reply: '' })
         // The accepted user turn advances the durable revision before streaming finishes.
         void sync(s)
       }
@@ -392,14 +431,16 @@ function Chat({ initial, signOut }: { initial: Index; signOut: (didExpire: boole
       if (result === 'stopped') note = t('Reply stopped.', '回复已停止。')
     } catch (error) {
       if (expired(error)) { leave(true); return }
-      note = accepted ? t('Reply interrupted. Check the saved history.', '回复中断，请查看已保存的记录。') : reason(error)
-      if (!accepted && (!(error instanceof HttpError) || error.status >= 500)) note =
-        t('Delivery was not confirmed. Check saved history before sending again.', '发送结果未确认。请查看已保存的记录后再发送。')
-      if (current(s) && !accepted && error instanceof HttpError && error.status >= 400 && error.status < 500) setDraft(draft)
+      restoreDraft = !accepted && rejectedTurn(error)
+      note = accepted ? t('Reply interrupted. Check the saved history.', '回复中断，请查看已保存的记录。') :
+        restoreDraft ? reason(error) : t('Delivery was not confirmed. Check saved history before sending again.', '发送结果未确认。请查看已保存的记录后再发送。')
     }
     if (current(s)) {
-      await refresh(s)
-      if (current(s)) { s.sending = false; setPreview(null); setWorking(false); if (note) setNotice(note) }
+      const latest = await refresh(s)
+      if (current(s)) {
+        if (restoreDraft && latest?.id === before.id && !latest.archived) { setDraft(draft); setDraftFile(s, selected) }
+        s.sending = false; setPreview(null); setWorking(false); if (note) setNotice(note)
+      }
     }
   }
   const active = preview?.id ?? view?.active
@@ -420,7 +461,7 @@ function Chat({ initial, signOut }: { initial: Index; signOut: (didExpire: boole
       if (current(s)) { setNotice(note); s.stopping = false; setStopping(false) }
     }
   }
-  const id = scope.current.id
+  const composerScope = scope.current, id = composerScope.id
   const readOnly = archived || !!view?.archived
   const metadataDisabled = reading || !!readError || !!writing || !!navigation
   const messages = preview ? [...preview.messages, ...(preview.reply ? [{ role: 'assistant', text: preview.reply } as const] : [])] : view?.messages ?? []
@@ -481,23 +522,39 @@ function Chat({ initial, signOut }: { initial: Index; signOut: (didExpire: boole
           readOnly ? t('No messages.', '暂无消息。') : t('Send a message to begin.', '发送消息以开始对话。') : !id ?
             archived ? t('Select an archived session to view or restore it.', '选择已归档会话查看或恢复。') :
               t('Select a session or create a new one.', '选择会话或新建会话。') : ''}</p>}
-        {messages.map(({ role, text }, n) => <article className={`cf-msg${role === 'user' ? ' is-user' : ''}`} data-testid="message" data-role={role} key={n}>
-          <div className="cf-msg__body"><div className="cf-msg__head"><span className="cf-msg__name">{role === 'user' ? t('You', '你') : 'Deva'}</span></div>
-            <div className="cf-msg__text">{text}</div></div></article>)}
+        {messages.map((message, n) => <article className={`cf-msg${message.role === 'user' ? ' is-user' : ''}`} data-testid="message" data-role={message.role} key={`${id}:${n}`}>
+          <div className="cf-msg__body"><div className="cf-msg__head"><span className="cf-msg__name">{message.role === 'user' ? t('You', '你') : 'Deva'}</span></div>
+            {message.role === 'user' && message.attachment && <div className="cf-sent">
+              <TextAttachmentCard name={message.attachment.name} text={message.attachment.text} t={t} />
+            </div>}
+            {(message.text || message.role !== 'user' || !message.attachment) && <div className="cf-msg__text">{message.text}</div>}</div></article>)}
       </div></div>
       <div className="cf-composer"><div className="cf-composer__inner">
         {readError && <p className="web-notice" role="alert">{readError}</p>}
         {notice && <p className="web-notice" role="status">{notice}</p>}
         {view?.archived && archived && <p className="web-notice">{t('Restore this session to send a message.', '恢复此会话后可发送消息。')}</p>}
-        {!readOnly && (view || preview) && <form className="cf-box" onSubmit={(e) => { e.preventDefault(); void send() }}>
+        {!readOnly && (view || preview) && <form key={id} className="cf-box" onSubmit={(e) => { e.preventDefault(); void send(composerScope) }}>
+          {file && <TextAttachmentCard key={file.key} name={file.name} size={file.size} text={file.attachment?.text} t={t} onRemove={() => {
+            if (current(composerScope) && composerScope.file?.key === file.key) { setDraftFile(composerScope); attachButton.current?.focus() }
+          }} />}
+          {fileError && <p className="web-attachment-error" role="alert" data-testid="attachment-error">{fileError}</p>}
           <textarea aria-label={t('Message', '消息')} placeholder={t('Message Deva', '给 Deva 发消息')} data-testid="composer" value={draft}
             readOnly={working || !!navigation} onChange={(e) => setDraft(e.target.value)} onKeyDown={(e) => {
-              if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing && e.keyCode !== 229) { e.preventDefault(); void send() }
+              if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing && e.keyCode !== 229) { e.preventDefault(); void send(composerScope) }
             }} />
-          <div className="cf-box__bar"><span className="web-muted">{active || working ? t('Reply in progress…', '正在回复…') :
-            overLimit ? t('Message exceeds 8 KiB.', '消息超过 8 KiB。') : index.model || t('No model configured on the server.', '服务端尚未配置模型。')}</span>
+          <div className="cf-box__bar">
+            <input ref={fileInput} hidden type="file" accept=".txt,.md" data-testid="attachment-input" onChange={(e) => {
+              const chosen = e.currentTarget.files?.[0]
+              e.currentTarget.value = ''
+              if (chosen) void chooseFile(composerScope, chosen)
+            }} />
+            <button ref={attachButton} type="button" className="web-secondary" data-testid="attach-file"
+              disabled={working || metadataDisabled} onClick={() => fileInput.current?.click()}>{t('Attach file', '添加文件')}</button>
+            <span className="web-muted web-composer-model">{active || working ? t('Reply in progress…', '正在回复…') :
+              overLimit ? t('Message exceeds 8 KiB.', '消息超过 8 KiB。') : index.model || t('No model configured on the server.', '服务端尚未配置模型。')}</span>
             {active ? <ComposerAction stop label={t('Stop', '停止')} data-testid="stop" disabled={stopping || !!navigation} onClick={() => void stop()} /> :
-              <ComposerAction type="submit" label={t('Send', '发送')} data-testid="send" disabled={working || stopping || metadataDisabled || !text || overLimit || !index.model} />}</div>
+              <ComposerAction type="submit" label={t('Send', '发送')} data-testid="send"
+                disabled={working || stopping || metadataDisabled || (file ? !file.attachment : !text) || overLimit || !index.model} />}</div>
         </form>}
       </div></div>
     </main>

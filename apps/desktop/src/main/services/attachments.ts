@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { promises as fs } from 'fs'
 import { basename, dirname, extname, join, resolve } from 'path'
 import type { ContentPart } from '../providers/types'
+import { formatTextAttachment } from '../../shared/text-attachment'
 import { trustRoot } from './fs-guard'
 import { sniffImageMime, thumbnailDataUrl } from './image-read'
 
@@ -30,17 +31,14 @@ export interface PickedAttachment {
   reason?: string
 }
 
-/** 文本类附件注入模型时的前缀标记（供历史重建识别为「附件」而非提问正文）。 */
-export const ATTACH_TEXT_PREFIX = '[附件文件] '
+// Existing desktop consumers and the headless host share one native model-facing representation.
+export { ATTACH_TEXT_PREFIX, ATTACHMENTS_ONLY_QUESTION } from '../../shared/text-attachment'
 
 /** 文件夹附件注入模型时的前缀标记：其后是绝对路径（首行），供历史重建识别为「文件夹」。 */
 export const ATTACH_FOLDER_PREFIX = '[附件文件夹] '
 
 /** 只给位置的文件附件注入模型时的前缀标记：其后是绝对路径（首行），供历史重建识别为「文件」。 */
 export const ATTACH_PATH_PREFIX = '[附件文件路径] '
-
-/** 只发了附件、没写字时代填的提问正文（模型需要一句话；手机端不把它当用户的话显示）。 */
-export const ATTACHMENTS_ONLY_QUESTION = '请理解并处理上述附件。'
 
 /** 拖入 / 粘贴的条目里认出的文件夹。 */
 export interface DroppedFolder {
@@ -340,7 +338,7 @@ export async function buildAttachmentPart(
       const buf = await fs.readFile(abs)
       if (buf.length > MAX_TEXT) return { note: `文本过大已忽略：${name}` }
       return {
-        part: { type: 'text', text: `${ATTACH_TEXT_PREFIX}${name}\n\`\`\`\n${buf.toString('utf8')}\n\`\`\`` }
+        part: { type: 'text', text: formatTextAttachment(name, buf.toString('utf8')) }
       }
     }
     return { note: `已忽略不支持的文件：${name}` }

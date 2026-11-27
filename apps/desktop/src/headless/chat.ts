@@ -2,12 +2,14 @@ import { randomUUID } from 'node:crypto'
 import { normalizeSessionTitle, SESSION_TITLE_MAX } from '../shared/session-title'
 import { modelAdapters, type AdapterKind } from '../main/providers/adapters'
 import type { AdapterTransport } from '../main/providers/types'
+import { textAttachmentProblem, type TextAttachment } from './text-file'
+import { INPUT, OUTPUT, message, messageBytes, projectMessage, userMessage, type MessageView, type Role, type TextMessage } from './text-message'
 import { deriveTitle, listPlainSessionIds, PlainSessionSyncError, readPlainSession, savePlainSession } from '../main/services/chat-store'
 
 const UUID = '[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}'
 const SESSION_ID = new RegExp(`^web_${UUID}(?![\\s\\S])`)
 const TURN_ID = new RegExp(`^${UUID}(?![\\s\\S])`)
-const INPUT = 8 * 1024, OUTPUT = 64 * 1024, HISTORY = 256 * 1024
+const HISTORY = 256 * 1024
 const SESSIONS = 64, TURNS = 128, CONCURRENT = 2, DEADLINE = 120_000, WIRE = 1024 * 1024
 const errors = {
   invalid_request: [400, 'Invalid chat request'], invalid_id: [400, 'Invalid session ID'],
@@ -24,25 +26,32 @@ export class ChatError extends Error {
   }
 }
 
-type Role = 'user' | 'assistant'
-type TextMessage = { role: Role; content: [{ type: 'text'; text: string }] }
 type Session = {
   id: string; title: string; createdAt: number; updatedAt: number; messages: TextMessage[]; webText: true
   archived?: true; webEdits?: number; webCustomTitle?: true
 }
 type Row = { id: string; title: string; archived?: true }
-export type View = Row & { messages: { role: Role; text: string }[]; revision: number; active: string | null }
+export type View = Row & { messages: MessageView[]; revision: number; active: string | null }
 const sessionKeys = new Set(['id', 'title', 'createdAt', 'updatedAt', 'messages', 'webText', 'archived', 'webEdits', 'webCustomTitle'])
 const maxEdits = Number.MAX_SAFE_INTEGER - 2 * TURNS
 const revisionOf = (s: Session) => s.messages.length + (s.webEdits ?? 0)
 const invalidTitle = /[\u0000-\u001f\u007f\uD800-\uDFFF]/u
 const row = (s: Session): Row => ({ id: s.id, title: s.title, ...(s.archived ? { archived: true } : {}) })
-type Send = { text: string; revision: number; turnId: string }
+type Send = { text: string; revision: number; turnId: string; attachment?: unknown }
 type Outcome = 'complete' | 'stopped'
 type Sink = (text: string) => Promise<void>
 
-function message(role: Role, text: string): TextMessage {
-  return { role, content: [{ type: 'text', text }] }
+function visible(m: TextMessage): MessageView {
+  const result = projectMessage(m)
+  if (!result) throw new ChatError('storage')
+  return result
+}
+
+function automaticTitle(s: Session) {
+  const first = s.messages.find(m => m.role === 'user')
+  if (!first) return 'New chat'
+  const { text, attachment } = visible(first)
+  return deriveTitle(text || attachment?.name || '') || 'New chat'
 }
 
 function disk<T>(action: () => T): T {
@@ -61,13 +70,8 @@ function load(id: string): Session | undefined {
       !Number.isSafeInteger(s.createdAt) || !Number.isSafeInteger(s.updatedAt) || !Array.isArray(s.messages) || s.messages.length > 2 * TURNS) return
   let bytes = 0, users = 0, previous: Role | undefined
   for (const m of s.messages) {
-    if (!m || Object.keys(m).length !== 2 || !Array.isArray(m.content) || m.content.length !== 1 ||
-        (m.role !== 'user' && (m.role !== 'assistant' || previous !== 'user'))) return
-    const p = m.content[0]
-    if (!p || Object.keys(p).length !== 2 || p.type !== 'text' || typeof p.text !== 'string' || !p.text) return
-    const size = Buffer.byteLength(p.text)
-    if (size > (m.role === 'user' ? INPUT : OUTPUT) || (bytes += size) > HISTORY) return
-    if (m.role === 'user' && (++users > TURNS || p.text !== p.text.trim())) return
+    if (!projectMessage(m) || (m.role === 'assistant' && previous !== 'user') ||
+        (bytes += messageBytes(m)) > HISTORY || (m.role === 'user' && ++users > TURNS)) return
     previous = m.role
   }
   return s
@@ -141,7 +145,7 @@ export function createTextChat({ protocol, baseURL, model, apiKey }: {
   }
 
   function view(s: Session): View {
-    return { ...row(s), messages: s.messages.map(m => ({ role: m.role, text: m.content[0].text })),
+    return { ...row(s), messages: s.messages.map(visible),
       revision: revisionOf(s), active: active.get(s.id)?.turnId ?? null }
   }
 
@@ -165,7 +169,7 @@ export function createTextChat({ protocol, baseURL, model, apiKey }: {
     if ('title' in change) {
       const name = normalizeSessionTitle(change.title)
       if (invalidTitle.test(name)) throw new ChatError('invalid_request')
-      next.title = name || deriveTitle(s.messages.find(m => m.role === 'user')?.content[0].text ?? '') || 'New chat'
+      next.title = name || automaticTitle(s)
       if (name) next.webCustomTitle = true
       else delete next.webCustomTitle
     } else {
@@ -199,19 +203,25 @@ export function createTextChat({ protocol, baseURL, model, apiKey }: {
       if (!input || typeof input.text !== 'string' || !Number.isSafeInteger(input.revision) || input.revision < 0 ||
           typeof input.turnId !== 'string' || !TURN_ID.test(input.turnId)) throw new ChatError('invalid_request')
       const text = input.text.trim()
-      if (!text) throw new ChatError('invalid_request')
-      const bytes = Buffer.byteLength(text)
-      if (bytes > INPUT) throw new ChatError('limit')
+      if (Buffer.byteLength(text) > INPUT) throw new ChatError('limit')
+      let file: TextAttachment | undefined
+      if (input.attachment !== undefined) {
+        const problem = textAttachmentProblem(input.attachment)
+        if (problem) throw new ChatError(problem === 'size' ? 'limit' : 'invalid_request')
+        file = input.attachment as TextAttachment
+      }
+      if (!text && !file) throw new ChatError('invalid_request')
       if (closed) throw new ChatError('storage')
       const s = get(id)
       if (active.has(id)) throw new ChatError('busy')
       if (revisionOf(s) !== input.revision) throw new ChatError('stale')
       if (active.size >= CONCURRENT) throw new ChatError('busy')
+      const incoming = userMessage(text, file)
       if (s.messages.filter(m => m.role === 'user').length >= TURNS ||
-          s.messages.reduce((sum, m) => sum + Buffer.byteLength(m.content[0].text), bytes + OUTPUT) > HISTORY)
+          s.messages.reduce((sum, m) => sum + messageBytes(m), messageBytes(incoming) + OUTPUT) > HISTORY)
         throw new ChatError('limit')
-      const next = { ...s, updatedAt: Date.now(), title: s.messages.length || s.webCustomTitle ? s.title : deriveTitle(text),
-        messages: [...s.messages, message('user', text)] }
+      const next = { ...s, updatedAt: Date.now(), title: s.messages.length || s.webCustomTitle ? s.title : deriveTitle(text || file?.name || ''),
+        messages: [...s.messages, incoming] }
       delete next.archived // As on desktop, an explicitly accepted new turn reopens an archived conversation.
       const controller = new AbortController()
       let stopped = false, running: Promise<Outcome> | undefined
