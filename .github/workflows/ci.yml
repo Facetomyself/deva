@@ -43,50 +43,18 @@ jobs:
 
       - run: pnpm --filter @deva/desktop build:headless && node --test apps/desktop/test/{headless-chat,project-docs-mount}.test.mjs
 
-      - name: Verify native amd64 Compose chat continuity and optional document grant then revocation
-        timeout-minutes: 12
-        env:
-          DEVA_PORT: '18794'
-          DEVA_ORIGIN: http://127.0.0.1:18794
-          DEVA_MODEL_BASE_URL: http://127.0.0.1:18795/v1
-          DEVA_MODEL: deva-compose-fixture
-          DEVA_MODEL_PROTOCOL: responses
-        run: |
-          set -eu
-          test "$(uname -m)" = x86_64
-          node --test apps/desktop/test/headless-compose-default.test.mjs
-          export COMPOSE_PROJECT_NAME="deva-test-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          DEVA_WEB_TOKEN=$(openssl rand -hex 32); export DEVA_WEB_TOKEN
-          # Private synthetic input stays outside the checkout/build context. The digest is fixed separately.
-          stage=$(mktemp -d "${RUNNER_TEMP:?}/deva-docs-XXXXXXXX")
-          export DEVA_PROJECT_DOCS_FILE="$stage/reviewed.json"
-          cleanup() {
-            docker compose -f compose.yaml down --volumes
-            test "$(realpath "$stage")" = "$stage" && test "$(dirname "$stage")" = "$RUNNER_TEMP"
-            if test -f "$stage/reviewed.json"; then test "$(realpath "$stage/reviewed.json")" = "$stage/reviewed.json" && unlink "$stage/reviewed.json"; fi
-            rmdir "$stage"
-          }
-          trap cleanup EXIT
-          printf '%s\n' '{"version":1,"project":"发布手册","documents":[{"name":"入门.md","text":"首次使用：先阅读版本说明。\n"}]}' > "$DEVA_PROJECT_DOCS_FILE"
-          chmod 0444 "$DEVA_PROJECT_DOCS_FILE"
-          export DEVA_PROJECT_DOCS_SHA256=17abef945c4669dcd7d6162cd1dd65084490d4249b1b6c6b9b8bf477ba0879f5
-          with_docs() { docker compose -f compose.yaml -f compose.project-docs.yaml "$@"; }
-          docker compose up --build --wait --wait-timeout 90
-          curl -fsS "$DEVA_ORIGIN/healthz"
-          first=$(docker compose ps -q deva)
-          sid=$(docker compose exec -T -e DEVA_SMOKE_EXPECT_PROTOCOL=responses deva node --input-type=module < apps/desktop/test/headless-compose-probe.mjs)
-          export DEVA_MODEL_PROTOCOL=anthropic
-          with_docs up --no-build --force-recreate --wait --wait-timeout 90
-          second=$(with_docs ps -q deva)
-          test -n "$first" && test -n "$second" && test "$first" != "$second"
-          test "$(docker inspect -f '{{range .Mounts}}{{if eq .Destination "/run/deva-project-docs/snapshot.json"}}{{.Type}}:{{.RW}}{{end}}{{end}}' "$second")" = bind:false
-          test "$(with_docs exec -T deva id -u)" = 1000
-          doc=$(with_docs exec -T -e DEVA_SMOKE_SESSION="$sid" deva node --input-type=module < apps/desktop/test/headless-compose-docs-probe.mjs)
-          with_docs exec -T -e DEVA_SMOKE_EXPECT_PROTOCOL=anthropic -e DEVA_SMOKE_SESSION="$sid" deva node --input-type=module < apps/desktop/test/headless-compose-probe.mjs
-          with_docs stop deva
-          test "$(docker inspect -f '{{.State.Running}}' "$second")" = false
-          unset DEVA_PROJECT_DOCS_FILE DEVA_PROJECT_DOCS_SHA256
-          docker compose -f compose.yaml up --no-build --force-recreate --wait --wait-timeout 90
-          third=$(docker compose ps -q deva)
-          test -n "$third" && test "$third" != "$second"
-          docker compose exec -T -e DEVA_SMOKE_SESSION="$sid" -e DEVA_REVOKED_DOC="$doc" deva node --input-type=module < apps/desktop/test/headless-compose-docs-probe.mjs
+      - name: Check manifest isolation and qualification guards
+        run: node --test apps/desktop/test/{headless-compose-default,compose-acceptance-host,compose-acceptance-evidence,compose-acceptance-lifecycle,native-compose-entry}.test.mjs
+
+      - name: Qualify the native amd64 Compose image and verify cleanup
+        timeout-minutes: 20
+        shell: bash
+        run: node apps/desktop/test/verify-native-compose.mjs | tee "$RUNNER_TEMP/deva-native-amd64.json"
+
+      - name: Save the successful native image receipt
+        uses: actions/upload-artifact@v4
+        with:
+          name: deva-native-amd64-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/deva-native-amd64.json
+          if-no-files-found: error
+          retention-days: 14
