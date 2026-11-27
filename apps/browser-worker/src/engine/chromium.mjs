@@ -3,8 +3,10 @@ import { constants } from 'node:fs';
 import { access, chmod, mkdir, mkdtemp, readdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
-import { BOOTSTRAP_URL, configPolicy, EngineError, fail, VIEWPORT } from './policy.mjs';
+import { configPolicy, EngineError, fail } from './policy.mjs';
 import { classifyStartupStderr } from './launch-diagnostics.mjs';
+import { observeNetworkRestarts } from './network-startup.mjs';
+import { browserFlags } from './launch-flags.mjs';
 import { procIdentity, verifyRendererSandbox } from './sandbox.mjs';
 import { startChromiumSession } from './session.mjs';
 
@@ -14,21 +16,6 @@ const PROFILE_ROOT = '/tmp';
 const PROFILE_PREFIX = 'deva-browser-';
 const STARTUP_MS = 25_000;
 const HANDSHAKE_MS = 12_000;
-
-function browserFlags(profile, proxyUrl) {
-  return [
-    '--headless', '--remote-debugging-pipe',
-    `--user-data-dir=${profile}`, `--window-size=${VIEWPORT.width},${VIEWPORT.height}`,
-    `--proxy-server=${proxyUrl}`, '--proxy-bypass-list=<-loopback>',
-    `--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE ${new URL(proxyUrl).hostname}`, '--disable-quic',
-    '--force-webrtc-ip-handling-policy=disable_non_proxied_udp',
-    '--disable-blink-features=FileSystemAccess,FileSystemAccessLocal',
-    '--no-first-run', '--no-default-browser-check', '--disable-background-networking',
-    '--disable-component-update', '--disable-extensions', '--disable-sync',
-    '--disable-breakpad', '--disable-crash-reporter', '--disable-crashpad-for-testing',
-    '--password-store=basic', BOOTSTRAP_URL,
-  ];
-}
 
 async function safeRemove(profile) {
   if (dirname(profile) !== PROFILE_ROOT || !/^deva-browser-[a-z0-9]{6}$/iu.test(basename(profile))) {
@@ -180,7 +167,7 @@ async function launch(policy, probeOnly, signal) {
   if (process.platform !== 'linux' || typeof process.getuid !== 'function' || process.getuid() === 0 || process.geteuid() === 0) {
     throw fail('BROWSER_SANDBOX_REQUIRED');
   }
-  let executable, profile, shutdown, stderr;
+  let executable, profile, shutdown, stderr, networking;
   try {
     executable = await realpath(policy.executablePath);
     await access(executable, constants.X_OK);
@@ -196,10 +183,11 @@ async function launch(policy, probeOnly, signal) {
       cwd: profile, detached: true, env, stdio: ['ignore', 'ignore', 'pipe', 'pipe', 'pipe'],
     });
     stderr = classifyStartupStderr(child.stderr);
+    networking = observeNetworkRestarts(child.stderr);
     const control = processControl(child, profile);
     shutdown = control.shutdown;
     return await startChromiumSession({ writer: child.stdio[3], reader: child.stdio[4], policy, shutdown, probeOnly,
-      signal: startup, abortCode, handshakeMs: HANDSHAKE_MS, async verifySandbox(getProcessInfo) {
+      signal: startup, abortCode, handshakeMs: HANDSHAKE_MS, sealStartup: () => networking.stop(), async verifySandbox(getProcessInfo) {
         await verifyRendererSandbox({ pid: child.pid, uid: process.getuid(), profile, signal: startup, getProcessInfo,
           trustedBrowserInventory: true, observeOwned: control.observeOwned });
         stderr.finish();
@@ -210,8 +198,8 @@ async function launch(policy, probeOnly, signal) {
       else if (profile) await safeRemove(profile);
     } catch { throw fail('BROWSER_CLEANUP_FAILED'); }
     const code = error instanceof EngineError ? error.code : 'BROWSER_START_FAILED';
-    throw fail(code, { ...error?.diagnostic, launchHint: stderr?.hint() });
-  } finally { stderr?.finish(); }
+    throw fail(code, { ...error?.diagnostic, launchHint: stderr?.hint(), networkRestarts: networking?.stop() });
+  } finally { networking?.stop(); stderr?.finish(); }
 }
 
 /** A single supervised Chromium page. The caller owns lease/auth and the network namespace. */

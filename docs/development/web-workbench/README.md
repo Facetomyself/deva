@@ -4,7 +4,7 @@
 
 通用文本阶段另外给七个 `chat` 条目登记了 `web.partial`：`createSession`、`send`、`abort`、`listSessions`、`loadSession`、`attachSession`、`onEvent`。每项记录已验证范围、专有测试和仍缺的桌面行为；它们仍计入 `pending`，不等同于附件、工具、成员或审批均已接通。[通用文本协议与阶段限制](../../../apps/headless/src/chat/README.md)。
 
-[可选人工浏览器](../../../apps/browser-worker/README.md) 仅对当前真实登录、已绑定会话和工作器页面发放短租约。`browser.getState`、`ready`、`open`、`liveStart`、`liveStop`、`onLiveFrame`、`handoff` 和 `closeTab` 已登记具体人工操作范围，仍按部分覆盖计算。它不是多标签自动化、团队转交，也不是让模型读取人工页面内容。
+[可选人工浏览器](../../../apps/browser-worker/README.md) 仅对当前真实登录、已绑定会话和工作器页面发放短租约。`browser.getState`、`ready`、`open`、`liveStart`、`liveStop`、`onLiveFrame`、`handoff` 和 `closeTab` 已登记具体人工操作范围，仍按部分覆盖计算。已在原生 Linux 上通过真实工作台与第二个沙箱浏览器的同标签页表单、交还、重新接管、到期与退出验证。默认 Compose 的受测运行机仍在内核沙箱初始化时受阻；参考工作器说明中的逐环境回执。它不是多标签自动化、团队转交，也不是让模型读取人工页面内容。
 
 **技能管理与技能执行分别计数。** `skills.list` 返回真实来源、启用和角色范围的目录摘要；`setEnabled` 和 `setRoles` 保存原生配置并读回；`onChanged` 向已打开的设置页发送修订号，页面重取列表，断线后重新确认选中的文档。`skills.get` 针对自定义文档已接通，但不下发内置运行指令，因此登记为部分覆盖。导入和删除仍待实现。此处没有把目录偏好登记为 Web 聊天已能执行技能。
 

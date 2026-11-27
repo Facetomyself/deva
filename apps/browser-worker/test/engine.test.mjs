@@ -26,7 +26,7 @@ const FRAME = png.toString('base64');
 
 function protocolFixture({ probeOnly, verifySandbox = async () => {}, navigationMs = 400, commandMs = 350, signal,
   initiallyHeld = [], launchTargets, discoveryTargets, unexpectedDiscovered, duringDownload, omitAttachedContext = false,
-  fetchNavigation = false, holdNavigationCommit = false } = {}) {
+  fetchNavigation = false, holdNavigationCommit = false, initialNavigationFailure } = {}) {
   const writer = new PassThrough();
   const reader = new PassThrough();
   const commands = [];
@@ -80,6 +80,12 @@ function protocolFixture({ probeOnly, verifySandbox = async () => {}, navigation
       case 'Target.getTargetInfo': return respond(request, { targetInfo: { ...info } });
       case 'Page.getFrameTree': return respond(request, { frameTree: { frame: { url: info.url, id: main } } });
       case 'Page.navigate': {
+        if (initialNavigationFailure) {
+          emit('Page.frameStartedNavigating', { frameId: main, url: params.url });
+          emit('Page.frameStartedLoading', { frameId: main });
+          emit('Page.frameStartedLoading', { frameId: 'unrelated' });
+          return respond(request, initialNavigationFailure);
+        }
         if (fetchNavigation) {
           pausedNavigation = request;
           return emit('Fetch.requestPaused', fetchEvent());
@@ -193,15 +199,21 @@ test('startup attaches only to the single openerless initial blank and rejects f
     assert.equal(unexpected.closed, 1);
     assert.ok(!unexpected.commands.some(({ method }) => method === 'Page.navigate'));
   }
-  const discovered = protocolFixture({ unexpectedDiscovered: { targetId: 'browser-worker', type: 'worker' } });
+  const discovered = protocolFixture({ unexpectedDiscovered: {
+    targetId: 'browser-worker', type: 'service_worker', url: 'chrome-extension://fixture-unknown/background.js',
+    browserContextId: 'default-private-profile',
+  } });
   await assert.rejects(discovered.engine, (error) => {
     assert.equal(error.code, 'BROWSER_TARGET_LOST');
     assert.equal(error.diagnostic.stage, 'watch-targets');
-    assert.equal(error.diagnostic.target.type, 'worker');
+    assert.equal(error.diagnostic.target.type, 'service_worker');
+    assert.equal(error.diagnostic.target.context, 'same');
     assert.equal(error.diagnostic.target.sameTarget, false);
+    assert.equal(error.diagnostic.target.postNavigation, false);
     return true;
   });
   assert.equal(discovered.closed, 1);
+  assert.ok(!discovered.commands.some(({ method }) => method === 'Page.navigate'));
 });
 
 test('root reports may omit context or briefly omit URL only for the pinned blank', async (t) => {
@@ -258,14 +270,23 @@ test('startup installs guards and attests its existing renderer before activatio
   assert.deepEqual(order.filter((method) => required.includes(method)), required);
 });
 
-test('a newly discovered tab or subtarget invalidates the only engine page', async () => {
-  for (const type of ['page', 'iframe', 'worker']) {
+test('a newly discovered page or worker invalidates the only engine page even in the pinned context', async () => {
+  for (const [type, url] of [
+    ['page', 'about:blank'], ['iframe', 'about:blank'], ['worker', 'about:blank'],
+    ['shared_worker', 'about:blank'], ['service_worker', 'chrome-extension://fixture-unknown/background.js'],
+  ]) {
     const fixture = protocolFixture();
     const engine = await fixture.engine;
     await engine.captureFrame();
-    fixture.emit('Target.targetCreated', { targetInfo: { type, url: 'about:blank', targetId: 'foreign' } }, null);
+    fixture.emit('Target.targetCreated', { targetInfo: { type, url, targetId: 'foreign',
+      browserContextId: 'default-private-profile' } }, null);
     assert.equal(engine.getLatestFrame(), null);
-    await assert.rejects(engine.getPageInfo(), { code: 'BROWSER_TARGET_LOST' });
+    await assert.rejects(engine.getPageInfo(), (error) => {
+      assert.equal(error.code, 'BROWSER_TARGET_LOST');
+      assert.equal(error.diagnostic.target.type, type);
+      assert.equal(error.diagnostic.target.context, 'same');
+      return true;
+    });
     await engine.close();
     assert.equal(fixture.closed, 1);
     assert.equal(fixture.commands.filter(({ method }) => method === 'Target.attachToTarget').length, 1);
@@ -282,6 +303,31 @@ test('startup timeout reports only a predefined phase and CDP command', async ()
   });
   assert.equal(fixture.closed, 1);
   assert.equal(new EngineError('BROWSER_START_FAILED', { stage: '/private/path', command: START }).diagnostic, undefined);
+});
+
+test('entry diagnostics distinguish an early rejection from a missing ACK and never echo page-controlled strings', async () => {
+  for (const [result, expected] of [
+    [{ frameId: 'main-frame', errorText:'net::ERR_ABORTED' }, {error:'aborted',frame:'main',download:false}],
+    [{ frameId: START, errorText:'net::ERR_PROXY_CONNECTION_FAILED' }, {error:'proxy',frame:'other',download:false}],
+    [{ errorText: START }, {error:'other',frame:'missing',download:false}],
+    [{ frameId:'main-frame', isDownload:true }, {error:'none',frame:'main',download:true}],
+  ]) {
+    const f=protocolFixture({initialNavigationFailure: result});
+    await assert.rejects(f.engine,e=>{
+      assert.equal(e.code,result.isDownload?'BROWSER_DOWNLOAD_UNSUPPORTED':'BROWSER_NAVIGATION_FAILED');
+      assert.deepEqual(e.diagnostic.entryReceipt,expected);
+      assert.equal(e.diagnostic.entryNavigation.navigateAck,1);
+      assert.equal(e.diagnostic.entryNavigation.mainFrameStartedNavigating,1);
+      assert.equal(e.diagnostic.entryNavigation.mainFrameStartedLoading,1);
+      assert.equal(e.diagnostic.entryNavigation.requestPaused,0);
+      assert.ok(!JSON.stringify(e.diagnostic).includes(START));
+      return true;
+    });
+    assert.equal(f.closed,1);
+  }
+  assert.equal(new EngineError('BROWSER_START_FAILED',{entryReceipt:{error:START,frame:'main',download:false}}).diagnostic,undefined);
+  const f=protocolFixture({ commandMs:60, initiallyHeld:['Page.navigate'] });
+  await assert.rejects(f.engine,e=>e.code==='BROWSER_TIMEOUT' && e.diagnostic.entryNavigation.navigateAck===0 && !Object.hasOwn(e.diagnostic,'entryReceipt'));
 });
 
 test('entry interleaves Fetch request and response continuations with a waiting Page.navigate', async (t) => {

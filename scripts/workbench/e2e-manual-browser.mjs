@@ -7,6 +7,7 @@ import { basename, dirname, isAbsolute, join } from 'node:path'
 import { requestControl } from '../../apps/headless/src/control/socket.mjs'
 import { initializeMasterKey } from '../../apps/headless/src/storage/vault.mjs'
 import { startLocalWebDriver, waitFor, WebDriverError } from './webdriver-local.mjs'
+import { createHandoffCapture, HandoffCaptureError } from './e2e-manual-browser-capture.mjs'
 import { formPath, frameSamples, siteId, siteLabel, startManualFixture, viewport } from './e2e-manual-browser-fixture.mjs'
 
 // Run on non-root Linux after the headless and Workbench builds, with an existing
@@ -270,6 +271,12 @@ function observe(browser, mode, path, body) {
         return Array.isArray(value.tabs) && value.tabs.every(t => sid(t.sessionId) && /^[A-Za-z0-9_-]{24}$/.test(t.tabId) &&
           ['open','leased','returned'].includes(t.state)) ? value.tabs.map(({sessionId,tabId,state}) => ({sessionId,tabId,state})) : null;
       }
+      if (mode === 'capture-tab') {
+        if (!Array.isArray(value.tabs) || value.tabs.length !== 1) return false;
+        const tab = value.tabs[0];
+        return tab?.sessionId === body.sid && tab.tabId === body.tabId && tab.state === 'leased' &&
+          tab.siteId === body.siteId && tab.label === body.siteLabel && tab.origin === body.origin;
+      }
       if (mode === 'idle') return Array.isArray(value.state?.messages) && value.state.messages.length === 0 &&
         value.state.active === null && value.state.lastTurn === null;
       return false;
@@ -303,11 +310,11 @@ async function newChat(browser, screen) {
   }, 'NEW_CHAT_NOT_PERSISTED')
   // A persisted session can arrive at the server before React has selected the new chat.
   await until(() => browser.execute(`
-    const [create, count] = arguments;
-    return document.querySelector(create)?.disabled === false &&
+    const [create, count, sid] = arguments;
+    return document.querySelector(create)?.disabled === false && sessionStorage.getItem('deva-workbench.chat') === sid &&
       document.querySelectorAll('.wb-chat .cf-thread').length === count &&
       !!document.querySelector('.wb-chat .cf-thread.is-active');
-  `, hook('new-chat'), previous.length + 1), 'NEW_CHAT_NOT_SELECTED')
+  `, hook('new-chat'), previous.length + 1, sid), 'NEW_CHAT_NOT_SELECTED')
   return sid
 }
 
@@ -344,7 +351,20 @@ async function openSite(browser, screen, fixture, sid) {
   `, selector, option, siteLabel, fixture.origin), 'REGISTERED_SITE_MISSING')
   await browser.click(actualOption)
   await screen.click(panel('open-site'), 'REGISTERED_SITE_OPEN_MISSING')
-  await screen.status(['open'], 30_000)
+  // Distinguish an actual typed denial/unavailability from a missing React transition.
+  // Only status/HTTP/counts leave the client, never a URL, response body or login proof.
+  const opened = await screen.status(['open','request-failed','sandbox-startup-failure','worker-unavailable','egress-unavailable','binary-missing'], 30_000)
+  if (opened !== 'open') {
+    const observed = await browser.execute(`
+      const path=arguments[0]; const rows=performance.getEntriesByType('resource').filter(row=> {
+        const u=new URL(row.name);return u.origin===location.origin && u.pathname===path && !u.search && !u.hash;
+      });const status=rows.at(-1)?.responseStatus;
+      return Number.isInteger(status) && status>=0 && status<=599 ? status : 0;
+    `, `${browserScope(sid)}/open`)
+    const fixed=new Set(['request-failed','sandbox-startup-failure','worker-unavailable','egress-unavailable','binary-missing'])
+    const count=Math.max(0,Math.min(8,fixture.documents.length-oldDocs))
+    throw new Failure(`SITE_OPEN_${fixed.has(opened)?opened:'unknown'}_HTTP_${Number.isInteger(observed)?observed:0}_DOCUMENTS_${count}`)
+  }
   await screen.absent(panel('frame'), 'FRAME_BEFORE_CLAIM')
   check(fixture.documents.length === oldDocs + 1, fixture.failure ?? 'EXPECTED_ONE_FIXTURE_DOCUMENT')
   return { tabId: await tabIn(browser, sid, 'open'), nonce: fixture.documents[oldDocs] }
@@ -390,7 +410,7 @@ async function closeSite(browser, screen, sid, tabId) {
   check(await observe(browser, 'tab-deny', `${browserScope(sid)}/${tabId}/close`, {}) === 403, 'CLOSED_TAB_STILL_AUTHORIZED')
 }
 
-async function verifyManual({ browser, screen, fixture, sid, own, release }) {
+async function verifyManual({ browser, screen, fixture, sid, own, release, capture, origin }) {
   step('ui.csrf')
   check(await observe(browser, 'csrf-deny', `${browserScope(sid)}/open`, { siteId }) === 401, 'BROWSER_OPEN_CSRF_GUARD_MISSING')
   check(fixture.documents.length === 0, 'DENIED_OPEN_REACHED_TARGET')
@@ -405,6 +425,12 @@ async function verifyManual({ browser, screen, fixture, sid, own, release }) {
   check(await observe(browser, 'tab-deny', `${browserScope(sid)}/${tabId}/frame`, {
     viewerNonce: invalidProof, token: invalidProof
   }) === 403, 'FRAME_WITHOUT_LEASE_PROOF')
+  const captureTarget = { browser, origin, fixture, nonce,
+    verifyTab: () => observe(browser, 'capture-tab', browserScope(sid), { sid, tabId, siteId, siteLabel, origin: fixture.origin }) }
+  if (capture) {
+    step('ui.capture.ready')
+    await capture.take(captureTarget, 'ready')
+  }
   step('ui.form.focus')
   // W3C element click performs a trusted pointer click at the visible image centre;
   // the fixture first places its real name input, then the enabled Confirm there.
@@ -426,6 +452,10 @@ async function verifyManual({ browser, screen, fixture, sid, own, release }) {
   await claim(screen, browser, fixture, nonce, 'done')
   check(await tabIn(browser, sid, 'leased') === tabId && fixture.documents.length === 1 &&
     (await workerProcess()).pid === target.pid, 'RECLAIM_REPLACED_TARGET')
+  if (capture) {
+    step('ui.capture.returned')
+    await capture.take(captureTarget, 'returned')
+  }
   step('ui.tab.close')
   await closeSite(browser, screen, sid, tabId)
   await release(target)
@@ -483,6 +513,7 @@ async function verifyLogout({ browser, screen, fixture, sid, own, release, passw
 
 async function run() {
   const cleanup = []
+  const capture = createHandoffCapture(stop.signal)
   const interrupted = () => stop.abort()
   process.once('SIGINT', interrupted)
   process.once('SIGTERM', interrupted)
@@ -586,17 +617,18 @@ async function run() {
     step('ui.auth.login')
     await logout(browser, screen)
     await authenticate(browser, screen, passwordValue, 'current')
+    if (capture) await browser.fixtureViewport('wide') // Resize before any manual lease exists.
     step('ui.chat.create')
     const sid = await newChat(browser, screen)
     await emptyScope(browser, sid)
-    const context = { browser, screen, fixture, sid, own, release, passwordValue }
+    const context = { browser, screen, fixture, sid, own, release, passwordValue, capture, origin: workbench.origin }
     await verifyManual(context)
     await verifyExpiry(context)
     await verifyLogout(context)
   } catch (error) {
     failed = true
     // The helper itself sanitizes operation names, but only emit fixed details here.
-    const detail = stop.signal.aborted ? 'INTERRUPTED' : error instanceof Failure ? error.message :
+    const detail = stop.signal.aborted ? 'INTERRUPTED' : (error instanceof Failure || error instanceof HandoffCaptureError) ? error.message :
       error instanceof WebDriverError ? (/^[A-Z_]+$/.test(error.detail) ? error.detail :
         error.detail === 'session not created' ? 'WEBDRIVER_SANDBOX_OR_BINARY_MISMATCH' : 'WEBDRIVER_COMMAND_FAILED') : 'UNEXPECTED_FAILURE'
     console.error(`manual-browser-e2e FAIL ${stage} ${detail}`)
@@ -605,6 +637,16 @@ async function run() {
       try { await close() } catch (error) {
         failed = true
         console.error(`manual-browser-e2e FAIL cleanup.${name} ${error instanceof Failure ? error.message : 'CLEANUP_FAILED'}`)
+      }
+    }
+    if (capture && !failed && !stop.signal.aborted) {
+      try {
+        step('evidence.publish.cropped')
+        await capture.publish()
+      } catch (error) {
+        failed = true
+        console.error(`manual-browser-e2e FAIL ${stage} ${stop.signal.aborted ? 'INTERRUPTED' :
+          error instanceof HandoffCaptureError ? error.message : 'CAPTURE_OUTPUT_FAILED'}`)
       }
     }
     process.removeListener('SIGINT', interrupted)

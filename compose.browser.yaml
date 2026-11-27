@@ -46,6 +46,8 @@ services:
     mem_limit: 1536m
     cpus: 2
     pids_limit: 256
+    ulimits:
+      core: {soft: 0, hard: 0}
     tmpfs: ['/tmp:rw,nosuid,nodev,noexec,mode=1777,size=192m']
     command: [worker]
     volumes:

@@ -350,7 +350,7 @@ The [amd64 Docker Compose workbench](apps/headless/README.md) runs independently
 - **Attachments and deliveries:** explicitly send supported text, static images or PDFs on compatible adapters. Export confirmed replies or use the desktop delivery card to download and reveal an authorized project file.
 - **Inspection:** view branches, first-parent history and staged or working-tree differences in separately approved repositories. Inspect recorded desktop tasks, preview a schedule in an explicit time zone, and pause an active record after confirmation. The server does not run a task scheduler.
 
-The [optional server-side human-operated browser](apps/browser-worker/README.md) remains experimental: full handoff has not passed acceptance. The base workbench does not depend on it. See the [desktop parity inventory](docs/development/web-workbench/README.md) for pending work.
+The [optional server-side human-operated browser](apps/browser-worker/README.md) passed same-tab handoff, return and reclaim with two actual browsers on a sandbox-capable Linux runner. The tested default Docker environment still denied kernel sandbox startup; the base workbench runs independently. See the [desktop parity inventory](docs/development/web-workbench/README.md) for pending work.
 
 ## Build from Source
 

@@ -1,4 +1,5 @@
 import { isAbsolute } from 'node:path';
+import { checkedEntryReceipt } from './entry-diagnostics.mjs';
 
 const DIAGNOSTIC_STAGES = new Set([
   'version', 'discover-bootstrap', 'watch-targets', 'download-guard', 'attach-bootstrap', 'page-controls',
@@ -29,6 +30,7 @@ export const ENTRY_EVENTS = Object.freeze([
   'navigateSent', 'navigateAck', 'requestPaused', 'responsePaused', 'responseError', 'otherSessionFetch', 'blockedDocument',
   'continueRequestSent', 'continueRequestAck', 'continueResponseSent', 'continueResponseAck', 'fetchCommandError',
   'targetCreated', 'targetAttach', 'targetDetach', 'frameNavigated', 'mainFrameNavigated', 'withinDocument', 'mainFrameLoad',
+  'mainFrameStartedNavigating', 'mainFrameRequestedNavigation', 'mainFrameStartedLoading', 'mainFrameStoppedLoading', 'scriptDialog',
 ]);
 
 const TARGET_TYPES = new Set(['missing', 'page', 'iframe', 'worker', 'shared_worker', 'service_worker', 'tab', 'browser', 'other']);
@@ -44,7 +46,7 @@ const TARGET_FLAGS = ['root', 'sameTarget', 'sameSession', 'opener', 'postNaviga
   'snapshotContext', 'snapshotOpener', 'snapshotAttached'];
 
 export class EngineError extends Error {
-  constructor(code, { stage, command, launchHint, sandbox, entryNavigation, target } = {}) {
+  constructor(code, { stage, command, launchHint, sandbox, entryNavigation, entryReceipt, networkRestarts, target } = {}) {
     super(code);
     this.name = 'EngineError';
     this.code = code;
@@ -52,6 +54,7 @@ export class EngineError extends Error {
     if (DIAGNOSTIC_STAGES.has(stage)) safe.stage = stage;
     if (DIAGNOSTIC_COMMANDS.has(command)) safe.command = command;
     if (LAUNCH_HINTS.has(launchHint)) safe.launchHint = launchHint;
+    if (Number.isInteger(networkRestarts) && networkRestarts >= 0 && networkRestarts <= 32) safe.networkRestarts = networkRestarts;
     if (sandbox && typeof sandbox === 'object') {
       const fields = {};
       for (const name of SANDBOX_FIELDS) {
@@ -70,6 +73,8 @@ export class EngineError extends Error {
       }
       if (Object.keys(counts).length) safe.entryNavigation = Object.freeze(counts);
     }
+    const receipt = checkedEntryReceipt(entryReceipt);
+    if (receipt) safe.entryReceipt = receipt;
     if (target && typeof target === 'object') {
       const fields = {};
       for (const [name, allowed] of Object.entries(TARGET_VALUES)) if (allowed.has(target[name])) fields[name] = target[name];

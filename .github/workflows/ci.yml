@@ -163,11 +163,28 @@ jobs:
           retention-days: 14
 
       - name: Select the same installed Chrome for UI and worker
+        if: ${{ !cancelled() && steps.host_tests.outcome == 'success' }}
+        id: handoff_chrome
         run: bash scripts/workbench/ci-select-chromium.sh
 
       - name: Verify workbench UI controlling a second sandboxed browser
+        id: manual_handoff_ui
+        if: ${{ !cancelled() && steps.handoff_chrome.outcome == 'success' }}
         timeout-minutes: 5
+        env:
+          DEVA_QA_HANDOFF_CAPTURE: '1'
         run: node scripts/workbench/e2e-manual-browser.mjs
+
+      - name: Publish cropped evidence of the verified synthetic same-tab handoff
+        if: ${{ !cancelled() && steps.manual_handoff_ui.outcome == 'success' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: workbench-synthetic-browser-handoff
+          path: |
+            test-results/manual-browser/handoff-ready.png
+            test-results/manual-browser/handoff-returned.png
+          if-no-files-found: error
+          retention-days: 14
 
   packaged-session-workspaces:
     name: Packaged session workspace on native amd64 Docker
@@ -344,6 +361,32 @@ jobs:
         timeout-minutes: 3
         run: node scripts/workbench/container-skill-library.mjs
 
+  packaged-browser-handoff:
+    name: Human handoff with packaged Workbench, Chromium and broker
+    if: ${{ github.event_name == 'pull_request' && github.head_ref == 'feat/web-workbench-sandbox-handoff' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 22
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          package-manager-cache: false
+      - name: Build the actual non-root Linux amd64 images
+        timeout-minutes: 15
+        run: |
+          set -eu
+          test "$(uname -m)" = x86_64
+          docker build --platform linux/amd64 --target runtime -t deva-workbench:browser-verify .
+          docker build --platform linux/amd64 --file apps/browser-worker/Dockerfile --target broker -t deva-browser-broker:verify .
+          docker build --platform linux/amd64 --file apps/browser-worker/Dockerfile --target browser -t deva-browser-worker:verify .
+          for image in deva-workbench:browser-verify deva-browser-broker:verify deva-browser-worker:verify; do
+            docker image inspect -f '{{.Os}}/{{.Architecture}} {{.Id}} {{.Size}} bytes' "$image"
+          done
+      - name: Verify real Compose sandbox, approved form, owner controls and cleanup
+        timeout-minutes: 6
+        run: node scripts/workbench/container-browser-handoff.mjs
+
   sandbox:
     name: Private human browser worker
     runs-on: ubuntu-latest
@@ -359,5 +402,7 @@ jobs:
         run: node --test --test-concurrency=1 apps/browser-worker/test/*.test.mjs test/browser-handoff.test.mjs
       - name: Select the installed browser for pipe-based verification
         run: bash scripts/workbench/ci-select-chromium.sh
+      - name: Observe blank-only targets with and without default background apps
+        run: node apps/browser-worker/test-real/blank-targets.mjs --compare "$CHROMIUM_PATH"
       - name: Exercise a real sandboxed worker, handoff and shutdown
         run: node apps/browser-worker/test-real/engine-handoff.mjs

@@ -37,7 +37,7 @@ COPY --from=build /src/apps/headless/src ./apps/headless/src
 COPY --from=build /src/apps/headless/dist ./apps/headless/dist
 # Narrow Unix client only. Neither Chromium nor its egress broker runs in the workbench.
 COPY apps/browser-worker/src/client.mjs apps/browser-worker/src/worker-control.mjs ./apps/browser-worker/src/
-COPY apps/browser-worker/src/engine/policy.mjs ./apps/browser-worker/src/engine/
+COPY apps/browser-worker/src/engine/policy.mjs apps/browser-worker/src/engine/entry-diagnostics.mjs ./apps/browser-worker/src/engine/
 # Only the private Unix PTY client runs here; the native addon and fixed child program stay in the separate worker image.
 COPY apps/terminal-worker/src/client.mjs apps/terminal-worker/src/protocol.mjs apps/terminal-worker/src/socket-path.mjs apps/terminal-worker/src/socket-channel.mjs ./apps/terminal-worker/src/
 # ws has JS fallbacks for its optional native helpers; no desktop dependency tree is shipped.

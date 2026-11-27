@@ -1,6 +1,7 @@
 import { STATUS_CODES } from 'node:http';
 import { setTimeout as delay } from 'node:timers/promises';
 import { connectPipe } from './pipe.mjs';
+import { classifyEntryReceipt } from './entry-diagnostics.mjs';
 import {
   BOOTSTRAP_URL, ENTRY_EVENTS, PAGE_POLICIES, VIEWPORT, fail, keyParams, publicPageInfo, readFrame, validateInput,
 } from './policy.mjs';
@@ -19,9 +20,9 @@ const reportUrl = (url) => url === undefined || url === '' ? 'empty' : url === B
 // Internal controller, with the process/transport boundary explicit for deterministic tests.
 // The exported production facade has only the fixed methods returned at the bottom.
 export async function startChromiumSession({ writer, reader, policy, verifySandbox, shutdown, probeOnly = false,
-  commandMs, handshakeMs, navigationMs = NAVIGATION_MS, signal, abortCode = () => 'BROWSER_ABORTED' }) {
+  commandMs, handshakeMs, navigationMs = NAVIGATION_MS, signal, abortCode = () => 'BROWSER_ABORTED', sealStartup = () => {} }) {
   let contextId, targetId, sessionId, frameId, attachmentEvent;
-  let startupStage = 'version', postNavigation = false, targetLoss;
+  let startupStage = 'version', postNavigation = false, targetLoss, entryReceipt;
   let targetSnapshot = {};
   let fatalCode = null, closing = null, busy = false, stopping = null, notice = null;
   let privateInput = false, frameEpoch = 0, stopEpoch = 0, navigationEpoch = 0;
@@ -55,6 +56,7 @@ export async function startChromiumSession({ writer, reader, policy, verifySandb
 
   function close() {
     if (closing) return closing;
+    sealStartup(); // A warning caused by shutdown is not evidence of an entry failure.
     invalidate();
     // Assign before running Browser.close: recursive EOF/error notification is expected.
     closing = Promise.resolve().then(async () => {
@@ -233,6 +235,12 @@ export async function startChromiumSession({ writer, reader, policy, verifySandb
       return;
     }
     switch (method) {
+      // These Page-domain observations already exist. Count matching main-frame events
+      // without enabling general Network logging or retaining event data.
+      case 'Page.frameStartedNavigating': if (p.frameId === frameId) bump('mainFrameStartedNavigating'); break;
+      case 'Page.frameRequestedNavigation': if (p.frameId === frameId) bump('mainFrameRequestedNavigation'); break;
+      case 'Page.frameStartedLoading': if (p.frameId === frameId) bump('mainFrameStartedLoading'); break;
+      case 'Page.frameStoppedLoading': if (p.frameId === frameId) bump('mainFrameStoppedLoading'); break;
       case 'Page.frameNavigated':
         bump('frameNavigated');
         if (!p.frame?.parentId && p.frame?.id === frameId) {
@@ -266,6 +274,7 @@ export async function startChromiumSession({ writer, reader, policy, verifySandb
       case 'Page.downloadWillBegin': restrict('BROWSER_DOWNLOAD_UNSUPPORTED'); break;
       case 'Page.fileChooserOpened': restrict('BROWSER_FILE_CHOOSER_UNSUPPORTED'); break;
       case 'Page.javascriptDialogOpening':
+        bump('scriptDialog');
         sendEventCommand('Page.handleJavaScriptDialog', { accept: false });
         restrict('BROWSER_DIALOG_UNSUPPORTED');
         break;
@@ -308,6 +317,7 @@ export async function startChromiumSession({ writer, reader, policy, verifySandb
       bump('navigateSent');
       const result = await page('Page.navigate', { url: destination });
       bump('navigateAck');
+      if (startupStage === 'entry-navigation') entryReceipt = classifyEntryReceipt(result, frameId);
       if (stopEpoch !== stopped) throw fail('BROWSER_NAVIGATION_STOPPED');
       if (result.isDownload) throw fail('BROWSER_DOWNLOAD_UNSUPPORTED');
       if (result.errorText || result.frameId !== frameId) throw fail('BROWSER_NAVIGATION_FAILED');
@@ -475,11 +485,12 @@ export async function startChromiumSession({ writer, reader, policy, verifySandb
     checkLive();
     await setup();
     checkLive();
+    sealStartup(); // No observations from a live user-controlled page.
   } catch (error) {
     await close();
     const code = signal?.aborted ? abortCode() : error?.code;
     const diagnostic = { ...error?.diagnostic, stage: targetLoss?.eventStage ?? startupStage, target: targetLoss,
-      ...(startupStage === 'entry-navigation' ? { entryNavigation: entryTrace } : {}) };
+      ...(startupStage === 'entry-navigation' ? { entryNavigation: entryTrace, entryReceipt } : {}) };
     if (!SHELL_REASONS.has(code) && code !== 'BROWSER_COMMAND_FAILED' && code?.startsWith('BROWSER_')) throw fail(code, diagnostic);
     throw fail('BROWSER_START_FAILED', diagnostic);
   } finally { signal?.removeEventListener('abort', abort); }
