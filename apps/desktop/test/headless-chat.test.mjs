@@ -226,6 +226,33 @@ for (const protocol of Object.keys(protocols)) test(`compiled headless ${protoco
     return { dev, ino, birthtimeNs, mtimeNs, ctimeNs, text: await readFile(path, 'utf8') }
   }
   const pinnedDisk = await snapshot(file)
+  if (!modern) await t.test('project documents stay closed on default startup', async () => {
+    const docs = '/api/project-docs'
+    const projectDocument = { generation: randomBytes(16).toString('hex'), document: randomBytes(16).toString('hex') }
+    const detail = `${docs}/${projectDocument.generation}/${projectDocument.document}`
+    const anonymous = { headers: { Cookie: '' } }, wrongOrigin = `http://localhost:${port}`
+    const beforeCalls = calls.length
+    // A synthetic file exists on disk; its presence is not an operator grant.
+    await writeFile(bait, 'fixture-only project document\n', { flag: 'wx', mode: 0o600 })
+    const originalFile = await snapshot(bait)
+    for (const path of [docs, detail]) {
+      await error(path, 401, 'auth', anonymous)
+      await error(path, 404, 'missing')
+      await error(path, 403, 'origin', { headers: { Origin: wrongOrigin } })
+    }
+    await error(`${docs}?check=1`, 404, 'missing', anonymous)
+    const grant = { body: { path: bait } }
+    await error(docs, 404, 'missing', grant) // Signed-in, correct-origin POST.
+    await error(docs, 403, 'origin', { ...grant, postOrigin: wrongOrigin })
+    await error(docs, 403, 'origin', { ...grant, postOrigin: null })
+    await error(docs, 403, 'origin', { ...grant, headers: { 'Sec-Fetch-Site': 'cross-site' } })
+    // The unmodified opening body streams successfully below in this same CLI process.
+    await error(turn, 400, 'invalid_request', { body: { ...opening, projectDocument } })
+    assert.equal(calls.length, beforeCalls, 'project-document probes made no model request')
+    assert.deepEqual(await state(), pinned, 'session revision and messages stayed unchanged')
+    assert.deepEqual(await snapshot(file), pinnedDisk, 'native session file stayed unchanged')
+    assert.deepEqual(await snapshot(bait), originalFile, 'the fixture document stayed unchanged')
+  })
   await error(turn, 401, 'auth', { body: opening, headers: { Cookie: '' } })
   for (const options of [{ postOrigin: `http://localhost:${port}` }, { postOrigin: null }, { headers: { 'Sec-Fetch-Site': 'cross-site' } }])
     await error(turn, 403, 'origin', { body: opening, ...options })
