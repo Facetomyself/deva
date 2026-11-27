@@ -180,6 +180,25 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+      - name: Verify owner read synchronization and the real context meter in two browsers
+        id: conversation_status_ui
+        if: ${{ !cancelled() && steps.host_tests.outcome == 'success' }}
+        timeout-minutes: 6
+        env:
+          DEVA_QA_STATUS_CAPTURE: '1'
+        run: node scripts/workbench/e2e-conversation-status.mjs
+
+      - name: Publish the verified synthetic read indicator and native context meter
+        if: ${{ !cancelled() && steps.conversation_status_ui.outcome == 'success' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: workbench-conversation-status
+          path: |
+            test-results/conversation-status/pr18-*/read-indicator.png
+            test-results/conversation-status/pr18-*/context-meter.png
+          if-no-files-found: error
+          retention-days: 14
+
       - name: Select the same installed Chrome for UI and worker
         if: ${{ !cancelled() && steps.host_tests.outcome == 'success' }}
         id: handoff_chrome
@@ -378,6 +397,28 @@ jobs:
       - name: Confirm real saved skill preferences across two distinct production containers
         timeout-minutes: 3
         run: node scripts/workbench/container-skill-library.mjs
+
+  packaged-conversation-status:
+    name: Conversation read marks and measured context across native amd64 containers
+    if: ${{ (github.event_name == 'pull_request' && github.head_ref == 'feat/web-workbench-conversation-status') || (github.event_name == 'workflow_dispatch' && github.ref_name == 'feat/web-workbench-conversation-status') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 16
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          package-manager-cache: false
+      - name: Build the production Linux amd64 runtime image
+        timeout-minutes: 9
+        run: |
+          set -eu
+          test "$(uname -m)" = x86_64
+          docker build --platform linux/amd64 --target runtime -t deva-workbench:conversation-status-verify .
+          docker image inspect -f '{{.Os}}/{{.Architecture}} {{.Id}} {{.Size}} bytes' deva-workbench:conversation-status-verify
+      - name: Verify exact native read state and token receipt across fresh containers
+        timeout-minutes: 5
+        run: node scripts/workbench/container-conversation-status.mjs
 
   packaged-project-documents:
     name: Exclusive project documents across native amd64 Compose modes
