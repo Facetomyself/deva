@@ -4,6 +4,8 @@ import { consumeModelStep, createChatStore, isValidSessionId, modelMessages } fr
 import { connectProvider } from '../business/model-connection.mjs'
 import { chatScope } from '../events/index.mjs'
 import { HttpError } from '../http/policy.mjs'
+import { createConversationContext, matchesTurnLayout, nextConversationUpdatedAt } from './conversation-context.mjs'
+import { captureConversationUsage, conversationUsagePatch, createConversationUsage, USAGE_META } from './conversation-usage.mjs'
 import { createDeliveryRecords } from './delivery-records.mjs'
 import { confirmPreferenceStorage, preflightPreferenceStorage } from './session-preferences-storage.mjs'
 import {
@@ -37,7 +39,7 @@ const terminalReasons = new Map([
 ])
 const nativeTextFields = new Set([
   'id', 'title', 'createdAt', 'updatedAt', 'focusRoot', 'personaId', 'model', 'messages', 'notices',
-  'archived', 'effort', META, PREFERENCES_META, WORKSPACE_META
+  'archived', 'effort', 'lastInputTokens', META, PREFERENCES_META, WORKSPACE_META, USAGE_META
 ])
 const complexFields = [
   'compacted', 'members', 'parentId', 'proposals', 'asks', 'summaries', 'delivered', 'background',
@@ -45,6 +47,8 @@ const complexFields = [
   'baselines', 'restoreNote'
 ]
 
+const legacyContextFields = new Set([...nativeTextFields, ...complexFields, 'bucket', 'lastCacheRead', 'lastCacheWrite', 'lastRequestAt'])
+const desktopHistoryMarker = /^⟦deva:(?:compaction|auto|notify|insert)⟧/u
 const validSid = id => isValidSessionId(id) && id.length <= 128 // The journal has a narrower ID range.
 const desktopSid = /^sess_[0-9a-z]{1,12}_[0-9a-z]{1,8}$/
 const uuidSid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
@@ -191,7 +195,7 @@ function appendNotice(notices, after, status, reason, text) {
 
 /** One instance per data directory and journal. The owner closes the journal after awaiting close().
  * resolveRole reads trusted library state. withWorkspace only supplies live pinned catalog grants. */
-export function createTextTurns({ dataDir, settings, journal, version, allowedOrigins, resolveRole, uploads, deliveries, withWorkspace }) {
+export function createTextTurns({ dataDir, settings, journal, version, allowedOrigins, resolveRole, uploads, deliveries, withWorkspace, readWatermark }) {
   if (typeof settings?.getProvider !== 'function' || !['snapshot', 'snapshotAndSubscribe', 'publishChat', 'publishSessionsChanged']
     .every(fn => typeof journal?.[fn] === 'function')) throw new TypeError('Text turns require settings and an event journal')
   if (resolveRole !== undefined && typeof resolveRole !== 'function') throw new TypeError('resolveRole must be a function')
@@ -199,6 +203,7 @@ export function createTextTurns({ dataDir, settings, journal, version, allowedOr
   let warned = false
   const incomplete = new WeakSet()
   const mediaUnconfirmed = new WeakSet()
+  const unreadableHistory = new WeakSet()
   const classifications = new WeakMap()
   const store = createChatStore({
     dataDir, onWarning() { warned = true },
@@ -208,7 +213,7 @@ export function createTextTurns({ dataDir, settings, journal, version, allowedOr
   const active = new Map()
   const unconfirmed = new Map() // Quarantine ambiguous writes until restart; never replay a charged request.
   const hidden = new Set() // A failed create may leave a session only in the core's cache.
-  const deliverySessions = deliveries === true ? new Map() : undefined
+  const knownSessions = new Map() // The native read projection must reconcile with the original loaded cache.
   let closing
   const workspace = createSessionWorkspaceDomain({
     dataDir, withWorkspace, validSid, isClosing: () => Boolean(closing), isActive: sid => active.has(sid),
@@ -220,14 +225,24 @@ export function createTextTurns({ dataDir, settings, journal, version, allowedOr
     }
   })
 
+  const context = createConversationContext({
+    dataDir, validSid, journal, cached: sid => knownSessions.get(sid), active: sid => active.has(sid),
+    blocked: sid => hidden.has(sid) || unconfirmed.has(sid),
+    unreadable: sid => unreadableHistory.has(knownSessions.get(sid)) || mediaUnconfirmed.has(knownSessions.get(sid)),
+    closing: () => Boolean(closing), inspect: contextLayout
+  })
+  const contextUsage = createConversationUsage({ settings, read: context.read, refresh: context.refresh, active: sid => active.get(sid), roleForTurn })
+
   function lookupSession(sid) {
     warned = false
     const s = hidden.has(sid) ? undefined : store.getSession(sid)
-    if (s && warned) incomplete.add(s)
-    if (s && Object.hasOwn(s, META)) {
-      workspace.note(s)
-      deliverySessions?.set(sid, s)
-      workspace.stable(s)
+    if (s) {
+      if (warned) incomplete.add(s)
+      knownSessions.set(sid, s)
+      if (Object.hasOwn(s, META)) {
+        workspace.note(s)
+        workspace.stable(s)
+      }
     }
     return s
   }
@@ -269,9 +284,26 @@ export function createTextTurns({ dataDir, settings, journal, version, allowedOr
     return kind
   }
 
+  function contextLayout(s, cached) {
+    if ((cached && incomplete.has(cached)) || s.messages.some(m => typeof m.content === 'string' && desktopHistoryMarker.test(m.content))) return null
+    const kind = compatibility(s)
+    if (kind === 'unsupported' || (kind === 'legacy_text' && Object.keys(s).some(key => !legacyContextFields.has(key)))) return null
+    const owned = kind === 'text'
+    const requests = owned ? s[META].requests : null
+    if (requests && !matchesTurnLayout(s.messages, requests)) return null
+    const index = owned ? attachedIndex(s) : null
+    const eligible = s.messages.some((m, at) => index?.byMessage.has(at) || Boolean(plainText(m.content)?.trim()))
+    return { owned, eligible, attachments: index || null, last: requests?.at(-1) ?? null }
+  }
+
   function summary(s, kind = compatibility(s)) {
     const index = kind === 'text' && attachedIndex(s)
-    if (index && (mediaUnconfirmed.has(s) || !attachments.available(index))) kind = 'unsupported'
+    if (index) {
+      if (mediaUnconfirmed.has(s) || !attachments.available(index)) {
+        unreadableHistory.add(s)
+        kind = 'unsupported'
+      } else unreadableHistory.delete(s)
+    }
     let writeBlockReason = null
     if (kind === 'unsupported') writeBlockReason = 'unsupported_history'
     else if (kind !== 'text') writeBlockReason = 'read_only_session'
@@ -318,7 +350,7 @@ export function createTextTurns({ dataDir, settings, journal, version, allowedOr
         store.saveStrict(id)
         workspace.afterSave(s, true)
         workspace.note(s)
-        deliverySessions?.set(id, s)
+        knownSessions.set(id, s)
         return summary(s)
       } catch { throw storageError() }
     }
@@ -476,6 +508,14 @@ export function createTextTurns({ dataDir, settings, journal, version, allowedOr
     catch { /* a journal fault does not change the outcome of the confirmed store write */ }
   }
 
+  function nextUpdatedAt(s) {
+    let watermark
+    try { if (typeof readWatermark === 'function') watermark = readWatermark(s.id) }
+    catch { /* a broken read-state map never blocks ordinary chat */ }
+    if (typeof watermark?.then === 'function') void Promise.resolve(watermark).catch(() => {})
+    return nextConversationUpdatedAt(s.updatedAt, Date.now(), watermark)
+  }
+
   function priorResult(record, fingerprint) {
     if (record.fingerprint !== fingerprint) throw new HttpError(409, 'client_request_conflict')
     return { ...result(record), duplicate: true }
@@ -535,12 +575,12 @@ export function createTextTurns({ dataDir, settings, journal, version, allowedOr
     const { providerId, modelId } = splitModel(model)
     let client, adapter
     // Capture the adapter from the same trusted provider snapshot that binds credentials, model and URL.
-    const binding = withMedia ? { async getProvider(id) {
+    const binding = { async getProvider(id) {
       const provider = await settings.getProvider(id)
       if (provider == null) return provider
       adapter = provider.adapter
       return { ...provider, adapter }
-    } } : settings
+    } }
     try {
       client = await connectProvider(binding, providerId, { version, allowedOrigins, signal: controller.signal, modelId })
     } catch (err) {
@@ -577,15 +617,15 @@ export function createTextTurns({ dataDir, settings, journal, version, allowedOr
     const title = s.title || firstTitle(input.text, itemNames)
     const modelPatch = managedModel(s) ? {} : input.model === null
       ? preferenceChanges(s, { model: null }, () => null) : { model }
-    const modelChanged = Object.hasOwn(modelPatch, 'model') && (modelPatch.model || null) !== (s.model || null)
-    const listChanged = title !== s.title || modelChanged || record.startedAt !== s.updatedAt || requests.length === MAX_REQUESTS
+    const updatedAt = nextUpdatedAt(s)
     commit(s, {
-      ...modelPatch, messages, notices, title, updatedAt: record.startedAt,
+      ...modelPatch, messages, notices, title, updatedAt,
       [META]: { version: 1, messageCount: messages.length, requests }, ...prepared?.patch
     })
     slot.record = record
+    slot.model = { modelRef: model, adapter }
     publish(slot, { type: 'turn_start' })
-    if (listChanged) publishSessionsChanged()
+    publishSessionsChanged()
     // The session now owns durable bytes. Retire spent draft reservations after commit,
     // never before: a failed save must keep the user's files available for a retry.
     if (input.attachments?.length && typeof uploads?.remove === 'function') {
@@ -631,6 +671,9 @@ export function createTextTurns({ dataDir, settings, journal, version, allowedOr
             if (typeof delta !== 'string') throw modelError
             if ((thinkingSize += delta.length) > MAX_OUTPUT) throw outputLimit
           },
+          onUsage({ input }) {
+            if (!controller.signal.aborted) captureConversationUsage(slot, input, () => publish(slot, { type: 'context_changed' }))
+          },
           onError() { throw modelError }
           // No tool callbacks: the shared consumer closes at the first normalized tool call.
         })
@@ -647,13 +690,13 @@ export function createTextTurns({ dataDir, settings, journal, version, allowedOr
     try {
       const index = attachedIndex(s)
       if (index && (mediaUnconfirmed.has(s) || !attachments.available(index))) throw storageError()
-      const updatedAt = Date.now()
-      const listChanged = updatedAt !== s.updatedAt
+      const updatedAt = nextUpdatedAt(s)
+      const usage = conversationUsagePatch(slot, messages, updatedAt)
       commit(s, {
-        messages, notices, updatedAt,
+        messages, notices, updatedAt, ...usage,
         [META]: { version: 1, messageCount: messages.length, requests: [...s[META].requests.slice(0, -1), ended] }
-      }, { ...record, status: 'failed', reason: 'storage_unconfirmed' })
-      if (listChanged) publishSessionsChanged()
+      }, { ...record, status: 'failed', reason: 'storage_unconfirmed' }, usage ? () => context.confirm(s) : undefined)
+      publishSessionsChanged()
     } catch {
       status = 'failed'
       stopReason = 'error'
@@ -719,11 +762,15 @@ export function createTextTurns({ dataDir, settings, journal, version, allowedOr
     const s = lookupSession(sid)
     return !!s && compatibility(s) === 'text'
   }
-  const records = deliverySessions && createDeliveryRecords({
+  const deliveryCached = sid => {
+    const s = knownSessions.get(sid)
+    return s && Object.hasOwn(s, META) ? s : undefined
+  }
+  const records = deliveries === true && createDeliveryRecords({
     dataDir, validSid, ledgerKey: META,
     active: sid => active.has(sid), closing: () => Boolean(closing),
-    blocked: sid => hidden.has(sid) || unconfirmed.has(sid) || incomplete.has(deliverySessions.get(sid)),
-    cached: sid => deliverySessions.get(sid), classify: compatibility, attachedIndex,
+    blocked: sid => hidden.has(sid) || unconfirmed.has(sid) || incomplete.has(deliveryCached(sid)),
+    cached: deliveryCached, classify: compatibility, attachedIndex,
     hasMedia(cached, source) {
       const index = attachedIndex(source)
       return !index || (!mediaUnconfirmed.has(cached) && attachments.available(index))
@@ -731,6 +778,7 @@ export function createTextTurns({ dataDir, settings, journal, version, allowedOr
   })
   return Object.freeze({
     create, list, attach, snapshot, send, stop, close, getPreferences, patchPreferences, getWorkspace: workspace.getWorkspace, setWorkspace,
-    attachmentScope, describeCommittedAttachment, readCommittedAttachment, hasBrowserSession, ...records
+    attachmentScope, describeCommittedAttachment, readCommittedAttachment, hasBrowserSession, ...records,
+    contextUsage, readCandidates: context.readCandidates, readObservation: context.readObservation
   })
 }

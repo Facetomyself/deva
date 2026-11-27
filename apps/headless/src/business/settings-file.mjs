@@ -92,7 +92,7 @@ function expectSnapshot(expected, current) {
   if ((!expected !== !current) || (expected && !sameSnapshot(expected, current))) throw new SettingsError('CONFLICT')
 }
 
-async function assertSettingsCurrent(directory, expected) {
+export async function assertSettingsCurrent(directory, expected) {
   let current = null
   try { current = await fs.lstat(childPath(directory, CONFIG), { bigint: true }) }
   catch (error) { if (error.code !== 'ENOENT') throw error }

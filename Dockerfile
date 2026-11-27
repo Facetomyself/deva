@@ -30,7 +30,8 @@ CMD ["serve"]
 FROM ${NODE_IMAGE} AS runtime
 WORKDIR /opt/deva
 ENV NODE_ENV=production DEVA_HOME=/data DEVA_RUN_DIR=/run/deva DEVA_MASTER_KEY_FILE=/keys/master.key DEVA_WEB_DIR=/opt/deva/web DEVA_HOST=127.0.0.1 DEVA_PORT=8787
-RUN test -x /usr/bin/flock && install -d -m 0700 -o node -g node /data /keys /run/deva /run/deva-browser-control /run/deva-pty-control
+# The read marker's xattr check uses only inherited descriptors and a fixed local Perl syscall probe.
+RUN test -x /usr/bin/flock && test -x /usr/bin/perl && install -d -m 0700 -o node -g node /data /keys /run/deva /run/deva-browser-control /run/deva-pty-control
 COPY --from=build /src/apps/headless/package.json ./apps/headless/package.json
 COPY --from=build /src/apps/desktop/package.json ./apps/desktop/package.json
 COPY --from=build /src/apps/headless/src ./apps/headless/src

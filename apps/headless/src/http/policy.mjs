@@ -56,10 +56,10 @@ export function json(res, status, payload, headers = {}) {
   res.end(bytes)
 }
 
-// Called only on successfully parsed JSON. Count outer object members without
-// interpreting colons in strings or in nested objects. JSON.parse alone silently
-// chooses the last value of a duplicated key, including differently escaped spellings.
-function outerMemberCount(raw) {
+// Called only on successfully parsed JSON. Count object members without interpreting
+// colons in strings. JSON.parse silently chooses the last value of a duplicate key,
+// including differently escaped spellings. Existing callers can opt into root checking.
+function wireMemberCount(raw, nested) {
   let members=0, depth=0, quoted=false
   for (let i=0;i<raw.length;i++) {
     const ch=raw.charCodeAt(i)
@@ -67,9 +67,23 @@ function outerMemberCount(raw) {
     if (ch===34) quoted=true
     else if (ch===123 || ch===91) depth++
     else if (ch===125 || ch===93) depth--
-    else if (ch===58 && depth===1) members++
+    else if (ch===58 && (nested || depth===1)) members++
   }
   return members
+}
+
+// An iterative walk avoids recursion on a deeply nested but size-bounded request.
+function parsedMemberCount(root) {
+  let total=0
+  const pending=[root]
+  while (pending.length) {
+    const value=pending.pop()
+    if (value===null || typeof value!=='object') continue
+    const children=Object.values(value)
+    if (!Array.isArray(value)) total+=children.length
+    for (const child of children) if (child!==null && typeof child==='object') pending.push(child)
+  }
+  return total
 }
 
 /** Read only an uncompressed, bounded JSON object; enforce the cap for chunked bodies as well. */
@@ -88,7 +102,9 @@ export async function readJson(req, limit = 16 * 1024, { uniqueMembers=false } =
   let body,raw
   try { raw=new TextDecoder('utf-8', {fatal:true}).decode(Buffer.concat(chunks));body=JSON.parse(raw) }
   catch { throw new HttpError(400, 'invalid_json') }
-  if (!body || Array.isArray(body) || typeof body !== 'object' || (uniqueMembers && outerMemberCount(raw)!==Object.keys(body).length)) {
+  const nested=uniqueMembers==='deep'
+  if (!body || Array.isArray(body) || typeof body !== 'object' || (uniqueMembers &&
+    wireMemberCount(raw,nested)!==(nested ? parsedMemberCount(body) : Object.keys(body).length))) {
     throw new HttpError(400,'invalid_json')
   }
   return body

@@ -1,6 +1,6 @@
 import type { CompactStatus } from '../../shared/chat-protocol'
 import { streamChat } from '../providers'
-import type { ContentPart, Message } from '../providers/types'
+import type { Message } from '../providers/types'
 import { getConfig } from './config'
 import { save as saveProject, type StoredSession } from './chat-store'
 import { todoSnapshotText } from './todos'
@@ -15,12 +15,8 @@ import {
   modelMessages,
   modelRange
 } from './model-view'
-import {
-  DEFAULT_CONTEXT_WINDOW,
-  autoContextWindow,
-  autoOutputBudget,
-  estimateTextTokens
-} from '../../shared/context'
+import { DEFAULT_CONTEXT_WINDOW, autoContextWindow, autoOutputBudget } from '../../shared/context'
+import { estimateTokens, messageTokens } from '../../shared/context-estimate'
 
 /**
  * 上下文压缩（主进程）。
@@ -179,41 +175,8 @@ export function triggerTokens(model: LimitModelRef, cfg: CompactionCfg = compact
   return cfg.triggerRatio !== undefined ? Math.min(window * cfg.triggerRatio, byWindow) : byWindow
 }
 
-// ── token 估算（字符法，中日韩文字另计；图片/文档按固定成本，规避 base64 数长度失真）──────
 const CHARS_PER_TOKEN = 3.5
-const IMAGE_TOKENS = 1600
-const DOC_TOKENS = 3000
-
-function partTokens(p: ContentPart): number {
-  switch (p.type) {
-    case 'text':
-      return estimateTextTokens(p.text)
-    case 'tool_use':
-      return estimateTextTokens(JSON.stringify(p.input ?? {})) + 8
-    case 'tool_result':
-      return estimateTextTokens(p.content) + 8 + (p.images?.length ?? 0) * IMAGE_TOKENS
-    case 'image':
-      return IMAGE_TOKENS
-    case 'document':
-      return DOC_TOKENS
-    default:
-      return 0
-  }
-}
-
-function messageTokens(m: Message): number {
-  if (typeof m.content === 'string') return estimateTextTokens(m.content) + 4
-  let t = 4
-  for (const p of m.content) t += partTokens(p)
-  return t
-}
-
-/** 全历史 token 估算（触发判定的字符法回退）。 */
-export function estimateTokens(messages: Message[]): number {
-  let t = 0
-  for (const m of messages) t += messageTokens(m)
-  return Math.round(t)
-}
+export { estimateTokens } from '../../shared/context-estimate'
 
 /** 是否需要压缩：优先真实 usage.input，回退字符估算（只算模型看到的部分），与压缩线（见 triggerTokens）比较。 */
 export function needsCompaction(

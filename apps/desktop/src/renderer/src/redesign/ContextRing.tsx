@@ -6,7 +6,7 @@
  * 卡片优先以圆环为中心弹出；超出窗口时往里挪，左右各留 8px。
  * 没有读数（新对话、模型已删）时由 ModelPanel 整个不渲染。
  */
-import { useLayoutEffect, useRef, useState } from 'react'
+import { useLayoutEffect, useRef, useState, type ReactNode } from 'react'
 import type { ContextUsage } from '../../../preload'
 import { formatTokens } from '../../../shared/context'
 import { useI18n } from '../i18n/i18n'
@@ -26,11 +26,15 @@ function usageText(t: T, u: ContextUsage): string {
 export function ContextRing({
   usage,
   open,
-  onToggle
+  onToggle,
+  cardId,
+  details
 }: {
   usage: ContextUsage
   open: boolean
   onToggle: () => void
+  cardId?: string
+  details?: ReactNode
 }): React.JSX.Element {
   const { t } = useI18n()
   const text = usageText(t, usage)
@@ -62,6 +66,7 @@ export function ContextRing({
         aria-label={title}
         aria-haspopup="dialog"
         aria-expanded={open}
+        aria-controls={open ? cardId : undefined}
         onClick={onToggle}
       >
         <Ring ratio={usageRatio(usage)} />
@@ -70,6 +75,7 @@ export function ContextRing({
         <div
           ref={cardRef}
           className="cf-mp__card"
+          id={cardId}
           role="dialog"
           aria-label={t('chat.panel.context')}
           style={{ transform: `translateX(calc(-50% + ${shift}px))` }}
@@ -88,6 +94,7 @@ export function ContextRing({
               />
             )}
           </div>
+          {details}
         </div>
       )}
     </div>

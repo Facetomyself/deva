@@ -2,6 +2,7 @@ import { randomBytes } from 'node:crypto'
 import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { isDeepStrictEqual } from 'node:util'
+import { contextModelFromFile } from './context-model.mjs'
 import { assertWritable, encodeSettings, publishSettingsFile, readSettingsFile, revisionFor, withSettingsDirectory } from './settings-file.mjs'
 import { HEADER_MASK, MAX_PROVIDERS, SettingsError, assertRevision, credentialBinding, headerValues,
   hydrate, patchInput, providerId, record, section, validateApiKey } from './settings-schema.mjs'
@@ -300,6 +301,11 @@ export async function openSettings(options = {}) {
   return Object.freeze({
     async getPublicConfig() {
       return access((_directory, state) => projection(state))
+    },
+    async getContextModel(ref) {
+      const {selected,present}=await withSettingsDirectory(path,identity,dir=>contextModelFromFile(dir,ref,seen),{create:false})
+      if (present) seen=true
+      return selected
     },
     async patch(input) {
       const edit = patchInput(input)

@@ -23,6 +23,8 @@ function selectOutput(input) {
     }
     case 'turn_start':
     case 'stream_reset':
+    // Usage is read from the authoritative session+model projection. Broadcast only an invalidation.
+    case 'context_changed':
     case 'member_report':
     case 'error':
       return { type }

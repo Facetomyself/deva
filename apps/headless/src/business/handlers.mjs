@@ -6,6 +6,8 @@ import { createEventJournal } from '../events/index.mjs'
 import { createChatWebSocket } from '../events/websocket.mjs'
 import { createTextTurns } from '../chat/text-turns.mjs'
 import { chatRoutes } from '../chat/routes.mjs'
+import { conversationStatusRoutes } from '../chat/conversation-status-routes.mjs'
+import { openReadMarkStore } from '../chat/read-mark-store.mjs'
 import { browserRoutes } from '../browser/routes.mjs'
 import { gitViewRoutes } from '../git/routes.mjs'
 import { openGitService } from '../git/service.mjs'
@@ -61,7 +63,7 @@ export async function openBusiness({ dataDir, vault, auth, version, allowedOrigi
   const lifetime = new AbortController()
   const journal = createEventJournal()
   let library, turns, uploads, browser, closingBrowser, git, closingGit, taskStore, preview, tasks, closingTasks
-  let terminalService, closingTerminals, skills, closingSkills, documentIntents, closingDocuments
+  let terminalService, closingTerminals, skills, closingSkills, documentIntents, closingDocuments, readMarks, conversation, closingConversation
   try {
     library = await openLibrary({ dataDir, workspaceRoot, workspaceWritable, workspaceCreate, privateRoots, gitProjects })
     if (library.createDocumentTarget) documentIntents = openProjectDocumentService({auth,openTarget:library.createDocumentTarget})
@@ -74,8 +76,13 @@ export async function openBusiness({ dataDir, vault, auth, version, allowedOrigi
     taskStore = openTaskStore({ dataDir }); preview = openTaskPreview()
     tasks = taskRoutes({ store: taskStore, preview })
     uploads = await openUploadStore({ dataDir })
+    readMarks=openReadMarkStore({dataDir})
     turns = createTextTurns({ dataDir, settings, journal, ...opts, resolveRole: library.resolveRole,
-      withWorkspace: library.withWorkspace, uploads, deliveries: true })
+      withWorkspace: library.withWorkspace, uploads, deliveries: true,
+      // A desktop-imported clock can be ahead of ours. New content advances past a known read mark.
+      // The turn owner treats unreadable/invalid marks as absent rather than blocking a model request.
+      readWatermark: sid => readMarks.snapshot().get(sid) })
+    conversation=conversationStatusRoutes({turns,marks:readMarks,journal})
     // A workspace plus an explicit private control mount enables the human-only viewer.
     // Do not start a process here or make app readiness depend on the optional sidecar.
     if (terminalRunDir && library.terminalSource) {
@@ -89,7 +96,7 @@ export async function openBusiness({ dataDir, vault, auth, version, allowedOrigi
     }
   } catch (err) {
     journal.close()
-    await Promise.allSettled([documentIntents?.close(), skills?.close(), terminalService?.close(), git?.close(), ...(tasks ? [tasks.close()] : [preview?.close(), taskStore?.close?.()]),
+    await Promise.allSettled([conversation ? conversation.close() : readMarks?.close(), documentIntents?.close(), skills?.close(), terminalService?.close(), git?.close(), ...(tasks ? [tasks.close()] : [preview?.close(), taskStore?.close?.()]),
       turns?.close(), uploads?.close(), library?.close()]); throw err
   }
   const documentRoutes = projectDocumentRoutes(documentIntents)
@@ -101,6 +108,7 @@ export async function openBusiness({ dataDir, vault, auth, version, allowedOrigi
   const deliveries = deliveryRoutes({ turns, files: library.deliveryFiles })
   function beginShutdown() {
     lifetime.abort(); attachments.close()
+    if (!closingConversation) { closingConversation=conversation.close();void closingConversation.catch(()=>{}) }
     if (!closingDocuments) { closingDocuments=documentRoutes.close();void closingDocuments.catch(()=>{}) }
     if (!closingSkills) { closingSkills=skills.close();void closingSkills.catch(()=>{}) }
     if (!closingTerminals) { closingTerminals = terminals.close(); void closingTerminals.catch(() => {}) }
@@ -112,13 +120,15 @@ export async function openBusiness({ dataDir, vault, auth, version, allowedOrigi
     beginShutdown,
     capabilities: Object.freeze({ textChat: true, library: true, workspaceFiles: library.workspaceFilesEnabled, attachments: true,
       browserPanel: !!browser, gitInspect: !!git, taskInspection: Boolean(tasks), deliveries: typeof turns.deliverySnapshot === 'function',
-      terminalViewer: Boolean(terminalService), skillLibrary: Boolean(skills), workspaceDocumentCreate: Boolean(documentIntents),
+      conversationStatus: Boolean(conversation), terminalViewer: Boolean(terminalService), skillLibrary: Boolean(skills), workspaceDocumentCreate: Boolean(documentIntents),
       sessionWorkspaces: typeof turns.getWorkspace === 'function' && typeof turns.setWorkspace === 'function',
       sessionPreferences: typeof turns.patchPreferences === 'function' && typeof journal.watchSessions === 'function' }),
     createRealtime: ({ auth, policy }) => createChatWebSocket({ turns, journal, auth, policy }),
     getConfig: () => settings.getPublicConfig(),
     async handle(req, res, { auth, policy }) {
       const path = (req.url ?? '').split('?', 1)[0]
+      if ((path==='/api/v1/conversation-status/reads' || path.startsWith('/api/v1/chats/') && (path.endsWith('/context-usage') || path.endsWith('/read-state'))) &&
+          await conversation.handle(req,res,{auth,policy})) return true
       if (path.startsWith('/api/v1/workspaces/') && path.includes('/document-intents') && await documentRoutes.handle(req,res,{auth,policy})) return true
       if ((path === '/api/v1/skills' || path.startsWith('/api/v1/skills/')) && await skills.handle(req,res,{auth,policy})) return true
       if ((path === '/api/v1/terminal/profiles' || (path.startsWith('/api/v1/workspaces/') && path.includes('/terminals'))) &&
@@ -176,7 +186,7 @@ export async function openBusiness({ dataDir, vault, auth, version, allowedOrigi
       try { await turns.close() } finally {
         journal.close()
         try {
-          const results = await Promise.allSettled([closingBrowser, closingGit, closingTasks, closingTerminals, closingSkills, closingDocuments])
+          const results = await Promise.allSettled([closingBrowser, closingGit, closingTasks, closingTerminals, closingSkills, closingDocuments, closingConversation])
           if (results.some(row => row.status === 'rejected')) throw Error('Optional service shutdown unconfirmed')
         } finally { try { await uploads.close() } finally { await library.close() } }
       }
