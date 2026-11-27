@@ -30,6 +30,24 @@ function matchingModel(a, b) {
   return a?.modelRef === b.modelRef && a?.adapter === b.adapter
 }
 
+// Resolve a model only once; retry the *local* projection if that read outlived a
+// native transcript change or if history changed during a potentially large estimate.
+// Never pair an older input count or selected model with an unverified newer history.
+function finishConversationUsage({ sid, view, start, model, requested, active, refresh, check }) {
+  for (let attempt=0;attempt<2;attempt++) {
+    check()
+    view=refresh(sid,view)
+    const now=selection(view)
+    const changed=now.ownerLayout!==start.ownerLayout || now.createdAt!==start.createdAt || now.pin!==start.pin || now.role!==start.role
+    const report=changed || !model || (requested!==null && requested!==model.modelRef) ? unavailable : projection(view,model,active(sid))
+    const confirmed=refresh(sid,view)
+    check()
+    if(confirmed===view) return report
+    view=confirmed
+  }
+  throw new HttpError(409,'read_unavailable')
+}
+
 export function captureConversationUsage(slot, input, notify) {
   if (!slot.record || !slot.model || !adapters.has(slot.model.adapter) || !positiveInt(input) || input === slot.inputTokens) return
   slot.inputTokens = input
@@ -106,17 +124,10 @@ export function createConversationUsage({ settings, read, refresh, active, roleF
     }
     const requested = item.value
     if (requested !== null) splitModel(requested)
-    let view = read(sid)
+    const view = read(sid)
     const start = selection(view)
-    const finish = model => {
-      authenticate(verifyOwner, sid)
-      view = refresh(sid, view)
-      const now = selection(view)
-      const changed = now.ownerLayout !== start.ownerLayout || now.createdAt !== start.createdAt || now.pin !== start.pin || now.role !== start.role
-      const result = changed || !model || (requested !== null && requested !== model.modelRef) ? unavailable : projection(view, model, active(sid))
-      authenticate(verifyOwner, sid) // Hashing and estimation may outlive the lease even without an await.
-      return result
-    }
+    const finish = model => finishConversationUsage({sid,view,start,model,requested,active,refresh,
+      check:()=>authenticate(verifyOwner,sid)})
     if (typeof settings.getContextModel !== 'function') return finish(null)
     let effective = start.pin
     if (!effective && start.role !== undefined) {
