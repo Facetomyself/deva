@@ -7,6 +7,7 @@ import { basename, dirname, isAbsolute, join } from 'node:path'
 import { requestControl } from '../../apps/headless/src/control/socket.mjs'
 import { initializeMasterKey } from '../../apps/headless/src/storage/vault.mjs'
 import { startLocalWebDriver, waitFor, WebDriverError } from './webdriver-local.mjs'
+import { createHandoffCapture, HandoffCaptureError } from './e2e-manual-browser-capture.mjs'
 import { formPath, frameSamples, siteId, siteLabel, startManualFixture, viewport } from './e2e-manual-browser-fixture.mjs'
 
 // Run on non-root Linux after the headless and Workbench builds, with an existing
@@ -270,6 +271,12 @@ function observe(browser, mode, path, body) {
         return Array.isArray(value.tabs) && value.tabs.every(t => sid(t.sessionId) && /^[A-Za-z0-9_-]{24}$/.test(t.tabId) &&
           ['open','leased','returned'].includes(t.state)) ? value.tabs.map(({sessionId,tabId,state}) => ({sessionId,tabId,state})) : null;
       }
+      if (mode === 'capture-tab') {
+        if (!Array.isArray(value.tabs) || value.tabs.length !== 1) return false;
+        const tab = value.tabs[0];
+        return tab?.sessionId === body.sid && tab.tabId === body.tabId && tab.state === 'leased' &&
+          tab.siteId === body.siteId && tab.label === body.siteLabel && tab.origin === body.origin;
+      }
       if (mode === 'idle') return Array.isArray(value.state?.messages) && value.state.messages.length === 0 &&
         value.state.active === null && value.state.lastTurn === null;
       return false;
@@ -403,7 +410,7 @@ async function closeSite(browser, screen, sid, tabId) {
   check(await observe(browser, 'tab-deny', `${browserScope(sid)}/${tabId}/close`, {}) === 403, 'CLOSED_TAB_STILL_AUTHORIZED')
 }
 
-async function verifyManual({ browser, screen, fixture, sid, own, release }) {
+async function verifyManual({ browser, screen, fixture, sid, own, release, capture, origin }) {
   step('ui.csrf')
   check(await observe(browser, 'csrf-deny', `${browserScope(sid)}/open`, { siteId }) === 401, 'BROWSER_OPEN_CSRF_GUARD_MISSING')
   check(fixture.documents.length === 0, 'DENIED_OPEN_REACHED_TARGET')
@@ -418,6 +425,12 @@ async function verifyManual({ browser, screen, fixture, sid, own, release }) {
   check(await observe(browser, 'tab-deny', `${browserScope(sid)}/${tabId}/frame`, {
     viewerNonce: invalidProof, token: invalidProof
   }) === 403, 'FRAME_WITHOUT_LEASE_PROOF')
+  const captureTarget = { browser, origin, fixture, nonce,
+    verifyTab: () => observe(browser, 'capture-tab', browserScope(sid), { sid, tabId, siteId, siteLabel, origin: fixture.origin }) }
+  if (capture) {
+    step('ui.capture.ready')
+    await capture.take(captureTarget, 'ready')
+  }
   step('ui.form.focus')
   // W3C element click performs a trusted pointer click at the visible image centre;
   // the fixture first places its real name input, then the enabled Confirm there.
@@ -439,6 +452,10 @@ async function verifyManual({ browser, screen, fixture, sid, own, release }) {
   await claim(screen, browser, fixture, nonce, 'done')
   check(await tabIn(browser, sid, 'leased') === tabId && fixture.documents.length === 1 &&
     (await workerProcess()).pid === target.pid, 'RECLAIM_REPLACED_TARGET')
+  if (capture) {
+    step('ui.capture.returned')
+    await capture.take(captureTarget, 'returned')
+  }
   step('ui.tab.close')
   await closeSite(browser, screen, sid, tabId)
   await release(target)
@@ -496,6 +513,7 @@ async function verifyLogout({ browser, screen, fixture, sid, own, release, passw
 
 async function run() {
   const cleanup = []
+  const capture = createHandoffCapture(stop.signal)
   const interrupted = () => stop.abort()
   process.once('SIGINT', interrupted)
   process.once('SIGTERM', interrupted)
@@ -599,17 +617,18 @@ async function run() {
     step('ui.auth.login')
     await logout(browser, screen)
     await authenticate(browser, screen, passwordValue, 'current')
+    if (capture) await browser.fixtureViewport('wide') // Resize before any manual lease exists.
     step('ui.chat.create')
     const sid = await newChat(browser, screen)
     await emptyScope(browser, sid)
-    const context = { browser, screen, fixture, sid, own, release, passwordValue }
+    const context = { browser, screen, fixture, sid, own, release, passwordValue, capture, origin: workbench.origin }
     await verifyManual(context)
     await verifyExpiry(context)
     await verifyLogout(context)
   } catch (error) {
     failed = true
     // The helper itself sanitizes operation names, but only emit fixed details here.
-    const detail = stop.signal.aborted ? 'INTERRUPTED' : error instanceof Failure ? error.message :
+    const detail = stop.signal.aborted ? 'INTERRUPTED' : (error instanceof Failure || error instanceof HandoffCaptureError) ? error.message :
       error instanceof WebDriverError ? (/^[A-Z_]+$/.test(error.detail) ? error.detail :
         error.detail === 'session not created' ? 'WEBDRIVER_SANDBOX_OR_BINARY_MISMATCH' : 'WEBDRIVER_COMMAND_FAILED') : 'UNEXPECTED_FAILURE'
     console.error(`manual-browser-e2e FAIL ${stage} ${detail}`)
@@ -618,6 +637,16 @@ async function run() {
       try { await close() } catch (error) {
         failed = true
         console.error(`manual-browser-e2e FAIL cleanup.${name} ${error instanceof Failure ? error.message : 'CLEANUP_FAILED'}`)
+      }
+    }
+    if (capture && !failed && !stop.signal.aborted) {
+      try {
+        step('evidence.publish.cropped')
+        await capture.publish()
+      } catch (error) {
+        failed = true
+        console.error(`manual-browser-e2e FAIL ${stage} ${stop.signal.aborted ? 'INTERRUPTED' :
+          error instanceof HandoffCaptureError ? error.message : 'CAPTURE_OUTPUT_FAILED'}`)
       }
     }
     process.removeListener('SIGINT', interrupted)

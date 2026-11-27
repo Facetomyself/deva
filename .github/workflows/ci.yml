@@ -168,9 +168,23 @@ jobs:
         run: bash scripts/workbench/ci-select-chromium.sh
 
       - name: Verify workbench UI controlling a second sandboxed browser
+        id: manual_handoff_ui
         if: ${{ !cancelled() && steps.handoff_chrome.outcome == 'success' }}
         timeout-minutes: 5
+        env:
+          DEVA_QA_HANDOFF_CAPTURE: '1'
         run: node scripts/workbench/e2e-manual-browser.mjs
+
+      - name: Publish cropped evidence of the verified synthetic same-tab handoff
+        if: ${{ !cancelled() && steps.manual_handoff_ui.outcome == 'success' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: workbench-synthetic-browser-handoff
+          path: |
+            test-results/manual-browser/handoff-ready.png
+            test-results/manual-browser/handoff-returned.png
+          if-no-files-found: error
+          retention-days: 14
 
   packaged-session-workspaces:
     name: Packaged session workspace on native amd64 Docker
