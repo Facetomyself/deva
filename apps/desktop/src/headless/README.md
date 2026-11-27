@@ -96,6 +96,25 @@ docker compose -f compose.yaml -f compose.project-docs.yaml stop deva &&
 
 换版亦先停旧服务，用新文件、新的已审核摘要重新发布。仅替换或删除宿主原文件不会改变正在运行的快照。重新登录后旧文档 ID 失效，关闭资料时原有聊天仍可续聊。更多授权边界与验收条件见[只读资料设计](./project-docs-design.md)。
 
+## 原生 amd64 Docker 成品验收
+
+这是验收已提交版本的命令，不是日常部署命令。在**原生 x86-64 Linux** 上检出要验证的提交，使用 Node 22 或更新版本、Git、可访问的本地 Docker Engine 和 Compose v2+。无需安装项目依赖、提供模型密钥或复用正在运行的 Deva 实例。
+
+```bash
+# 只读检查架构、本地引擎和 Compose。成功也不代表容器已经运行。
+node apps/desktop/test/verify-native-compose.mjs --preflight
+# 实际构建和启动三次，清理完成后向标准输出写一条 JSON 回执。
+node apps/desktop/test/verify-native-compose.mjs
+```
+
+[验收程序](../../test/verify-native-compose.mjs)从 Git 提交对象导出构建所需文件，使用一次性项目名、独立数据卷和动态宿主回环端口。它不会使用工作目录的 `.env`、未提交的文件、原有服务令牌或外部模型。首次构建仍需能获取基础镜像与锁定的依赖。不同 Compose 版本会省略不同的布尔默认值；程序在启动前用当前 CLI 对照渲染 `create_host_path` 的两个取值，只有原始的禁止自动创建配置用于实际运行。运行顺序是：
+
+1. 基础实例用 Responses 协议完成含附件的第一轮；第二轮模型夹具只发一段文字，保持连接。在用户接口确认这段文字后发出 Stop，验证真实上游 TCP 连接在夹具主动结束前断开，并保存部分回复。
+2. 用同一镜像和数据卷重建，改用 Anthropic 协议并授权一份只读快照；旧登录须失效，新登录可打开合成文档。模型实际收到的续聊历史须含原附件和刚刚停止的文字。
+3. 停止已授权实例，撤下挂载，再用基础配置重建。旧文档 ID 返回 `404`；在原会话上用默认的 OpenAI Chat Completions 协议再发一条消息，须收到实际回复。三次启动均须从宿主发布的回环端口验证健康和登录，且容器 ID 各异、镜像 ID 一致、使用原命名卷。
+
+**通过标准是退出码为 `0` 且回执为 `kind: deva-native-compose-v1`、`status: passed` 和 `cleanup: verified`。** 回执记录实际检出的 Git 提交、镜像内容 ID、三个容器 ID 与引擎版本，不含令牌、Cookie、文档 ID 或正文。程序只清理本次已核对归属的容器、网络、卷、镜像标签和暂存目录，不清空共享构建缓存。失败会在标准错误报告阶段与原因；预检、ARM64 运行、模拟输入测试、仅解析 Compose 配置都不是成品回执。CI 使用同一命令，只上传成功回执。
+
 ## 从源码验证
 
 ```bash
