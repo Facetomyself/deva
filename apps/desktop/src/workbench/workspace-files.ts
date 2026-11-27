@@ -25,10 +25,38 @@ export type WorkspaceFilesView = {
   dirty: boolean
   anyDirty: boolean
   writable: boolean
+  folder?: string
+  folderFocus: number
+  folderIssue?: 'missing'
+  blockedDocumentPaths: ReadonlySet<string>
   issue?: 'expired' | 'replaced'
 }
 
-function parentOf(path: string): string { return path.slice(0, Math.max(0, path.lastIndexOf('/'))) }
+export function parentOf(path: string): string { return path.slice(0, Math.max(0, path.lastIndexOf('/'))) }
+
+function folderChain(path: string): string[] | undefined {
+  if (path === '') return []
+  const names = path.split('/')
+  if (names.some((name) => !name || name === '.' || name === '..' || /^[A-Za-z]:/u.test(name) || /[\\\x00-\x1f\x7f-\x9f]/u.test(name))) return
+  return names.map((_, index) => names.slice(0, index + 1).join('/'))
+}
+
+function enumeratedFolder(view: Pick<WorkspaceFilesView, 'directories' | 'expanded'>, path: string, visible = false): boolean {
+  const chain = folderChain(path)
+  return !!chain && !!view.directories.get('')?.data && chain.every((child) => {
+    const parent = parentOf(child)
+    return (!visible || parent === '' || view.expanded.has(parent)) &&
+      view.directories.get(parent)?.data?.entries.some((entry) => entry.path === child && entry.type === 'dir')
+  })
+}
+
+/** Creation requires both the authorized mount and a listed, visible, writable directory. */
+export function writableDocumentFolders(view: WorkspaceFilesView): string[] {
+  if (view.issue || !view.projects.data?.some(({ id }) => id === view.projectId) || !view.directories.get('')?.data) return []
+  return [...view.directories].filter(([path, state]) => state.data?.path === path && state.data.writable &&
+    enumeratedFolder(view, path, true)).map(([path]) => path)
+}
+
 
 export function isDirty(file: FileDraft): boolean {
   return file.text !== undefined && (file.disk?.kind !== 'text' || file.text !== file.disk.content)
@@ -45,6 +73,12 @@ export function createWorkspaceFiles(api: WorkspaceTransport) {
   let projectId = ''
   let directories = new Map<string, FetchState<WorkspaceDirectory>>()
   let expanded = new Set<string>()
+  let folder: string | undefined
+  let folderFocus = 0
+  let folderIssue: WorkspaceFilesView['folderIssue']
+  let folderAction = 0
+  const blockedDocuments = new Map<string, Set<string>>()
+  let directoryRequests = new Map<string, Promise<void>>()
   let expired = false
   let dirGeneration = 0
   let reading: { id: string; path: string } | undefined
@@ -62,7 +96,8 @@ export function createWorkspaceFiles(api: WorkspaceTransport) {
     const file = getFile(projectId, activePaths.get(projectId) ?? '')
     const issue = projectIssue()
     return {
-      projects, projectId, directories, expanded, file, issue,
+      projects, projectId, directories, expanded, file, issue, folder, folderFocus, folderIssue,
+      blockedDocumentPaths: new Set(blockedDocuments.get(projectId)),
       drafts: Array.from(files.get(projectId)?.values() ?? []).filter(isDirty).map((d) => d.path),
       dirty: file ? isDirty(file) : false,
       anyDirty: Array.from(files.values()).some((docs) => Array.from(docs.values()).some(isDirty)),
@@ -97,6 +132,8 @@ export function createWorkspaceFiles(api: WorkspaceTransport) {
         dirGeneration++
         directories = new Map()
         expanded = new Set()
+        directoryRequests = new Map()
+        folder = undefined
       }
       return 'replaced'
     }
@@ -136,45 +173,70 @@ export function createWorkspaceFiles(api: WorkspaceTransport) {
     emit()
   }
   async function list(path: string, refresh = false, signal?: AbortSignal): Promise<void> {
-    if (signal?.aborted || !projectId || projectIssue() || directories.get(path)?.pending || (!refresh && directories.get(path)?.data)) return
+    if (signal?.aborted || !projectId || projectIssue() || (!refresh && directories.get(path)?.data)) return
+    const existing = directoryRequests.get(path)
+    if (existing) return existing
     const id = projectId
     const generation = dirGeneration
+    const requests = directoryRequests
+    const previous = directories.get(path)
+    const request = Promise.resolve().then(async (): Promise<void> => {
+      try {
+        const data = await (signal ? api.list(id, path, signal) : api.list(id, path))
+        if (generation === dirGeneration && requests.get(path) === request)
+          directory(path, signal?.aborted ? previous ?? {} : { data })
+      } catch (error) {
+        if (signal?.aborted) {
+          if (generation === dirGeneration && requests.get(path) === request) directory(path, previous ?? {})
+          return
+        }
+        if (generation === dirGeneration && requests.get(path) !== request) return
+        const issue = failed(error, 'readFailure', id)
+        if (generation === dirGeneration) directory(path, { issue })
+        else emit()
+      } finally { if (requests.get(path) === request) requests.delete(path) }
+    })
+    requests.set(path, request)
     directory(path, { pending: true })
-    try {
-      const data = await (signal ? api.list(id, path, signal) : api.list(id, path))
-      if (!signal?.aborted && generation === dirGeneration) directory(path, { data })
-    } catch (error) {
-      if (signal?.aborted) return
-      const issue = failed(error, 'readFailure', id)
-      if (generation === dirGeneration) directory(path, { issue })
-      else emit()
-    }
+    return request
   }
 
-  function select(id: string, signal?: AbortSignal): Promise<void> | undefined {
+  function select(id: string, signal?: AbortSignal, browse = true): Promise<void> | undefined {
     if (signal?.aborted || id === projectId || (id && !projects.data?.some((project) => project.id === id))) return
     cancelRead()
     projectId = id
     dirGeneration++
     directories = new Map()
+    directoryRequests = new Map()
     expanded = new Set()
+    folder = undefined
+    folderIssue = undefined
+    folderAction++
     emit()
-    return list('', false, signal)
+    return browse ? list('', false, signal) : undefined
+  }
+  function chooseFolder(path: string): void {
+    if (projectIssue() || !enumeratedFolder(view, path, true)) return
+    folder = path
+    folderIssue = undefined
+    folderAction++
+    emit()
   }
   function toggle(path: string): Promise<void> | undefined {
-    if (projectIssue() || !path) return
+    if (projectIssue() || !path || !folderChain(path)) return
     const next = new Set(expanded)
     if (next.has(path)) next.delete(path)
     else next.add(path)
     expanded = next
-    emit()
+    if (enumeratedFolder(view, path, true)) chooseFolder(path)
+    else emit()
     return next.has(path) ? list(path) : undefined
   }
 
   async function reload(): Promise<void> {
     const id = projectId
     const path = activePaths.get(id)
-    if (projectIssue() || !path || view.file?.pending) return
+    if (projectIssue() || !path || view.file?.pending || blockedDocuments.get(id)?.has(path)) return
     const previous = getFile(id, path) ?? { path }
     const token = { id, path }
     reading = token
@@ -201,13 +263,124 @@ export function createWorkspaceFiles(api: WorkspaceTransport) {
     }
   }
   function openFile(path: string): Promise<void> | undefined {
-    if (!projectId || !path || (projectIssue() && !getFile(projectId, path))) return
-    if (activePaths.get(projectId) !== path) {
+    if (!projectId || !path || blockedDocuments.get(projectId)?.has(path) || (projectIssue() && !getFile(projectId, path))) return
+    if (activePaths.get(projectId) !== path || folder !== undefined || folderIssue) {
       cancelRead()
       activePaths.set(projectId, path)
+      folder = undefined
+      folderIssue = undefined
+      folderAction++
       emit()
     }
     return !view.file?.disk && !view.file?.issue ? reload() : undefined
+  }
+
+  function markFolder(path: string, chain: string[]): void {
+    expanded = new Set([...expanded, ...chain])
+    folder = path
+    folderIssue = undefined
+    folderFocus++
+    emit()
+  }
+
+  /** Resolve only a project-relative directory that the owner list can actually enumerate. */
+  async function revealFolder(id: string, path: string, signal?: AbortSignal): Promise<boolean> {
+    const chain = folderChain(path)
+    if (!chain || id !== projectId || !projects.data?.some((project) => project.id === id)) return false
+    const action = ++folderAction
+    const generation = dirGeneration
+    const current = (): boolean => !signal?.aborted && action === folderAction && generation === dirGeneration &&
+      id === projectId && !projectIssue() && !!projects.data?.some((project) => project.id === id)
+    if (!current()) return false
+    const fresh = new Map<string, WorkspaceDirectory>()
+    let missing: string | undefined
+    for (const target of ['', ...chain]) {
+      missing = target
+      if (target && !fresh.get(parentOf(target))?.entries.some((entry) => entry.type === 'dir' && entry.path === target)) break
+      try {
+        const listing = await (signal ? api.list(id, target, signal) : api.list(id, target))
+        if (!current()) return false
+        if (listing.path !== target) break
+        fresh.set(target, listing)
+        missing = undefined
+      } catch (error) {
+        if (!current()) return false
+        failed(error, 'readFailure', id)
+        if (projectIssue()) { emit(); return false }
+        break
+      }
+    }
+    const next = new Map(directories)
+    if (missing !== undefined) {
+      for (const candidate of next.keys()) {
+        if (missing === '' || candidate === missing || candidate.startsWith(`${missing}/`)) {
+          next.delete(candidate)
+          directoryRequests.delete(candidate)
+        }
+      }
+    }
+    for (const [target, listing] of fresh) {
+      directoryRequests.delete(target)
+      next.set(target, { data: listing })
+    }
+    directories = next
+    if (missing !== undefined) {
+      if (folder !== undefined && (!directories.get(folder)?.data || !enumeratedFolder({ directories, expanded }, folder))) folder = undefined
+      folderIssue = 'missing'
+      emit()
+      return false
+    }
+    markFolder(path, chain)
+    return true
+  }
+
+  function revealContainingFolder(signal?: AbortSignal): Promise<boolean> | undefined {
+    const path = view.file?.path
+    if (!path || !folderChain(path)) return
+    return revealFolder(projectId, parentOf(path), signal)
+  }
+
+  function reportDocumentFailure(error: unknown, id: string): void {
+    if (id === projectId) { failed(error, 'readFailure', id); emit() }
+  }
+
+  function blockDocumentPath(id: string, path: string, block: boolean): void {
+    let paths = blockedDocuments.get(id)
+    if (!paths && block) blockedDocuments.set(id, paths = new Set())
+    if (paths?.has(path) === block || !paths) return
+    if (block) paths.add(path)
+    else paths.delete(path)
+    if (id === projectId) emit()
+  }
+
+  /** Re-read the directory row and text receipt. An ordinary file read never substitutes for a create receipt. */
+  async function verifyCreatedDocument(id: string, path: string, content: string, revision: string, active: () => boolean): Promise<boolean> {
+    const parent = parentOf(path)
+    const chain = folderChain(parent)
+    const generation = dirGeneration
+    const current = (): boolean => generation === dirGeneration && projectId === id && !projectIssue() && active() &&
+      !!projects.data?.some((project) => project.id === id) && enumeratedFolder(view, parent)
+    if (!current() || !chain) return false
+    const directory = await api.list(id, parent)
+    if (!current() || directory.path !== parent || !directory.entries.some((entry) => entry.type === 'file' && entry.path === path)) return false
+    const disk = await api.read(id, path)
+    if (!current() || disk.kind !== 'text' || disk.path !== path || disk.content !== content || disk.revision !== revision) return false
+    const pendingList = directoryRequests.get(parent)
+    if (pendingList) {
+      await pendingList
+      if (!current()) return false
+    }
+    const cached = getFile(id, path)
+    // A kept edit for that path belongs to the old file, not to a newly confirmed one.
+    if (cached && isDirty(cached)) return false
+    cancelRead()
+    directories = new Map(directories).set(parent, { data: directory })
+    blockedDocuments.get(id)?.delete(path)
+    setFile(id, path, { path, disk, text: disk.content, parentWritable: directory.writable, saved: true })
+    activePaths.set(id, path)
+    folderAction++
+    markFolder(parent, chain)
+    return true
   }
 
   // Reuse the same project, directory and reader checks as the manual file panel.
@@ -284,7 +457,8 @@ export function createWorkspaceFiles(api: WorkspaceTransport) {
   return {
     snapshot: () => view,
     subscribe(notify: () => void): () => void { listeners.add(notify); return () => { listeners.delete(notify) } },
-    loadProjects, select, list, toggle, openFile, reveal, reload, edit, review, canSave, save
+    loadProjects, select, list, toggle, openFile, reveal, reload, edit, review, canSave, save,
+    chooseFolder, revealFolder, revealContainingFolder, reportDocumentFailure, blockDocumentPath, verifyCreatedDocument
   }
 }
 
@@ -300,9 +474,9 @@ export async function openWorkspaceProject(files: WorkspaceFiles, id: string, si
   signal.addEventListener('abort', () => {
     if (files.snapshot().projectId === id) void files.select('')
   }, { once: true })
-  await (files.select(id, signal) ?? files.list('', false, signal))
+  void files.select(id, signal, false)
+  const revealed = await files.revealFolder(id, '', signal)
   if (signal.aborted) return false
-  const view = files.snapshot()
-  if (view.issue === 'expired') throw new HttpFailure(401)
-  return view.projectId === id && !view.issue
+  if (files.snapshot().issue === 'expired') throw new HttpFailure(401)
+  return revealed
 }

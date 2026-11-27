@@ -14,7 +14,7 @@ export interface Bootstrap {
   config: RecordValue
   csrf: string
   expiresAt: number
-  capabilities?: { textChat?: true; library?: true; workspaceFiles?: true; attachments?: true; browserPanel?: true; sessionPreferences?: true; deliveries?: true; gitInspect?: true; sessionWorkspaces?: true; taskInspection?: true; terminalViewer?: true; skillLibrary?: true }
+  capabilities?: { textChat?: true; library?: true; workspaceFiles?: true; workspaceDocumentCreate?: true; attachments?: true; browserPanel?: true; sessionPreferences?: true; deliveries?: true; gitInspect?: true; sessionWorkspaces?: true; taskInspection?: true; terminalViewer?: true; skillLibrary?: true }
 }
 
 export type SessionScreen = { mode: 'authenticated'; bootstrap: Bootstrap } | { mode: 'claim' | 'login' }
@@ -61,8 +61,10 @@ export function captureClaim(location: Pick<Location, 'hash' | 'pathname' | 'sea
   return values.length === 1 && values[0] ? values[0] : undefined
 }
 
+type ExpectedStatus = number | ((status: number, body: unknown) => boolean)
+
 export function createTransport(send: Fetch = fetch) {
-  async function fetchJson(path: string, init: RequestInit, referrerPolicy: ReferrerPolicy = 'no-referrer', expectedStatus?: number): Promise<unknown> {
+  async function fetchJson(path: string, init: RequestInit, referrerPolicy: ReferrerPolicy = 'no-referrer', expectedStatus?: ExpectedStatus): Promise<unknown> {
     const response = await send(prefix + path, {
       ...init, credentials: 'same-origin', mode: 'same-origin', redirect: 'error',
       cache: 'no-store', referrerPolicy
@@ -72,15 +74,17 @@ export function createTransport(send: Fetch = fetch) {
       const code = record(failure) ? failure.error ?? failure.code : undefined
       throw new HttpFailure(response.status, typeof code === 'string' ? code : undefined)
     }
-    if (expectedStatus !== undefined && response.status !== expectedStatus) {
+    if (typeof expectedStatus === 'number' && response.status !== expectedStatus) {
       void response.body?.cancel().catch(() => {})
       throw new Error('Unexpected HTTP status')
     }
-    return response.status === 204 ? undefined : response.json()
+    const result: unknown = response.status === 204 ? undefined : await response.json()
+    if (typeof expectedStatus === 'function' && !expectedStatus(response.status, result)) throw new Error('Unexpected HTTP status')
+    return result
   }
 
   function request(path: string, method = 'GET', body?: unknown, csrf?: string, options?: {
-    signal?: AbortSignal; referrerPolicy?: ReferrerPolicy; expectedStatus?: number; keepalive?: boolean
+    signal?: AbortSignal; referrerPolicy?: ReferrerPolicy; expectedStatus?: ExpectedStatus; keepalive?: boolean
   }): Promise<unknown> {
     const headers: Record<string, string> = { accept: 'application/json' }
     if (body !== undefined) headers['content-type'] = 'application/json'
@@ -122,6 +126,7 @@ export function createTransport(send: Fetch = fetch) {
       if (result.capabilities.textChat === true) capabilities.textChat = true
       if (result.capabilities.library === true) capabilities.library = true
       if (result.capabilities.workspaceFiles === true) capabilities.workspaceFiles = true
+      if (result.capabilities.workspaceDocumentCreate === true) capabilities.workspaceDocumentCreate = true
       if (result.capabilities.attachments === true) capabilities.attachments = true
       if (result.capabilities.browserPanel === true) capabilities.browserPanel = true
       if (result.capabilities.sessionPreferences === true) capabilities.sessionPreferences = true

@@ -133,7 +133,7 @@ test('the real Workbench mounts only the task main alongside the rail and restor
     './browser-manual', './browser-panel', './browser-transport', './deliveries-transport',
     './git-view-controller', './git-view-transport', './library-memory', './library-transport', './library-workspace',
     './session-preference-ui', './session-workspace-transport', './workspace-dialog', './workspace-files', './workspace-transport',
-    './terminal-view-controller', './terminal-view-transport',
+    './terminal-view-controller', './terminal-view-transport', './project-document-controller', './project-document-transport',
     '../renderer/src/redesign/ConvMessage', './text-workbench.css'
   ].map(name => [name, {}]))
   const { default: TextWorkbench } = await load('workbench/text-workbench.tsx', {

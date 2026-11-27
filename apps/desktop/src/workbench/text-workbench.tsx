@@ -28,6 +28,8 @@ import { createGitViewTransport } from './git-view-transport'
 import { ProjectMemoryDialog } from './library-memory'
 import { createLibrary, type Roster } from './library-transport'
 import { LibraryWorkspace, type LibraryPanel } from './library-workspace'
+import { createProjectDocuments } from './project-document-controller'
+import { createProjectDocumentTransport } from './project-document-transport'
 import { exceedsDraftLimit } from './quote-draft'
 import { createPreferenceTransport, matchesPreferences, projectSession } from './session-preferences'
 import { SessionHeaderActions, SessionModelPicker, SessionPreferenceStatus, SessionRenameDialog } from './session-preference-ui'
@@ -108,6 +110,9 @@ export default function TextWorkbench({ transport, bootstrap, beforeWrite, onExp
   const filesEnabled = bootstrap.capabilities?.workspaceFiles === true
   const files = useMemo(() => filesEnabled ? createWorkspaceFiles(createWorkspaceTransport(transport, bootstrap.csrf)) : undefined,
     [filesEnabled, transport, bootstrap.csrf])
+  const documents = useMemo(() => files ? createProjectDocuments(files, createProjectDocumentTransport(transport, bootstrap.csrf)) : undefined,
+    [files, transport, bootstrap.csrf])
+  const documentsEnabled = !locked && bootstrap.capabilities?.workspaceDocumentCreate === true
   const gitEnabled = filesEnabled && bootstrap.capabilities?.gitInspect === true
   const git = useMemo(() => gitEnabled ? createWorkspaceGitView(createGitViewTransport(transport, bootstrap.csrf), onExpired) : undefined,
     [gitEnabled, transport, bootstrap.csrf, onExpired])
@@ -331,7 +336,7 @@ export default function TextWorkbench({ transport, bootstrap, beforeWrite, onExp
     {browserOpen && browserVisible && <ManualBrowserDialog api={browserOpen.panel} dismiss={() => setBrowserOpen(undefined)} />}
     {files && <WorkspaceFilesPanel open={filesOpen || (!!sid && locatedFilesSid === sid && !locked) || approvedProject?.kind === 'files'}
       close={() => { setFilesOpen(false); setLocatedFilesSid(undefined); binding?.closeProject() }} controller={files} git={locked ? undefined : git}
-      terminal={locked ? undefined : terminal} />}
+      terminal={locked ? undefined : terminal} documents={documents} documentActionsEnabled={documentsEnabled} documentScope={sid ?? undefined} />}
     {library && !panel && !settingsOpen && approvedProject?.kind === 'notes' && <ProjectMemoryDialog
       key={`${workspaceSid}:${approvedProject.workspace.id}`} api={library} locked={locked} notice={notice}
       lockedProject={{ ...approvedProject.workspace, signal: approvedProject.signal }} onClose={() => binding?.closeProject()} />}
