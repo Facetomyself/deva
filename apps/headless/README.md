@@ -87,6 +87,16 @@ docker compose -f compose.yaml -f compose.workspace-edit.yaml -f compose.workspa
 
 文件名最多 200 个 UTF-8 字节，正文最多 2 MiB。只在已授权的现有目录中创建文档；隐藏或含路径分隔符的名字、控制文件、明显凭据内容和执行脚本不在范围内。服务用同目录临时文件、同步写盘及不覆盖目标的硬链接发布，随后从原生文件读回。底层文件系统须支持这些操作；若发布后仍无法确认，保留磁盘现状并报告未确认，不回滚他人文件。不会创建目录、删除文件或把工作区文档交给对话模型。
 
+**独立验证这三种部署权限。** 以下是验收命令，不是启动常驻服务的命令。在专用的原生 Linux/amd64 测试机上，以有本地 Docker 操作权限的普通用户执行；需要 Node 22+、Python 3、Docker Engine 28+、Compose v2，以及 `/tmp` 支持普通用户设置 POSIX ACL。
+
+```sh
+docker build --platform linux/amd64 --target runtime -t deva-workbench:project-documents-verify .
+image_id=$(docker image inspect --format '{{.Id}}' deva-workbench:project-documents-verify)
+node scripts/workbench/container-project-documents.mjs --disposable-image "$image_id"
+```
+
+命令先核对镜像 ID，再使用临时项目和回环端口实测默认、仅编辑、允许新建三种配置，并重建工作台检查数据。测试不使用已有工作区、数据卷和密钥，也不需要 `sudo`。只想在本机检查测试目录与 ACL 能否建立时，可用 `node scripts/workbench/container-project-documents.mjs --fixture-only`；该命令没有运行 Docker，结果不计入容器部署验收。
+
 ### 在真实 PTY 中查看已保存的文本
 
 需要终端式分页时，可给已授权的工作区增加[只读 TTY 查看器](../terminal-worker/README.md)。在 `compose.yaml` 与 `compose.workspaces.yaml` 之后再加入 `-f compose.terminal.yaml`，然后从已打开的文件选择 **打开 TTY 查看器**。只有这一点击才会把经版本核对的文本快照送入隔离工作器。在窗口内可以翻页、调整行列和退出；它不会启动宿主 shell 或把输入发送给模型。工作器离线只影响这个可选入口。

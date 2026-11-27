@@ -1,4 +1,5 @@
-// Run on disposable hosted Linux/amd64 only. --fixture-only exercises the fixture without Docker.
+// Native Linux/amd64 acceptance. A manual run on a disposable local runner must pin
+// the expected image ID explicitly. --fixture-only never contacts Docker.
 import { execFile, spawnSync } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
 import { chmod, lstat, mkdir, readdir, realpath } from 'node:fs/promises'
@@ -379,11 +380,11 @@ async function persistence({ wid, base, edit }) {
   return `${first.slice(0, 12)} → ${second.slice(0, 12)}`
 }
 
-async function main(fixtureOnly) {
+async function main(fixtureOnly, expectedImage) {
   check(process.platform === 'linux' && Number.isInteger(hostUid) && hostUid > 0 && hostUid < 2 ** 32 - 1 &&
     (fixtureOnly || process.arch === 'x64'), 'Expected nonroot Linux (amd64 for Docker)')
-  if (!fixtureOnly) {
-    check(process.env.GITHUB_ACTIONS === 'true' && process.env.RUNNER_ENVIRONMENT === 'github-hosted', 'Expected a disposable GitHub-hosted runner')
+  if (!fixtureOnly && !expectedImage) {
+    check(process.env.GITHUB_ACTIONS === 'true' && process.env.RUNNER_ENVIRONMENT === 'github-hosted', 'On a disposable local amd64 runner, supply --disposable-image sha256:<64 hex>')
   }
   root = await privateRoot()
   await makeFixture()
@@ -402,6 +403,8 @@ async function main(fixtureOnly) {
   const engine = JSON.parse(await docker(['version', '--format', '{{json .Server}}'], 'Check local Docker engine'))
   check(engine.Os === 'linux' && engine.Arch === 'amd64' && Number(engine.Version.split('.', 1)[0]) >= 28, 'Expected local Linux/amd64 Docker Engine >= 28')
   image = await inspect('image', tag)
+  // Do not create any Docker resource for a mutable tag that no longer resolves to the named image.
+  if (expectedImage) check(image.Id === expectedImage, 'The prebuilt tag differs from the pinned image; no Docker resource was created')
   check(image.Os === 'linux' && image.Architecture === 'amd64' && /^sha256:[a-f0-9]{64}$/u.test(image.Id) && image.Size > 0 &&
     eq(image.Config.Entrypoint, ['node', cli]) && eq(image.Config.Cmd, ['serve']) && image.Config.Env.includes('NODE_ENV=production') &&
     eq(image.Config.Env.filter(v => v.startsWith('DEVA_')).sort(), ['DEVA_HOME=/data', 'DEVA_HOST=127.0.0.1', 'DEVA_MASTER_KEY_FILE=/keys/master.key',
@@ -419,11 +422,15 @@ async function main(fixtureOnly) {
   return `${image.Id} (${image.Size} bytes, linux/amd64); default vs edit-only vs create; ${ids}; native bind, HTTP readback and login invalidation verified`
 }
 
+const usage='Usage: node scripts/workbench/container-project-documents.mjs [--fixture-only | --disposable-image sha256:<64 lowercase hex>]'
 let result
 try {
-  const fixtureOnly = process.argv[2] === '--fixture-only' && process.argv.length === 3
-  check(fixtureOnly || process.argv.length === 2, 'Expected no arguments or --fixture-only')
-  result = await main(fixtureOnly)
+  const args=process.argv.slice(2)
+  const fixtureOnly=args.length===1 && args[0]==='--fixture-only'
+  const expectedImage=args.length===2 && args[0]==='--disposable-image' && args[1].length===71 && /^sha256:[a-f0-9]{64}$/u.test(args[1]) ? args[1] : undefined
+  if (args.length===1 && args[0]==='--help') { console.log(usage);process.exit(0) }
+  check(fixtureOnly || expectedImage || !args.length, usage)
+  result = await main(fixtureOnly,expectedImage)
 } catch (error) {
   console.error(`Project documents gate (${stage}): ${error instanceof CheckFailure ? error.message : error.code ?? error.name}`)
 }
