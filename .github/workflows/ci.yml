@@ -34,7 +34,7 @@ jobs:
 
       - run: pnpm typecheck
 
-      - run: node --test apps/desktop/test/node-session-storage.test.mjs apps/desktop/test/desktop-model-protocols.test.mjs
+      - run: node --test apps/desktop/test/node-session-storage.test.mjs apps/desktop/test/desktop-model-protocols.test.mjs apps/desktop/test/local-text-file.test.mjs
 
       - run: pnpm build
 
