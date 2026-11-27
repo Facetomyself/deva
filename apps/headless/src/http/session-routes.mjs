@@ -53,7 +53,8 @@ export function sessionRoutes({ auth, policy, version, getConfig, capabilities }
             deliveries: capabilities?.deliveries === true, gitInspect: capabilities?.gitInspect === true,
             sessionWorkspaces: capabilities?.sessionWorkspaces === true,
             taskInspection: capabilities?.taskInspection === true, terminalViewer: capabilities?.terminalViewer === true,
-            skillLibrary: capabilities?.skillLibrary === true, workspaceDocumentCreate: capabilities?.workspaceDocumentCreate === true } })
+            skillLibrary: capabilities?.skillLibrary === true, workspaceDocumentCreate: capabilities?.workspaceDocumentCreate === true,
+            conversationStatus: capabilities?.conversationStatus === true } })
         return true
       }
       if (path === '/api/v1/auth/logout') {
