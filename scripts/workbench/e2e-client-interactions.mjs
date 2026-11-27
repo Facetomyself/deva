@@ -1,6 +1,7 @@
 import { randomBytes } from 'node:crypto'
 import { access, lstat, realpath, rm } from 'node:fs/promises'
 import { join } from 'node:path'
+import { openBusiness } from '../../apps/headless/src/business/handlers.mjs'
 import { requestControl } from '../../apps/headless/src/control/socket.mjs'
 import { DEFAULT_WEB_DIR, startWorkbench } from '../../apps/headless/src/server.mjs'
 import {
@@ -58,10 +59,17 @@ function controls(browser, signal) {
   }
 }
 
-async function submitPassword({ browser, ui, password }, mode) {
+async function changeSurface({ browser, ui, writes }, covered, selector, description) {
+  const control = await ui.element(selector, description)
+  writes.cover(covered)
+  await browser.click(control)
+}
+
+async function submitPassword(ctx, mode) {
+  const { browser, ui, password } = ctx
   const input = await ui.element(`.wb-auth input[type="password"][autocomplete="${mode}-password"]`, 'real owner password form')
   await browser.keys(input, password)
-  await ui.click('.wb-auth button[type="submit"]', 'real owner authentication submit')
+  await changeSurface(ctx, false, '.wb-auth button[type="submit"]', 'real owner authentication submit')
   await ui.element(chat, 'authenticated Workbench')
 }
 
@@ -83,22 +91,26 @@ async function assertSelected({ ui }, source) {
 }
 
 async function openSession(ctx, source) {
-  await ctx.ui.click(`${chat} .cf-thread`, 'open the intended chat rail row', source.prompt, '.cf-thread__title')
+  const row = await ctx.ui.element(`${chat} .cf-thread`, 'open the intended chat rail row', source.prompt, '.cf-thread__title')
+  ctx.writes.select(source.sid)
+  await ctx.browser.click(row)
   await assertSelected(ctx, source)
 }
 
 async function sendExplicit(ctx, sid, conversation, reply) {
-  const { browser, ui, mock, signal, sends } = ctx
+  const { browser, ui, mock, writes, signal, sends } = ctx
   const button = await ui.element(send, 'enabled real Send button')
   check(await ui.selected() === sid, 'The deliberate Send is not in its expected chat')
   await phaseGuard(ctx)
   const previous = sends.length
   mock.permitSend(previous, conversation, reply)
+  writes.permitSend(sid)
   await browser.click(button)
   sends.push(sid)
   await mock.waitForReply(sends.length, signal)
   await ui.element(completed, 'real confirmed completed turn')
   await ui.element(assistant, 'rendered exact synthetic model reply', reply)
+  await writes.confirmDisplayed(sid, signal)
   await phaseGuard(ctx)
 }
 
@@ -261,7 +273,7 @@ function sidebarState({ ui }, expanded) {
 
 async function verifyModalShortcut(ctx) {
   const { browser, ui } = ctx
-  await ui.click(hook('workspace-open'), 'open the actual Workspace Files modal')
+  await changeSurface(ctx, true, hook('workspace-open'), 'open the actual Workspace Files modal')
   const close = await ui.element(`${workspace} ${hook('workspace-close')}`, 'open native Workspace Files modal with a noneditable control')
   await browser.shortcut(close, 'sidebar')
   await sidebarState(ctx, true)
@@ -287,7 +299,7 @@ async function verifyModalShortcut(ctx) {
     return arguments[0].value === arguments[1] && document.querySelector(arguments[2])?.disabled;
   `, 'Ctrl+B left the project textarea clean and Save disabled', editor, projectText, `${workspace} ${hook('workspace-save')}`)
   await sidebarState(ctx, true)
-  await ui.click(`${workspace} ${hook('workspace-close')}`, 'explicitly close the workspace modal')
+  await changeSurface(ctx, false, `${workspace} ${hook('workspace-close')}`, 'explicitly close the workspace modal')
   await ui.gone(workspace, 'workspace modal closed')
   await sidebarState(ctx, true)
   await phaseGuard(ctx)
@@ -314,13 +326,13 @@ async function verifyShortcuts(ctx) {
   await phaseGuard(ctx)
   await verifyModalShortcut(ctx)
 
-  await ui.click(hook('tasks-toggle'), 'open the real Tasks surface')
+  await changeSurface(ctx, true, hook('tasks-toggle'), 'open the real Tasks surface')
   await ui.element(hook('tasks-panel'), 'real Tasks panel remains independent of chat')
   await ui.element(hook('task-empty'), 'synthetic Workbench has no saved tasks')
   const close = await ui.element(`${hook('tasks-panel')} ${hook('tasks-close')}`, 'noneditable Tasks control')
   await browser.shortcut(close, 'sidebar')
   await ui.element(`${hook('tasks-toggle')}[aria-expanded="true"]`, 'Ctrl+B left Tasks open')
-  await ui.click(`${hook('tasks-panel')} ${hook('tasks-close')}`, 'explicitly close Tasks')
+  await changeSurface(ctx, false, `${hook('tasks-panel')} ${hook('tasks-close')}`, 'explicitly close Tasks')
   await sidebarState(ctx, true)
   await ui.draft(b.body, 'Tasks open/close and Ctrl+B did not change the chat draft')
   await phaseGuard(ctx)
@@ -358,7 +370,7 @@ async function verifyQuoteLifetime(ctx, stage) {
 
   stage('logout with a live quote and sign in again via the real UI')
   await addQuote(ctx, b)
-  await ui.click(`${chat} ${hook('settings')}`, 'open original Workbench settings')
+  await changeSurface(ctx, true, `${chat} ${hook('settings')}`, 'open original Workbench settings')
   await ui.element(hook('server-platform'), 'Settings labels the Workbench host platform separately', 'Server platform: Linux')
   await ui.click('.wb-chat__logout', 'sign out via the native settings surface')
   await ui.element('.wb-auth input[autocomplete="current-password"]', 'login form following sign-out')
@@ -391,13 +403,14 @@ try {
   mock = await startInteractionModel()
   seed = await seedInteractions(root, mock)
   const { dataDir, keyFile, runDir, workspaceRoot } = seed
+  writes = observeInteractionWrites()
   workbench = await startWorkbench({ dataDir, keyFile, runDir, webDir: DEFAULT_WEB_DIR, port: 0,
-    businessOptions: { allowedOrigins: [mock.origin], workspaceRoot, workspaceWritable: true } })
+    businessFactory: writes.factory(openBusiness), businessOptions: { allowedOrigins: [mock.origin], workspaceRoot, workspaceWritable: true } })
   const { origin, address } = workbench
+  writes.listen(address, origin)
   const ready = await fetch(`${origin}/readyz`, { redirect: 'error', signal: AbortSignal.any([signal, AbortSignal.timeout(5_000)]) })
   await ready.body?.cancel()
   check(address.address === '127.0.0.1' && ready.status === 200, 'Workbench was not ready on loopback')
-  writes = observeInteractionWrites(address.port)
 
   stage('start actual sandboxed ChromeDriver and claim the owner in the browser')
   browser = await startLocalWebDriver({ root, profile: join(root, 'chrome-profile'), origin, signal })
