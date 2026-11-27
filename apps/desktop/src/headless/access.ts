@@ -64,9 +64,9 @@ export function lockHome(): number {
   } catch (err) { closeSync(fd); throw err }
 }
 
-type Session = { expires: number; aborts: Set<() => void> }
+export type OwnerSession = { expires: number; aborts: Set<() => void> }
 export function sessions(owner: Buffer, secure: boolean) {
-  const users = new Map<string, Session>(), name = secure ? '__Host-deva_web' : 'deva_web'
+  const users = new Map<string, OwnerSession>(), name = secure ? '__Host-deva_web' : 'deva_web'
   const cookie = (id: string, seconds: number) => `${name}=${id}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${seconds}${secure ? '; Secure' : ''}`
   const forget = (id: string) => { const s = users.get(id); users.delete(id); for (const stop of s?.aborts ?? []) stop() }
   const idOf = (req: IncomingMessage) => {
