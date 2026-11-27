@@ -2,10 +2,11 @@ import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
 import { randomBytes, randomUUID } from 'node:crypto'
 import { once } from 'node:events'
-import { lstat, mkdtemp, realpath, rm } from 'node:fs/promises'
-import { createServer } from 'node:http'
+import { lstat, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises'
+import { createServer, request as httpRequest } from 'node:http'
 import { tmpdir } from 'node:os'
 import { basename, dirname, isAbsolute, join } from 'node:path'
+import { json as readJson } from 'node:stream/consumers'
 import test from 'node:test'
 import { setTimeout as delay } from 'node:timers/promises'
 import { fileURLToPath } from 'node:url'
@@ -44,7 +45,7 @@ test('compiled headless chat authenticates, streams, stops and resumes stored hi
   const token = randomBytes(32).toString('base64url'), key = randomBytes(24).toString('base64url')
   const calls = [], first = [user('first question'), assistant('complete answer')]
   const stopped = [...first, user('second question'), assistant('visible partial')], third = [...stopped, user('follow-up')]
-  let held, child, cookie, port, origin
+  let completeFirst, completeThird, held, child, cookie, port, origin
   const fixture = createServer(async (req, res) => {
     const call = { method: req.method, path: req.url, auth: req.headers.authorization }
     const n = calls.push(call)
@@ -58,9 +59,11 @@ test('compiled headless chat authenticates, streams, stops and resumes stored hi
         id: 'chatcmpl-fixture', object: 'chat.completion.chunk', created: 1, model, choices: [{ index: 0, delta, finish_reason }]
       })}\n\n`)
       sse({ role: 'assistant', content: ['complete ', stopped[3].text, 'resumed answer'][n - 1] })
+      const done = () => { sse({}, 'stop'); res.end('data: [DONE]\n\n') }
+      if (n === 1) { completeFirst = () => { sse({ content: 'answer' }); done() }; return }
       if (n === 2) { held = res; return } // Leave the actual provider response open until the server aborts it.
-      if (n === 1) sse({ content: 'answer' })
-      sse({}, 'stop'); res.end('data: [DONE]\n\n')
+      if (n === 3) { completeThird = done; return }
+      done()
     } catch (error) { res.destroy(error) }
   })
   async function halt() {
@@ -117,17 +120,18 @@ test('compiled headless chat authenticates, streams, stops and resumes stored hi
     const [data, headers] = await json('/api/login', 200, { body: { token } }), value = headers.get('set-cookie')
     assert.deepEqual(data, { ok: true })
     assert.match(value, /;\s*HttpOnly(?:;|$)/i); assert.match(value, /;\s*SameSite=Strict(?:;|$)/i)
-    cookie = value.split(';')[0]
-    assert.match(cookie, /^[^=;]+=[^=;]+$/)
+    const signed = value.split(';')[0]
+    assert.match(signed, /^[^=;]+=[^=;]+$/)
+    return signed
   }
-  const sessions = '/api/sessions'
+  const sessions = '/api/sessions', archivedList = `${sessions}/archived`
   await boot()
   const web = await request('/')
   assert.equal(web.status, 200); assert.match(web.headers.get('content-type'), /^text\/html\b/)
   assert.match(await web.text(), /<script[^>]+src="\/assets\/[^"/]+\.js"/)
   await error(sessions, 401, 'auth'); await error(sessions, 401, 'auth', { body: {} })
-  await error('/api/login', 401, 'auth', { body: { token: 'wrong' } })
-  await login()
+  await error(archivedList, 401, 'auth'); await error('/api/login', 401, 'auth', { body: { token: 'wrong' } })
+  cookie = await login()
   await error(sessions, 401, 'auth', { headers: { Cookie: `${cookie.split('=')[0]}=wrong` } })
   for (const options of [{ postOrigin: `http://localhost:${port}` }, { postOrigin: null }, { headers: { 'Sec-Fetch-Site': 'cross-site' } }])
     await error(sessions, 403, 'origin', { body: {}, ...options })
@@ -139,13 +143,58 @@ test('compiled headless chat authenticates, streams, stops and resumes stored hi
   const session = `${sessions}/${id}`, turn = `${session}/turns`, stop = `${session}/stop`
   const state = async () => (await json(session))[0], input = (text, revision) => ({ text, revision, turnId: randomUUID() })
   const send = async body => ndjson(await request(turn, { body }))
-  assert.deepEqual(await state(), created); assert.equal(calls.length, 0)
-  await finish(await send(input(first[0].text, 0)), first[1].text, 'complete')
+  const rename = `${session}/title`, archive = `${session}/archive`
+  const post = async (path, body, options) => (await json(path, 200, { body, ...options }))[0]
+  const lists = async (active, archived = []) => {
+    assert.deepEqual((await json(sessions))[0], { model, sessions: active })
+    assert.deepEqual((await json(archivedList))[0], { model, sessions: archived })
+  }
+  const other = { headers: { Cookie: await login() } }
+  assert.notEqual(other.headers.Cookie, cookie)
+  const stale = (await json(session, 200, other))[0]
+  assert.deepEqual(stale, created); assert.deepEqual(await state(), created)
+  await lists([{ id, title }])
+  const cap = `会话 ${'🙂'.repeat(48)}`, name = { title: `\t会话\r\n  ${'🙂'.repeat(49)} overflow `, revision: 0 }
+  for (const [path, body] of [[rename, name], [archive, { archived: true, revision: 0 }]]) {
+    await error(path, 401, 'auth', { body, headers: { Cookie: `${cookie.split('=')[0]}=wrong` } })
+    await error(path, 403, 'origin', { body, postOrigin: `http://localhost:${port}` })
+    await error(path, 403, 'origin', { body, headers: { 'Sec-Fetch-Site': 'cross-site' } })
+    await error(path, 400, 'invalid_request', { body: { ...body, extra: true } })
+  }
+  const renamed = await post(rename, name)
+  assert.deepEqual(renamed, { ...created, title: cap, revision: 1 })
+  await error(rename, 409, 'stale', { ...other, body: { title: 'stale owner edit', revision: stale.revision } })
+  await error(rename, 409, 'stale', { ...other, body: { title: cap, revision: stale.revision } })
+  const empty = await post(rename, { title: '', revision: renamed.revision })
+  assert.deepEqual(empty, { ...created, revision: 2 })
+  const fullTitle = `${cap}界`, pinned = await post(rename, { title: fullTitle, revision: empty.revision })
+  assert.deepEqual(pinned, { ...renamed, title: fullTitle, revision: 3 }); assert.equal(calls.length, 0)
+
+  const opening = input(first[0].text, pinned.revision), openingFrames = await send(opening)
+  assert.deepEqual((await openingFrames.next()).value, { type: 'delta', text: 'complete ' })
+  const live = (await json(session, 200, other))[0], liveTitle = '流式中的标题'
+  assert.deepEqual(live, { ...pinned, active: opening.turnId, messages: first.slice(0, 1), revision: pinned.revision + 1 })
+  const liveRename = await post(rename, { title: liveTitle, revision: live.revision }, other)
+  assert.deepEqual(liveRename, { ...live, title: liveTitle, revision: live.revision + 1 })
+  completeFirst()
+  await finish(openingFrames, 'answer', 'complete')
   const completed = await state()
-  assert.deepEqual(completed, { id, title: completed.title, messages: first, revision: 2, active: null })
+  assert.deepEqual(completed, { ...liveRename, messages: first, revision: liveRename.revision + 1, active: null })
+
+  // Wait for the CLI to accept these headers, but withhold the body until the second turn is active.
+  const race = httpRequest(origin + archive, { method: 'POST', signal: deadline(), headers: {
+    ...other.headers, Origin: origin, 'Content-Type': 'application/json', Expect: '100-continue'
+  } })
+  const continued = once(race, 'continue'), result = once(race, 'response')
+  race.flushHeaders(); await continued
   const second = input(stopped[2].text, completed.revision), frames = await send(second)
   assert.deepEqual((await frames.next()).value, { type: 'delta', text: stopped[3].text })
-  assert.equal((await state()).active, second.turnId)
+  const inFlight = await state()
+  assert.equal(inFlight.active, second.turnId)
+  race.end(JSON.stringify({ archived: true, revision: inFlight.revision }))
+  const [busy] = await result
+  assert.equal(busy.statusCode, 409); assert.deepEqual(await readJson(busy), { error: 'busy' })
+  assert.deepEqual(await state(), inFlight); assert.equal(calls.length, 2)
   const socket = held.socket
   await error(stop, 409, 'stale', { body: { turnId: randomUUID() } })
   assert.equal(socket.destroyed, false)
@@ -153,15 +202,51 @@ test('compiled headless chat authenticates, streams, stops and resumes stored hi
   assert.deepEqual(ack, { ok: true }); assert.ok(socket.destroyed && !held.writableEnded, 'upstream closed before fixture finish')
   await finish(frames, '', 'stopped')
   const saved = await state()
-  assert.deepEqual(saved, { id, title: saved.title, messages: stopped, revision: 4, active: null })
+  assert.deepEqual(saved, { ...completed, messages: stopped, revision: completed.revision + 2 })
   await error(turn, 409, 'stale', { body: input('stale send', completed.revision) }); assert.equal(calls.length, 2)
-  const oldCookie = cookie
-  await halt(); await boot(); await error(sessions, 401, 'auth'); await login()
-  assert.notEqual(cookie, oldCookie); assert.deepEqual(await state(), saved)
-  assert.deepEqual((await json(sessions))[0], { sessions: [{ id, title: saved.title }], model })
-  await finish(await send(input(third[4].text, saved.revision)), 'resumed answer', 'complete')
+  const file = join(home, 'data', 'chats', `${id}.json`)
+  const snapshot = async path => {
+    const { dev, ino, birthtimeNs, mtimeNs, ctimeNs } = await lstat(path, { bigint: true })
+    return { dev, ino, birthtimeNs, mtimeNs, ctimeNs, text: await readFile(path, 'utf8') }
+  }
+  const before = JSON.parse((await snapshot(file)).text)
+  const cleared = await post(rename, { title: ' \t\n ', revision: saved.revision })
+  assert.deepEqual(cleared, { ...saved, title: first[0].text, revision: saved.revision + 1 })
+  const archived = await post(archive, { archived: true, revision: cleared.revision })
+  assert.deepEqual(archived, { ...cleared, archived: true, revision: cleared.revision + 1 })
+  const archivedRow = { id, title: cleared.title, archived: true }
+  await lists([], [archivedRow])
+  const onDisk = await snapshot(file), native = JSON.parse(onDisk.text)
+  assert.equal(native.archived, true)
+  for (const key of ['createdAt', 'updatedAt', 'messages']) assert.deepEqual(native[key], before[key])
+  await error(turn, 409, 'stale', { ...other, body: input('stale archived send', cleared.revision) })
+  await error(archive, 409, 'stale', { ...other, body: { archived: true, revision: cleared.revision } })
+  assert.deepEqual(await post(archive, { archived: true, revision: archived.revision }), archived)
+  assert.deepEqual(await snapshot(file), onDisk); assert.equal(calls.length, 2)
+
+  const oldCookie = cookie, legacyId = 'web_00000000-0000-4000-8000-000000000087', legacyRow = { id: legacyId, title: 'Legacy prompt' }
+  const legacyFile = join(home, 'data', 'chats', `${legacyId}.json`), legacyMessages = [user(legacyRow.title), assistant('Legacy answer')]
+  await halt()
+  await writeFile(legacyFile, JSON.stringify({ ...legacyRow, createdAt: 1, updatedAt: 2, webText: true,
+    messages: legacyMessages.map(({ role, text }) => ({ role, content: [{ type: 'text', text }] })) }), { flag: 'wx', mode: 0o600 })
+  const legacyDisk = await snapshot(legacyFile)
+  await boot(); await error(sessions, 401, 'auth'); cookie = await login()
+  assert.notEqual(cookie, oldCookie); assert.deepEqual(await state(), archived)
+  await lists([legacyRow], [archivedRow])
+  const legacy = { ...legacyRow, messages: legacyMessages, revision: 2, active: null }, legacyPath = `${sessions}/${legacyId}`
+  assert.deepEqual((await json(legacyPath))[0], legacy)
+  assert.deepEqual(await snapshot(legacyFile), legacyDisk); assert.deepEqual(await snapshot(file), onDisk)
+  const resume = input(third[4].text, archived.revision), resumed = await send(resume), finalRow = { id, title: cleared.title }
+  assert.deepEqual((await resumed.next()).value, { type: 'delta', text: 'resumed answer' })
+  assert.deepEqual(await state(), { ...finalRow, messages: third, revision: archived.revision + 1, active: resume.turnId })
+  await lists([finalRow, legacyRow]); completeThird(); await finish(resumed, '', 'complete')
   const final = await state()
-  assert.deepEqual(final, { id, title: final.title, messages: [...third, assistant('resumed answer')], revision: 6, active: null })
+  assert.deepEqual(final, { ...finalRow, messages: [...third, assistant('resumed answer')], revision: archived.revision + 2, active: null })
+  assert.deepEqual(await post(`${legacyPath}/title`, { title: '', revision: legacy.revision }), legacy)
+  assert.deepEqual(await snapshot(legacyFile), legacyDisk); await lists([finalRow, legacyRow])
+  const again = await post(archive, { archived: true, revision: final.revision })
+  assert.deepEqual(await post(archive, { archived: false, revision: again.revision }), { ...final, revision: final.revision + 2 })
+  await lists([finalRow, legacyRow])
   await halt(); assert.equal(calls.length, 3)
   for (const [i, { method, path, auth, body }] of calls.entries()) {
     assert.deepEqual({ method, path, auth }, { method: 'POST', path: '/v1/chat/completions', auth: `Bearer ${key}` })

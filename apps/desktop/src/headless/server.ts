@@ -78,15 +78,27 @@ function start() {
       if (method === 'POST' && path === '/api/logout') {
         await input([]); res.setHeader('Set-Cookie', auth.logout(req)); return json(res, 200, { ok: true })
       }
-      if (path === '/api/sessions') {
-        if (method === 'GET') return json(res, 200, { model: provider.model, sessions: chat.list() })
+      if (path === '/api/sessions' || path === '/api/sessions/archived') {
+        const archived = path.endsWith('/archived')
+        if (method === 'GET') return json(res, 200, { model: provider.model, sessions: chat.list(archived) })
+        if (archived) fail(405, 'method')
         await input([]); return json(res, 201, chat.create())
       }
-      const match = /^\/api\/sessions\/(web_[0-9a-f-]{36})(?:\/(turns|stop))?$/u.exec(path)
+      const match = /^\/api\/sessions\/(web_[0-9a-f-]{36})(?:\/(turns|stop|title|archive))?$/u.exec(path)
       if (!match) return fail(404, 'missing')
       const [, sid, action] = match
       if (!action && method === 'GET') return json(res, 200, chat.read(sid))
       if (method !== 'POST' || !action) fail(405, 'method')
+      if (action === 'title') {
+        const { revision, title } = await input(['revision', 'title'])
+        if (typeof revision !== 'number' || typeof title !== 'string') return fail(400, 'invalid_request')
+        return json(res, 200, chat.edit(sid, revision, { title }))
+      }
+      if (action === 'archive') {
+        const { revision, archived } = await input(['revision', 'archived'])
+        if (typeof revision !== 'number' || typeof archived !== 'boolean') return fail(400, 'invalid_request')
+        return json(res, 200, chat.edit(sid, revision, { archived }))
+      }
       if (action === 'stop') {
         const { turnId } = await input(['turnId']); if (typeof turnId !== 'string') return fail(400, 'invalid_request')
         chat.stop(sid, turnId); return json(res, 200, { ok: true })

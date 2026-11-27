@@ -33,12 +33,27 @@ try {
   const login = await api('login', { token }); cookie = login.headers.get('set-cookie').split(';')[0]; await login.json()
   const sid = existing || (await (await api('sessions', {})).json()).id
   assert.match(sid, /^web_[a-f0-9-]{36}$/u)
-  const path = `sessions/${sid}`, view = await (await api(path)).json()
+  const path = `sessions/${sid}`, title = 'Saved reading notes'
+  let view = await (await api(path)).json()
   assert.deepEqual(view.messages, existing ? first : [])
+  if (existing) {
+    assert.deepEqual((await (await api('sessions/archived')).json()).sessions, [{ id: sid, title, archived: true }])
+    assert.deepEqual((await (await api('sessions')).json()).sessions, [])
+    view = await (await api(`${path}/archive`, { archived: false, revision: view.revision })).json()
+    assert.equal(view.title, title); assert.deepEqual(view.messages, first)
+  }
+  assert.equal(calls, 0)
   const stream = await api(`${path}/turns`, { text: prompt, revision: view.revision, turnId: randomUUID() })
   const events = (await stream.text()).trim().split('\n').map(line => JSON.parse(line))
   assert.deepEqual(events, [{ type: 'delta', text: 'fixture reply' }, { type: 'done', reason: 'complete' }])
   assert.equal(calls, 1)
-  assert.deepEqual((await (await api(path)).json()).messages, [...view.messages, { role: 'user', text: prompt }, { role: 'assistant', text: 'fixture reply' }])
+  const saved = await (await api(path)).json()
+  assert.deepEqual(saved.messages, [...view.messages, { role: 'user', text: prompt }, { role: 'assistant', text: 'fixture reply' }])
+  if (!existing) {
+    const renamed = await (await api(`${path}/title`, { title, revision: saved.revision })).json()
+    const archived = await (await api(`${path}/archive`, { archived: true, revision: renamed.revision })).json()
+    assert.ok(archived.archived); assert.deepEqual(archived.messages, first)
+  }
+  assert.equal(calls, 1)
   console.log(sid)
 } finally { fixture.closeAllConnections(); await new Promise(resolve => fixture.close(resolve)) }

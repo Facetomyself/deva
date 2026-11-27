@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto'
+import { normalizeSessionTitle, SESSION_TITLE_MAX } from '../shared/session-title'
 import { streamOpenAI } from '../main/providers/openai'
 import { deriveTitle, listPlainSessionIds, PlainSessionSyncError, readPlainSession, savePlainSession } from '../main/services/chat-store'
 
@@ -24,8 +25,17 @@ export class ChatError extends Error {
 
 type Role = 'user' | 'assistant'
 type TextMessage = { role: Role; content: [{ type: 'text'; text: string }] }
-type Session = { id: string; title: string; createdAt: number; updatedAt: number; messages: TextMessage[]; webText: true }
-export type View = { id: string; title: string; messages: { role: Role; text: string }[]; revision: number; active: string | null }
+type Session = {
+  id: string; title: string; createdAt: number; updatedAt: number; messages: TextMessage[]; webText: true
+  archived?: true; webEdits?: number; webCustomTitle?: true
+}
+type Row = { id: string; title: string; archived?: true }
+export type View = Row & { messages: { role: Role; text: string }[]; revision: number; active: string | null }
+const sessionKeys = new Set(['id', 'title', 'createdAt', 'updatedAt', 'messages', 'webText', 'archived', 'webEdits', 'webCustomTitle'])
+const maxEdits = Number.MAX_SAFE_INTEGER - 2 * TURNS
+const revisionOf = (s: Session) => s.messages.length + (s.webEdits ?? 0)
+const invalidTitle = /[\u0000-\u001f\u007f\uD800-\uDFFF]/u
+const row = (s: Session): Row => ({ id: s.id, title: s.title, ...(s.archived ? { archived: true } : {}) })
 type Send = { text: string; revision: number; turnId: string }
 type Outcome = 'complete' | 'stopped'
 type Sink = (text: string) => Promise<void>
@@ -41,9 +51,13 @@ function disk<T>(action: () => T): T {
 function load(id: string): Session | undefined {
   // JSON may escape each UTF-8 byte to six ASCII bytes; reserve space for the native envelope.
   const s = disk(() => readPlainSession(id, 6 * HISTORY + 32 * 1024)) as Session | undefined
-  if (!s || s.id !== id || s.webText !== true || Object.keys(s).length !== 6 ||
-      typeof s.title !== 'string' || s.title.length > 31 || !Number.isSafeInteger(s.createdAt) ||
-      !Number.isSafeInteger(s.updatedAt) || !Array.isArray(s.messages) || s.messages.length > 2 * TURNS) return
+  if (!s || s.id !== id || s.webText !== true || Object.keys(s).some(key => !sessionKeys.has(key)) ||
+      (s.archived !== undefined && s.archived !== true) || (s.webCustomTitle !== undefined && s.webCustomTitle !== true) ||
+      (s.webEdits !== undefined && (!Number.isSafeInteger(s.webEdits) || s.webEdits < 1 || s.webEdits > maxEdits)) ||
+      ((s.archived || s.webCustomTitle) && !s.webEdits) ||
+      typeof s.title !== 'string' || s.title.length > (s.webCustomTitle ? SESSION_TITLE_MAX : 31) ||
+      (s.webCustomTitle && (!s.title || invalidTitle.test(s.title) || normalizeSessionTitle(s.title) !== s.title)) ||
+      !Number.isSafeInteger(s.createdAt) || !Number.isSafeInteger(s.updatedAt) || !Array.isArray(s.messages) || s.messages.length > 2 * TURNS) return
   let bytes = 0, users = 0, previous: Role | undefined
   for (const m of s.messages) {
     if (!m || Object.keys(m).length !== 2 || !Array.isArray(m.content) || m.content.length !== 1 ||
@@ -122,8 +136,8 @@ export function createTextChat({ baseURL, model, apiKey }: { baseURL: string; mo
   }
 
   function view(s: Session): View {
-    return { id: s.id, title: s.title, messages: s.messages.map(m => ({ role: m.role, text: m.content[0].text })),
-      revision: s.messages.length, active: active.get(s.id)?.turnId ?? null }
+    return { ...row(s), messages: s.messages.map(m => ({ role: m.role, text: m.content[0].text })),
+      revision: revisionOf(s), active: active.get(s.id)?.turnId ?? null }
   }
 
   function commit(s: Session): void {
@@ -135,9 +149,36 @@ export function createTextChat({ baseURL, model, apiKey }: { baseURL: string; mo
     registry.set(s.id, s)
   }
 
+  // Message admission, the assistant's final write and metadata edits share one durable revision.
+  // Editing a title/archival state is not conversation activity: keep the original list order.
+  function edit(id: string, revision: number, change: { title: string } | { archived: boolean }): View {
+    if (!Number.isSafeInteger(revision) || revision < 0) throw new ChatError('invalid_request')
+    if (closed) throw new ChatError('storage')
+    const s = get(id)
+    if (revision !== revisionOf(s)) throw new ChatError('stale')
+    const next = { ...s }
+    if ('title' in change) {
+      const name = normalizeSessionTitle(change.title)
+      if (invalidTitle.test(name)) throw new ChatError('invalid_request')
+      next.title = name || deriveTitle(s.messages.find(m => m.role === 'user')?.content[0].text ?? '') || 'New chat'
+      if (name) next.webCustomTitle = true
+      else delete next.webCustomTitle
+    } else {
+      if (change.archived && active.has(id)) throw new ChatError('busy')
+      if (change.archived) next.archived = true
+      else delete next.archived
+    }
+    if (next.title === s.title && next.webCustomTitle === s.webCustomTitle && next.archived === s.archived) return view(s)
+    if (s.webEdits === maxEdits) throw new ChatError('limit')
+    next.webEdits = (s.webEdits ?? 0) + 1
+    commit(next)
+    return view(next)
+  }
+
   return {
-    list: () => [...sessions().values()].filter((s): s is Session => !!s)
-      .sort((a, b) => b.updatedAt - a.updatedAt).map(({ id, title }) => ({ id, title })),
+    edit,
+    list: (archived = false) => [...sessions().values()].filter((s): s is Session => !!s && !!s.archived === archived)
+      .sort((a, b) => b.updatedAt - a.updatedAt).map(row),
     create(): View {
       if (closed) throw new ChatError('storage')
       if (sessions().size >= SESSIONS) throw new ChatError('limit')
@@ -159,13 +200,14 @@ export function createTextChat({ baseURL, model, apiKey }: { baseURL: string; mo
       if (closed) throw new ChatError('storage')
       const s = get(id)
       if (active.has(id)) throw new ChatError('busy')
-      if (s.messages.length !== input.revision) throw new ChatError('stale')
+      if (revisionOf(s) !== input.revision) throw new ChatError('stale')
       if (active.size >= CONCURRENT) throw new ChatError('busy')
       if (s.messages.filter(m => m.role === 'user').length >= TURNS ||
           s.messages.reduce((sum, m) => sum + Buffer.byteLength(m.content[0].text), bytes + OUTPUT) > HISTORY)
         throw new ChatError('limit')
-      const next = { ...s, updatedAt: Date.now(), title: s.messages.length ? s.title : deriveTitle(text),
+      const next = { ...s, updatedAt: Date.now(), title: s.messages.length || s.webCustomTitle ? s.title : deriveTitle(text),
         messages: [...s.messages, message('user', text)] }
+      delete next.archived // As on desktop, an explicitly accepted new turn reopens an archived conversation.
       const controller = new AbortController()
       let stopped = false, running: Promise<Outcome> | undefined
       const release = () => { clearTimeout(timer); if (active.get(id) === turn) active.delete(id) }
@@ -209,7 +251,10 @@ export function createTextChat({ baseURL, model, apiKey }: { baseURL: string; mo
         } finally {
           controller.abort()
           try {
-            if (output) commit({ ...next, updatedAt: Date.now(), messages: [...next.messages, message('assistant', output)] })
+            if (output) {
+              const latest = get(id) // A second owner window may have renamed the conversation during streaming.
+              commit({ ...latest, updatedAt: Date.now(), messages: [...latest.messages, message('assistant', output)] })
+            }
           } finally { release() }
         }
       }
