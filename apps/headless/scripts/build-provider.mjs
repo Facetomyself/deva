@@ -25,6 +25,9 @@ await mkdir(dest, { recursive: true })
 await compile('provider-core', 'apps/desktop/src/main/providers/core.ts')
 await compile('chat-core', 'apps/headless/scripts/chat-core.ts')
 await compile('library-core', 'apps/headless/scripts/library-core.ts')
+await compile('context-limits', 'apps/headless/scripts/context-limits.ts', {
+  pureInputs: ['apps/headless/scripts/context-limits.ts','apps/desktop/src/shared/context.ts']
+})
 const services = 'apps/desktop/src/main/services/'
 await compile('schedule-core', `${services}schedule-preview.ts`, {
   pureInputs: ['schedule-preview.ts', 'schedule.ts', 'tasks-types.ts'].map(file => `${services}${file}`)
